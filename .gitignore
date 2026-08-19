@@ -29,4 +29,4 @@ unknown/
 
 Thumbs.db
 .DS_Store
-"@ | Set-Content .gitignore
+"@ | Set-Content .gitignoreconfig.yaml

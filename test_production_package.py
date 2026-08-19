@@ -26,12 +26,58 @@ def test_api_endpoints():
         '--port', '8001'
     ], cwd=os.getcwd())
 
-    # Wait for server to start
-    time.sleep(5)
+    # Poll /health until it responds or timeout
+    base_url = "http://127.0.0.1:8001"
+    health_timeout = 120  # seconds
+    health_poll_interval = 0.5
+    start_time = time.time()
+    
+    print("Waiting for /health endpoint to become available...")
+    while time.time() - start_time < health_timeout:
+        try:
+            response = requests.get(f"{base_url}/health", timeout=2)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('status') == 'ok':
+                    print("✓ Health endpoint working")
+                    break
+        except requests.exceptions.RequestException:
+            pass
+        time.sleep(health_poll_interval)
+    else:
+        # If we get here, health check timed out
+        process.terminate()
+        process.wait()
+        raise TimeoutError(f"/health endpoint did not become available within {health_timeout} seconds")
+
+    # Poll /ready until it reports ready or timeout
+    ready_timeout = 180  # seconds
+    ready_poll_interval = 1.0
+    start_time = time.time()
+    
+    print("Waiting for /ready endpoint to report ready...")
+    while time.time() - start_time < ready_timeout:
+        try:
+            response = requests.get(f"{base_url}/ready", timeout=2)
+            if response.status_code == 200:
+                data = response.json()
+                # Check for 'status' field which is what the endpoint actually returns
+                if data.get('status') == 'ready':
+                    print("✓ Ready endpoint reports ready")
+                    break
+            elif response.status_code == 503:
+                # Still initializing, continue polling
+                pass
+        except requests.exceptions.RequestException:
+            pass
+        time.sleep(ready_poll_interval)
+    else:
+        # If we get here, ready check timed out
+        process.terminate()
+        process.wait()
+        raise TimeoutError(f"/ready endpoint did not report ready within {ready_timeout} seconds")
 
     try:
-        base_url = "http://127.0.0.1:8001"
-
         # Test 1: Health endpoint
         print("\n1. Testing /health endpoint...")
         response = requests.get(f"{base_url}/health")
@@ -149,14 +195,14 @@ def test_api_endpoints():
         # Test 8: Personnel endpoints (existing functionality)
         print("\n8. Testing personnel endpoints...")
         personnel_data = {
-            "employee_code": "TEST001",
+            "employee_code": f"TEST{int(time.time()) % 10000:04d}",
             "full_name": "Test User",
             "role": "WORKER"
         }
         response = requests.post(f"{base_url}/api/v1/personnel", json=personnel_data)
         assert response.status_code == 200
         person = response.json()
-        assert person['employee_code'] == "TEST001"
+        assert person['employee_code'] == personnel_data['employee_code']
         print("✓ Personnel creation working")
 
         # Test 9: Attendance endpoints (existing functionality)

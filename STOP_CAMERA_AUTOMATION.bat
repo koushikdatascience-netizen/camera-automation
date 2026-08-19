@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 SETLOCAL
 
 REM Camera Automation Stop Script
