@@ -1,0 +1,17 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.8
+PyYAML>=6.0
+numpy>=1.26
+opencv-python>=4.9
+python-multipart>=0.0.9
+httpx>=0.27
+pytest>=8.0
+# Production CV (install on deployment machine):
+ultralytics>=8.3
+insightface>=0.7.3
+onnxruntime>=1.18
+eval-type-backport>=0.4.0
+
+# Build dependencies
+pyinstaller>=6.0
