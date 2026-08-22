@@ -374,7 +374,7 @@ class CameraManager:
                 except subprocess.TimeoutExpired:
                     process.kill()
 
-    def _annotate_tracking_frame(self, frame, model_path: str):
+    def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None):
         try:
             model = self._tracking_models.get(model_path)
             if model is None:
@@ -414,6 +414,34 @@ class CameraManager:
                 cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 220), y1), color, -1)
                 cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
 
+            if face_service is not None and recognition_config is not None:
+                try:
+                    for face in face_service.detect(frame):
+                        x1, y1, x2, y2 = [int(v) for v in face["bbox"]]
+                        match, score = face_service.recognize(
+                            face.get("embedding"),
+                            recognition_config.known_threshold,
+                        )
+                        if match:
+                            text = f"{match['full_name']} {score:.2f}"
+                            color = (255, 180, 0)
+                        else:
+                            text = f"Unknown face {score:.2f}"
+                            color = (0, 0, 255)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 240), y1), color, -1)
+                        cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+                except Exception as exc:
+                    cv2.putText(
+                        frame,
+                        f"Face overlay unavailable: {exc}",
+                        (20, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.65,
+                        (0, 0, 255),
+                        2,
+                    )
+
             return frame
         except Exception as exc:
             self._tracking_error = str(exc)
@@ -428,8 +456,8 @@ class CameraManager:
             )
             return frame
 
-    def _encode_tracking_frame(self, frame, model_path: str) -> Optional[bytes]:
-        annotated = self._annotate_tracking_frame(frame, model_path)
+    def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None) -> Optional[bytes]:
+        annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config)
         ok, encoded = cv2.imencode(".jpg", annotated)
         if not ok:
             return None
@@ -731,14 +759,14 @@ class CameraManager:
         finally:
             cap.release()
 
-    def iter_tracking_mjpeg(self, rtsp_url: str, model_path: str):
+    def iter_tracking_mjpeg(self, rtsp_url: str, model_path: str, face_service=None, recognition_config=None):
         """Yield browser-preview MJPEG frames with YOLO tracking overlays."""
         if self._is_dshow_source(rtsp_url):
             for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=6):
                 frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if frame is None:
                     continue
-                encoded = self._encode_tracking_frame(frame, model_path)
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config)
                 if encoded:
                     yield (
                         b"--frame\r\n"
@@ -754,7 +782,7 @@ class CameraManager:
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     break
-                encoded = self._encode_tracking_frame(frame, model_path)
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config)
                 if encoded:
                     yield (
                         b"--frame\r\n"

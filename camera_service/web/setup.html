@@ -526,7 +526,13 @@
                     </div>
 
                     <div class="form-group">
-                        <button type="submit" class="btn btn-primary">ADD PERSON</button>
+                        <label for="person-face-image">Face Image</label>
+                        <input type="file" id="person-face-image" class="form-control" accept="image/jpeg,image/png,image/webp">
+                        <small>Use a clear front-facing image with one face. You can add or replace this later with Enroll Face.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <button type="submit" class="btn btn-primary" id="person-save-btn">ADD PERSON</button>
                         <button type="button" class="btn btn-secondary" id="cancel-person-btn">CANCEL</button>
                     </div>
                 </form>
@@ -612,6 +618,7 @@
         // API Base URL
         const API_BASE = '/api/v1';
         let editingCameraId = null;
+        let editingPersonId = null;
 
         // DOM Elements
         const sections = {
@@ -1086,11 +1093,31 @@
                     activeCell.textContent = person.active ? 'Yes' : 'No';
 
                     const actionsCell = document.createElement('td');
+                    const editBtn = document.createElement('button');
+                    editBtn.className = 'btn btn-secondary';
+                    editBtn.textContent = 'Edit';
+                    editBtn.addEventListener('click', () => editPerson(person));
+
                     const enrollBtn = document.createElement('button');
                     enrollBtn.className = 'btn btn-primary';
                     enrollBtn.textContent = 'Enroll Face';
                     enrollBtn.addEventListener('click', () => enrollFace(person.id));
+
+                    const facesBtn = document.createElement('button');
+                    facesBtn.className = 'btn btn-secondary';
+                    facesBtn.textContent = 'Faces';
+                    facesBtn.addEventListener('click', () => showPersonFaces(person.id));
+
+                    const deactivateBtn = document.createElement('button');
+                    deactivateBtn.className = 'btn btn-danger';
+                    deactivateBtn.textContent = 'Deactivate';
+                    deactivateBtn.disabled = !person.active;
+                    deactivateBtn.addEventListener('click', () => deactivatePerson(person.id));
+
+                    actionsCell.appendChild(editBtn);
                     actionsCell.appendChild(enrollBtn);
+                    actionsCell.appendChild(facesBtn);
+                    actionsCell.appendChild(deactivateBtn);
 
                     row.appendChild(nameCell);
                     row.appendChild(codeCell);
@@ -1110,10 +1137,17 @@
 
         // Add Person Form
         document.getElementById('add-person-btn').addEventListener('click', () => {
+            editingPersonId = null;
+            document.getElementById('person-form').reset();
+            document.getElementById('employee-code').disabled = false;
+            document.getElementById('person-save-btn').textContent = 'ADD PERSON';
             document.getElementById('person-form-panel').style.display = 'block';
         });
 
         document.getElementById('cancel-person-btn').addEventListener('click', () => {
+            editingPersonId = null;
+            document.getElementById('employee-code').disabled = false;
+            document.getElementById('person-form').reset();
             document.getElementById('person-form-panel').style.display = 'none';
         });
 
@@ -1121,24 +1155,43 @@
             e.preventDefault();
 
             const personData = {
-                employee_code: document.getElementById('employee-code').value,
-                full_name: document.getElementById('person-name').value,
+                employee_code: document.getElementById('employee-code').value.trim(),
+                full_name: document.getElementById('person-name').value.trim(),
                 role: document.getElementById('person-role').value,
-                phone: document.getElementById('person-phone').value,
-                email: document.getElementById('person-email').value
+                phone: document.getElementById('person-phone').value.trim() || null,
+                email: document.getElementById('person-email').value.trim() || null
             };
 
             try {
-                const response = await fetch(`${API_BASE}/personnel`, {
-                    method: 'POST',
+                const url = editingPersonId
+                    ? `${API_BASE}/personnel/${encodeURIComponent(editingPersonId)}`
+                    : `${API_BASE}/personnel`;
+                const method = editingPersonId ? 'PATCH' : 'POST';
+                const body = editingPersonId ? {
+                    full_name: personData.full_name,
+                    role: personData.role,
+                    phone: personData.phone,
+                    email: personData.email
+                } : personData;
+
+                const response = await fetch(url, {
+                    method,
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify(personData)
+                    body: JSON.stringify(body)
                 });
 
                 if (response.ok) {
-                    alert('Person added successfully!');
+                    const savedPerson = await response.json();
+                    const faceFile = document.getElementById('person-face-image').files[0];
+                    if (faceFile) {
+                        await uploadFace(savedPerson.id, faceFile);
+                    }
+
+                    alert(editingPersonId ? 'Person updated successfully!' : 'Person added successfully!');
+                    editingPersonId = null;
+                    document.getElementById('employee-code').disabled = false;
                     document.getElementById('person-form-panel').style.display = 'none';
                     document.getElementById('person-form').reset();
                     loadPersonnel();
@@ -1152,6 +1205,75 @@
             }
         });
 
+        function editPerson(person) {
+            editingPersonId = person.id;
+            document.getElementById('employee-code').value = person.employee_code || '';
+            document.getElementById('employee-code').disabled = true;
+            document.getElementById('person-name').value = person.full_name || '';
+            document.getElementById('person-role').value = person.role || 'WORKER';
+            document.getElementById('person-phone').value = person.phone || '';
+            document.getElementById('person-email').value = person.email || '';
+            document.getElementById('person-face-image').value = '';
+            document.getElementById('person-save-btn').textContent = 'UPDATE PERSON';
+            document.getElementById('person-form-panel').style.display = 'block';
+        }
+
+        async function uploadFace(personId, file) {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const response = await fetch(`${API_BASE}/personnel/${personId}/faces`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error('Person saved, but face enrollment failed: ' + (error.detail || 'Unknown error'));
+            }
+
+            return response.json();
+        }
+
+        async function showPersonFaces(personId) {
+            try {
+                const response = await fetch(`${API_BASE}/personnel/${personId}/faces`);
+                const data = await response.json();
+                if (!response.ok) {
+                    alert('Error loading faces: ' + (data.detail || 'Unknown error'));
+                    return;
+                }
+                if (!data.items.length) {
+                    alert('No enrolled faces for this person yet.');
+                    return;
+                }
+                alert(data.items.map(face => `Face ${face.id}: quality ${Number(face.quality).toFixed(2)}`).join('\n'));
+            } catch (error) {
+                alert('Error loading faces: ' + error.message);
+            }
+        }
+
+        async function deactivatePerson(personId) {
+            if (!confirm('Deactivate this person?')) {
+                return;
+            }
+            try {
+                const response = await fetch(`${API_BASE}/personnel/${personId}`, {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({active: false})
+                });
+                if (response.ok) {
+                    loadPersonnel();
+                } else {
+                    const error = await response.json();
+                    alert('Error deactivating person: ' + (error.detail || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error deactivating person: ' + error.message);
+            }
+        }
+
         // Face Enrollment
         function enrollFace(personId) {
             const fileInput = document.createElement('input');
@@ -1162,22 +1284,9 @@
                 const file = e.target.files[0];
                 if (!file) return;
 
-                const formData = new FormData();
-                formData.append('file', file);
-
                 try {
-                    const response = await fetch(`${API_BASE}/personnel/${personId}/faces`, {
-                        method: 'POST',
-                        body: formData
-                    });
-
-                    if (response.ok) {
-                        const result = await response.json();
-                        alert('Face enrolled successfully! Quality: ' + result.quality);
-                    } else {
-                        const error = await response.json();
-                        alert('Error enrolling face: ' + (error.detail || 'Unknown error'));
-                    }
+                    const result = await uploadFace(personId, file);
+                    alert('Face enrolled successfully! Quality: ' + result.quality);
                 } catch (error) {
                     console.error('Error enrolling face:', error);
                     alert('Error enrolling face: ' + error.message);

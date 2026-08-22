@@ -211,7 +211,7 @@ def stream_camera_tracking(camera_id: str):
     if not camera:
         raise HTTPException(404, 'Camera not found')
     return StreamingResponse(
-        camera_manager.iter_tracking_mjpeg(camera.rtsp_url, config.yolo_model),
+        camera_manager.iter_tracking_mjpeg(camera.rtsp_url, config.yolo_model, face_service, config.recognition),
         media_type='multipart/x-mixed-replace; boundary=frame',
     )
 
