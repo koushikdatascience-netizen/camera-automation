@@ -436,8 +436,9 @@ class CameraManager:
         configured = float(getattr(recognition_config, "known_recheck_seconds", 2.0) or 2.0)
         return max(0.75, min(configured, 3.0))
 
-    def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None):
+    def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None):
         try:
+            overlays = []
             model = self._tracking_models.get(model_path)
             if model is None:
                 from ultralytics import YOLO
@@ -455,12 +456,32 @@ class CameraManager:
                 verbose=False,
             )
             if not results:
+                if stream_state is not None:
+                    stream_state["latest_overlays"] = []
+                    stream_state["latest_summary"] = {
+                        "people": 0,
+                        "objects": 0,
+                        "known": 0,
+                        "unknown": 0,
+                        "updated_at": time.monotonic(),
+                        "error": None,
+                    }
                 return frame
 
             result = results[0]
             names = getattr(result, "names", {}) or {}
             boxes = result.boxes
             if boxes is None:
+                if stream_state is not None:
+                    stream_state["latest_overlays"] = []
+                    stream_state["latest_summary"] = {
+                        "people": 0,
+                        "objects": 0,
+                        "known": 0,
+                        "unknown": 0,
+                        "updated_at": time.monotonic(),
+                        "error": None,
+                    }
                 return frame
 
             xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else []
@@ -472,6 +493,14 @@ class CameraManager:
             camera_id = camera_config.camera_id if camera_config is not None else None
             camera_zone = camera_config.camera_zone.value if camera_config is not None else "inside"
             crowd_threshold = camera_config.crowd_threshold if camera_config is not None else 10
+            summary = {
+                "people": 0,
+                "objects": len(classes),
+                "known": 0,
+                "unknown": 0,
+                "updated_at": time.monotonic(),
+                "error": None,
+            }
             recognition_enabled = bool(
                 face_service is not None
                 and recognition_config is not None
@@ -480,6 +509,7 @@ class CameraManager:
             )
             face_recheck_seconds = self._face_recheck_seconds(recognition_config) if recognition_enabled else 2.0
             person_count = sum(1 for class_id in classes if names.get(class_id, f"class_{class_id}") == "person")
+            summary["people"] = person_count
             cv2.putText(frame, f"People: {person_count}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 3)
             cv2.putText(frame, f"People: {person_count}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 1)
 
@@ -562,6 +592,16 @@ class CameraManager:
                 track_text = f" ID {track_id}" if track_id is not None else ""
                 text = recognized_text or f"{label}{track_text} {conf:.2f}"
                 color = (0, 180, 255) if label == "person" else (40, 220, 80)
+                if recognized_text:
+                    if recognized_text.lower().startswith("unknown"):
+                        summary["unknown"] += 1
+                    elif not recognized_text.startswith("Face too small"):
+                        summary["known"] += 1
+                overlays.append({
+                    "bbox": (x1, y1, x2, y2),
+                    "text": text,
+                    "color": color,
+                })
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 220), y1), color, -1)
                 cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
@@ -577,7 +617,7 @@ class CameraManager:
                     face_cache_key = camera_id or "default"
                     cached_faces = self._full_frame_face_cache.get(face_cache_key)
                     if not cached_faces or now - cached_faces.get("checked_at", 0) >= face_recheck_seconds:
-                        overlays = []
+                        face_overlays = []
                         for face in face_service.detect(frame):
                             x1, y1, x2, y2 = [int(v) for v in face["bbox"]]
                             match, score = face_service.recognize(
@@ -585,22 +625,27 @@ class CameraManager:
                                 recognition_config.known_threshold,
                             )
                             if match:
-                                overlays.append({
+                                face_overlays.append({
                                     "bbox": (x1, y1, x2, y2),
                                     "text": f"{match['full_name']} {score:.2f}",
                                     "color": (255, 180, 0),
                                 })
                             else:
-                                overlays.append({
+                                face_overlays.append({
                                     "bbox": (x1, y1, x2, y2),
                                     "text": f"Unknown face {score:.2f}",
                                     "color": (0, 0, 255),
                                 })
-                        self._full_frame_face_cache[face_cache_key] = {"checked_at": now, "overlays": overlays}
+                        self._full_frame_face_cache[face_cache_key] = {"checked_at": now, "overlays": face_overlays}
                     for overlay in self._full_frame_face_cache.get(face_cache_key, {}).get("overlays", []):
                         x1, y1, x2, y2 = overlay["bbox"]
                         text = overlay["text"]
                         color = overlay["color"]
+                        overlays.append({
+                            "bbox": (x1, y1, x2, y2),
+                            "text": text,
+                            "color": color,
+                        })
                         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                         cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 240), y1), color, -1)
                         cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
@@ -615,9 +660,22 @@ class CameraManager:
                         2,
                     )
 
+            if stream_state is not None:
+                stream_state["latest_overlays"] = overlays
+                stream_state["latest_summary"] = summary
+                stream_state["last_ai_at"] = summary["updated_at"]
             return frame
         except Exception as exc:
             self._tracking_error = str(exc)
+            if stream_state is not None:
+                stream_state["latest_summary"] = {
+                    "people": 0,
+                    "objects": 0,
+                    "known": 0,
+                    "unknown": 0,
+                    "updated_at": time.monotonic(),
+                    "error": str(exc),
+                }
             cv2.putText(
                 frame,
                 f"Tracking unavailable: {exc}",
@@ -629,8 +687,106 @@ class CameraManager:
             )
             return frame
 
-    def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None) -> Optional[bytes]:
-        annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
+    def _draw_tracking_demo_overlay(self, frame, camera_config: CameraConfig, stream_state: dict, attendance_engine=None, store=None):
+        overlays = stream_state.get("latest_overlays") or []
+        summary = stream_state.get("latest_summary") or {}
+        now = time.monotonic()
+        last_ai_at = summary.get("updated_at") or stream_state.get("last_ai_at") or 0.0
+        age = now - last_ai_at if last_ai_at else None
+
+        for overlay in overlays:
+            x1, y1, x2, y2 = overlay["bbox"]
+            color = tuple(overlay.get("color") or (0, 180, 255))
+            text = overlay.get("text") or "detected"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            label_width = max(120, min(frame.shape[1] - x1, 10 * len(text)))
+            cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + label_width), y1), color, -1)
+            cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+
+        panel_h = 118
+        panel_w = min(420, frame.shape[1] - 20)
+        x0, y0 = 10, 10
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+
+        ai_status = "AI DETECTING"
+        if stream_state.get("ai_running"):
+            ai_status = "AI SCANNING..."
+        elif age is None:
+            ai_status = "AI WARMING UP"
+        elif age > 5:
+            ai_status = "AI WAITING FOR NEXT FRAME"
+
+        if summary.get("error"):
+            ai_status = "AI ERROR"
+
+        lines = [
+            f"LIVE TRACKING - {camera_config.name}",
+            f"{ai_status} | camera {camera_config.camera_id}",
+            f"People {summary.get('people', 0)} | Objects {summary.get('objects', 0)} | Known {summary.get('known', 0)} | Unknown {summary.get('unknown', 0)}",
+            f"Features: YOLO tracking, face recognition, attendance, alerts",
+        ]
+        if summary.get("error"):
+            lines[-1] = f"Error: {str(summary['error'])[:48]}"
+        elif age is not None:
+            lines[-1] = f"Features: YOLO tracking, face recognition, attendance, alerts | AI age {age:.1f}s"
+
+        for idx, line in enumerate(lines):
+            color = (80, 255, 120) if idx == 0 else (255, 255, 255)
+            cv2.putText(frame, line, (x0 + 12, y0 + 26 + idx * 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, color, 2)
+
+        if not overlays:
+            message = "Scanning for people and objects..."
+            cv2.putText(frame, message, (20, min(frame.shape[0] - 24, y0 + panel_h + 34)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+        self._draw_tracking_activity_overlay(frame, stream_state, attendance_engine, store)
+        return frame
+
+    def _draw_tracking_activity_overlay(self, frame, stream_state: dict, attendance_engine=None, store=None):
+        now = time.monotonic()
+        if now - stream_state.get("activity_checked_at", 0.0) >= 1.0:
+            lines = []
+            try:
+                people = {person["id"]: person for person in store.list_people()} if store is not None else {}
+                presence = attendance_engine.presence_list() if attendance_engine is not None else []
+                present = [
+                    item for item in presence
+                    if str(item.get("status", "")).upper() in {"PRESENT", "INSIDE", "ACTIVE", "ON_CAMERA"}
+                ]
+                breaks = [
+                    item for item in presence
+                    if item.get("break_started_at") or str(item.get("status", "")).upper().startswith("BREAK")
+                ]
+                lines.append(f"Attendance: {len(present)} present | {len(breaks)} on break")
+                for item in presence[:2]:
+                    person = people.get(item.get("person_id"), {})
+                    name = person.get("full_name") or item.get("person_id") or "Unknown"
+                    status = item.get("status") or "seen"
+                    lines.append(f"{name}: {status}")
+
+                if store is not None:
+                    for event in store.person_events()[:2]:
+                        name = event.get("full_name") or event.get("person_id") or "System"
+                        lines.append(f"{event.get('event_type', 'EVENT')}: {name}")
+            except Exception as exc:
+                lines = [f"Attendance overlay unavailable: {str(exc)[:32]}"]
+            stream_state["activity_lines"] = lines[:5]
+            stream_state["activity_checked_at"] = now
+
+        lines = stream_state.get("activity_lines") or ["Attendance: waiting for recognized people"]
+        panel_w = min(470, frame.shape[1] - 20)
+        panel_h = 34 + 24 * min(len(lines), 5)
+        x0 = 10
+        y0 = max(10, frame.shape[0] - panel_h - 10)
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+        cv2.putText(frame, "ATTENDANCE / BREAKS", (x0 + 12, y0 + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (80, 220, 255), 2)
+        for idx, line in enumerate(lines[:5]):
+            cv2.putText(frame, line[:58], (x0 + 12, y0 + 50 + idx * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2)
+
+    def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None) -> Optional[bytes]:
+        annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
         ok, encoded = cv2.imencode(".jpg", annotated)
         if not ok:
             return None
@@ -947,13 +1103,15 @@ class CameraManager:
                 "ai_running": False,
                 "last_ai_at": 0.0,
                 "latest_encoded": None,
+                "latest_overlays": [],
+                "latest_summary": None,
                 "last_raw_at": 0.0,
             }
             self._tracking_stream_state[stream_key] = state
 
             def run_ai(frame):
                 try:
-                    encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
+                    encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, state)
                     if encoded:
                         state["latest_encoded"] = encoded
                     state["last_ai_at"] = time.monotonic()
@@ -968,10 +1126,8 @@ class CameraManager:
                 if not state["ai_running"] and now - state["last_ai_at"] >= 0.45:
                     state["ai_running"] = True
                     threading.Thread(target=run_ai, args=(frame.copy(),), daemon=True).start()
-                encoded = state.get("latest_encoded")
-                if encoded is None or now - state.get("last_raw_at", 0.0) >= 0.15:
-                    encoded = snapshot
-                    state["last_raw_at"] = now
+                encoded = self._encode_jpeg(self._draw_tracking_demo_overlay(frame, camera_config, state, attendance_engine, store)) or snapshot
+                state["last_raw_at"] = now
                 if encoded:
                     yield (
                         b"--frame\r\n"
@@ -987,13 +1143,15 @@ class CameraManager:
             "ai_running": False,
             "last_ai_at": 0.0,
             "latest_encoded": None,
+            "latest_overlays": [],
+            "latest_summary": None,
             "last_raw_at": 0.0,
         }
         self._tracking_stream_state[stream_key] = state
 
         def run_ai(frame):
             try:
-                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, state)
                 if encoded:
                     state["latest_encoded"] = encoded
                 state["last_ai_at"] = time.monotonic()
@@ -1009,12 +1167,8 @@ class CameraManager:
                 if not state["ai_running"] and now - state["last_ai_at"] >= 0.45:
                     state["ai_running"] = True
                     threading.Thread(target=run_ai, args=(frame.copy(),), daemon=True).start()
-                encoded = state.get("latest_encoded")
-                if encoded is None or now - state.get("last_raw_at", 0.0) >= 0.15:
-                    raw_encoded = self._encode_jpeg(frame)
-                    if raw_encoded:
-                        encoded = raw_encoded
-                        state["last_raw_at"] = now
+                encoded = self._encode_jpeg(self._draw_tracking_demo_overlay(frame, camera_config, state, attendance_engine, store))
+                state["last_raw_at"] = now
                 if encoded:
                     yield (
                         b"--frame\r\n"
