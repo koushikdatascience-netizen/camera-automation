@@ -216,7 +216,7 @@ class CameraManager:
             if 'enabled' in updates:
                 camera.enabled = updates['enabled']
             if 'camera_role' in updates:
-                camera.camera_role = updates['camera_role']
+                camera.camera_role = CameraRole(updates['camera_role'])
             if 'features' in updates:
                 camera.features = CameraFeatures(**updates['features'])
 
