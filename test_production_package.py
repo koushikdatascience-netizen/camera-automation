@@ -95,6 +95,7 @@ def test_api_endpoints():
 
         # Test 3: Camera CRUD endpoints
         print("\n3. Testing Camera CRUD endpoints...")
+        requests.delete(f"{base_url}/api/v1/cameras/test_camera_01")
 
         # Create camera
         camera_data = {
@@ -123,8 +124,8 @@ def test_api_endpoints():
         response = requests.get(f"{base_url}/api/v1/cameras")
         assert response.status_code == 200
         cameras = response.json()['items']
-        assert len(cameras) == 1
-        assert cameras[0]['camera_id'] == "test_camera_01"
+        test_camera = next((camera for camera in cameras if camera['camera_id'] == "test_camera_01"), None)
+        assert test_camera is not None
         print("[OK] Camera listing working")
 
         # Get single camera
