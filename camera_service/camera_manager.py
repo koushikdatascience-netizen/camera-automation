@@ -258,10 +258,10 @@ class CameraManager:
     def _dshow_device_name(self, source: str) -> str:
         return str(source).strip().split(":", 1)[1].strip()
 
-    def _read_dshow_snapshot(self, source: str) -> Optional[bytes]:
+    def _read_dshow_snapshot_result(self, source: str) -> tuple[Optional[bytes], Optional[str]]:
         device_name = self._dshow_device_name(source)
         if not device_name:
-            return None
+            return None, "DirectShow device name is empty"
 
         command = [
             "ffmpeg",
@@ -290,12 +290,21 @@ class CameraManager:
                 timeout=10,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired):
-            return None
+        except FileNotFoundError:
+            return None, "ffmpeg was not found in PATH"
+        except subprocess.TimeoutExpired:
+            return None, "ffmpeg timed out while reading the camera"
+        except OSError as exc:
+            return None, str(exc)
 
         if completed.returncode != 0 or not completed.stdout:
-            return None
-        return completed.stdout
+            error_text = completed.stderr.decode("utf-8", errors="replace").strip()
+            return None, error_text or f"ffmpeg exited with code {completed.returncode}"
+        return completed.stdout, None
+
+    def _read_dshow_snapshot(self, source: str) -> Optional[bytes]:
+        snapshot, _ = self._read_dshow_snapshot_result(source)
+        return snapshot
 
     def _open_video_capture_with_diagnostics(self, source: str):
         """Open a video source and return both the capture and backend attempts."""
@@ -378,14 +387,14 @@ class CameraManager:
 
         try:
             if self._is_dshow_source(source_text):
-                snapshot = self._read_dshow_snapshot(source_text)
+                snapshot, dshow_error = self._read_dshow_snapshot_result(source_text)
                 if not snapshot:
                     result['message'] = 'Unable to read DirectShow camera through ffmpeg'
                     result['attempts'] = [{
                         "backend": "FFMPEG_DSHOW",
                         "opened": False,
                         "readable": False,
-                        "message": "ffmpeg could not capture a frame",
+                        "message": dshow_error or "ffmpeg could not capture a frame",
                     }]
                     return result
 
