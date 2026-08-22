@@ -1103,39 +1103,14 @@ class CameraManager:
             cap.release()
 
     def iter_tracking_mjpeg(self, camera_config: CameraConfig, model_path: str, face_service=None, recognition_config=None, attendance_engine=None, store=None):
-        """Yield low-latency MJPEG frames while AI annotations update in the background."""
+        """Yield MJPEG frames with YOLO/ByteTrack annotations drawn before each frame is sent."""
         rtsp_url = camera_config.rtsp_url
         if self._is_dshow_source(rtsp_url):
-            stream_key = f"{camera_config.camera_id}:dshow"
-            state = {
-                "ai_running": False,
-                "last_ai_at": 0.0,
-                "latest_encoded": None,
-                "latest_overlays": [],
-                "latest_summary": None,
-                "last_raw_at": 0.0,
-            }
-            self._tracking_stream_state[stream_key] = state
-
-            def run_ai(frame):
-                try:
-                    encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, state)
-                    if encoded:
-                        state["latest_encoded"] = encoded
-                    state["last_ai_at"] = time.monotonic()
-                finally:
-                    state["ai_running"] = False
-
             for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=10):
                 frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if frame is None:
                     continue
-                now = time.monotonic()
-                if not state["ai_running"] and now - state["last_ai_at"] >= 0.45:
-                    state["ai_running"] = True
-                    threading.Thread(target=run_ai, args=(frame.copy(),), daemon=True).start()
-                encoded = self._encode_jpeg(self._draw_tracking_demo_overlay(frame, camera_config, state, attendance_engine, store)) or snapshot
-                state["last_raw_at"] = now
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
                 if encoded:
                     yield (
                         b"--frame\r\n"
@@ -1146,37 +1121,12 @@ class CameraManager:
             return
 
         cap = self._open_video_capture(rtsp_url)
-        stream_key = f"{camera_config.camera_id}:opencv"
-        state = {
-            "ai_running": False,
-            "last_ai_at": 0.0,
-            "latest_encoded": None,
-            "latest_overlays": [],
-            "latest_summary": None,
-            "last_raw_at": 0.0,
-        }
-        self._tracking_stream_state[stream_key] = state
-
-        def run_ai(frame):
-            try:
-                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, state)
-                if encoded:
-                    state["latest_encoded"] = encoded
-                state["last_ai_at"] = time.monotonic()
-            finally:
-                state["ai_running"] = False
-
         try:
             while cap.isOpened():
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     break
-                now = time.monotonic()
-                if not state["ai_running"] and now - state["last_ai_at"] >= 0.45:
-                    state["ai_running"] = True
-                    threading.Thread(target=run_ai, args=(frame.copy(),), daemon=True).start()
-                encoded = self._encode_jpeg(self._draw_tracking_demo_overlay(frame, camera_config, state, attendance_engine, store))
-                state["last_raw_at"] = now
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
                 if encoded:
                     yield (
                         b"--frame\r\n"
