@@ -72,6 +72,8 @@ class CameraManager:
         self._tracking_error = None
         self._stream_active_tracks = {}
         self._alert_last_sent = {}
+        self._track_identity_cache = {}
+        self._full_frame_face_cache = {}
         self._init_db()
 
     @contextmanager
@@ -429,6 +431,10 @@ class CameraManager:
         self._alert_last_sent[key] = now
         return True
 
+    def _face_recheck_seconds(self, recognition_config) -> float:
+        configured = float(getattr(recognition_config, "known_recheck_seconds", 2.0) or 2.0)
+        return max(0.75, min(configured, 3.0))
+
     def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None):
         try:
             model = self._tracking_models.get(model_path)
@@ -443,6 +449,8 @@ class CameraManager:
                 persist=True,
                 tracker="bytetrack.yaml",
                 conf=0.25,
+                imgsz=480,
+                max_det=40,
                 verbose=False,
             )
             if not results:
@@ -459,9 +467,17 @@ class CameraManager:
             classes = boxes.cls.int().cpu().tolist() if boxes.cls is not None else []
             track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [None] * len(xyxy)
             active_known_tracks = set()
+            now = time.monotonic()
             camera_id = camera_config.camera_id if camera_config is not None else None
             camera_zone = camera_config.camera_zone.value if camera_config is not None else "inside"
             crowd_threshold = camera_config.crowd_threshold if camera_config is not None else 10
+            recognition_enabled = bool(
+                face_service is not None
+                and recognition_config is not None
+                and getattr(recognition_config, "enabled", True)
+                and camera_id is not None
+            )
+            face_recheck_seconds = self._face_recheck_seconds(recognition_config) if recognition_enabled else 2.0
             person_count = sum(1 for class_id in classes if names.get(class_id, f"class_{class_id}") == "person")
             cv2.putText(frame, f"People: {person_count}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 3)
             cv2.putText(frame, f"People: {person_count}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 1)
@@ -479,13 +495,20 @@ class CameraManager:
                 if (
                     label == "person"
                     and track_id is not None
-                    and face_service is not None
-                    and recognition_config is not None
-                    and camera_id is not None
+                    and recognition_enabled
                     and attendance_engine is not None
                 ):
+                    cache_key = f"{camera_id}:{track_id}"
+                    cached = self._track_identity_cache.get(cache_key)
+                    should_check_face = True
+                    if cached and now - cached.get("checked_at", 0) < face_recheck_seconds:
+                        should_check_face = False
+                        recognized_text = cached.get("text")
+                        if cached.get("person_id"):
+                            active_known_tracks.add(str(track_id))
+
                     roi = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
-                    if roi.size:
+                    if should_check_face and roi.size:
                         faces = face_service.detect(roi)
                         if faces:
                             best = max(faces, key=lambda face: face_service.quality(face, roi.shape))
@@ -505,9 +528,35 @@ class CameraManager:
                                         bbox=(float(x1), float(y1), float(x2), float(y2)),
                                         snapshot_path=snapshot_path,
                                     ))
+                                    self._track_identity_cache[cache_key] = {
+                                        "checked_at": now,
+                                        "person_id": match["person_id"],
+                                        "text": recognized_text,
+                                        "score": score,
+                                    }
                                 elif camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
                                     snapshot_path = self._save_event_snapshot(roi, camera_id, "unknown")
                                     store.add_person_event(None, getattr(attendance_engine, "store_id", "store-1"), camera_id, "UNKNOWN_INSIDE_ALERT", datetime.now(timezone.utc), {"track_id": track_id, "score": score, "snapshot_path": snapshot_path})
+                                    self._track_identity_cache[cache_key] = {
+                                        "checked_at": now,
+                                        "person_id": None,
+                                        "text": f"Unknown person {score:.2f}",
+                                        "score": score,
+                                    }
+                            else:
+                                self._track_identity_cache[cache_key] = {
+                                    "checked_at": now,
+                                    "person_id": None,
+                                    "text": "Face too small/blurred",
+                                    "score": 0.0,
+                                }
+                        else:
+                            self._track_identity_cache[cache_key] = {
+                                "checked_at": now,
+                                "person_id": None,
+                                "text": None,
+                                "score": 0.0,
+                            }
 
                 track_text = f" ID {track_id}" if track_id is not None else ""
                 text = recognized_text or f"{label}{track_text} {conf:.2f}"
@@ -522,20 +571,35 @@ class CameraManager:
                     attendance_engine.on_track_lost(camera_id, lost_track)
                 self._stream_active_tracks[camera_id] = active_known_tracks
 
-            if face_service is not None and recognition_config is not None:
+            if recognition_enabled:
                 try:
-                    for face in face_service.detect(frame):
-                        x1, y1, x2, y2 = [int(v) for v in face["bbox"]]
-                        match, score = face_service.recognize(
-                            face.get("embedding"),
-                            recognition_config.known_threshold,
-                        )
-                        if match:
-                            text = f"{match['full_name']} {score:.2f}"
-                            color = (255, 180, 0)
-                        else:
-                            text = f"Unknown face {score:.2f}"
-                            color = (0, 0, 255)
+                    face_cache_key = camera_id or "default"
+                    cached_faces = self._full_frame_face_cache.get(face_cache_key)
+                    if not cached_faces or now - cached_faces.get("checked_at", 0) >= face_recheck_seconds:
+                        overlays = []
+                        for face in face_service.detect(frame):
+                            x1, y1, x2, y2 = [int(v) for v in face["bbox"]]
+                            match, score = face_service.recognize(
+                                face.get("embedding"),
+                                recognition_config.known_threshold,
+                            )
+                            if match:
+                                overlays.append({
+                                    "bbox": (x1, y1, x2, y2),
+                                    "text": f"{match['full_name']} {score:.2f}",
+                                    "color": (255, 180, 0),
+                                })
+                            else:
+                                overlays.append({
+                                    "bbox": (x1, y1, x2, y2),
+                                    "text": f"Unknown face {score:.2f}",
+                                    "color": (0, 0, 255),
+                                })
+                        self._full_frame_face_cache[face_cache_key] = {"checked_at": now, "overlays": overlays}
+                    for overlay in self._full_frame_face_cache.get(face_cache_key, {}).get("overlays", []):
+                        x1, y1, x2, y2 = overlay["bbox"]
+                        text = overlay["text"]
+                        color = overlay["color"]
                         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                         cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 240), y1), color, -1)
                         cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)

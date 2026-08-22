@@ -17,12 +17,12 @@ class AttendanceLine(BaseModel):
 
 class RecognitionConfig(BaseModel):
     enabled: bool = True
-    known_threshold: float = 0.65
+    known_threshold: float = 0.55
     required_known_observations: int = 2
-    minimum_face_quality: float = 0.35
+    minimum_face_quality: float = 0.25
     unknown_confirmation_seconds: float = 3.0
     max_recognition_attempts: int = 5
-    known_recheck_seconds: float = 15.0
+    known_recheck_seconds: float = 2.0
 
 class EdgeConfig(BaseModel):
     edge_id: str = "local-edge-01"

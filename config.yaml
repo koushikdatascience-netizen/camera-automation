@@ -3,12 +3,12 @@ database_path: data/camera_automation.db
 evidence_dir: data/evidence
 yolo_model: yolo11n.pt
 recognition:
-  known_threshold: 0.65
+  known_threshold: 0.55
   required_known_observations: 2
-  minimum_face_quality: 0.35
+  minimum_face_quality: 0.25
   unknown_confirmation_seconds: 3
   max_recognition_attempts: 5
-  known_recheck_seconds: 15
+  known_recheck_seconds: 2
 cameras:
   - camera_id: entrance_01
     name: Entrance Camera
