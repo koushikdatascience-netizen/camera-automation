@@ -247,17 +247,23 @@ class CameraManager:
 
     def _open_video_capture(self, source: str):
         """Open RTSP/file sources normally, with Windows webcam backend fallbacks."""
+        cap, _ = self._open_video_capture_with_diagnostics(source)
+        return cap
+
+    def _open_video_capture_with_diagnostics(self, source: str):
+        """Open a video source and return both the capture and backend attempts."""
         source_text = str(source).strip()
+        attempts = []
         if source_text.isdigit():
             device_index = int(source_text)
             if sys.platform.startswith("win"):
                 backends = [
-                    getattr(cv2, "CAP_DSHOW", None),
-                    getattr(cv2, "CAP_MSMF", None),
-                    None,
+                    ("DSHOW", getattr(cv2, "CAP_DSHOW", None)),
+                    ("MSMF", getattr(cv2, "CAP_MSMF", None)),
+                    ("DEFAULT", None),
                 ]
                 fallback = None
-                for backend in backends:
+                for backend_name, backend in backends:
                     cap = (
                         cv2.VideoCapture(device_index)
                         if backend is None
@@ -266,27 +272,55 @@ class CameraManager:
                     if fallback is None:
                         fallback = cap
                     if not cap.isOpened():
+                        attempts.append({
+                            "backend": backend_name,
+                            "opened": False,
+                            "readable": False,
+                            "message": "backend did not open source",
+                        })
                         if cap is not fallback:
                             cap.release()
                         continue
                     for _ in range(5):
                         ok, frame = cap.read()
                         if ok and frame is not None:
+                            attempts.append({
+                                "backend": backend_name,
+                                "opened": True,
+                                "readable": True,
+                                "frame_shape": list(frame.shape),
+                            })
                             if fallback is not cap and fallback is not None:
                                 fallback.release()
-                            return cap
+                            return cap, attempts
                         time.sleep(0.05)
+                    attempts.append({
+                        "backend": backend_name,
+                        "opened": True,
+                        "readable": False,
+                        "message": "backend opened source but returned no frames",
+                    })
                     if cap is not fallback:
                         cap.release()
-                return fallback or cv2.VideoCapture(device_index)
-            return cv2.VideoCapture(device_index)
-        return cv2.VideoCapture(source_text)
+                return fallback or cv2.VideoCapture(device_index), attempts
+            return cv2.VideoCapture(device_index), attempts
+        cap = cv2.VideoCapture(source_text)
+        attempts.append({
+            "backend": "DEFAULT",
+            "opened": bool(cap.isOpened()),
+            "readable": None,
+            "message": "non-numeric source",
+        })
+        return cap, attempts
 
     def test_rtsp_connection(self, rtsp_url: str, timeout: int = 5) -> Dict[str, Any]:
         """Test RTSP/webcam connection and return diagnostics."""
+        source_text = str(rtsp_url).strip()
         result = {
             'success': False,
             'message': '',
+            'source': source_text,
+            'attempts': [],
             'resolution': None,
             'fps': 0,
             'connection_ms': 0,
@@ -296,7 +330,8 @@ class CameraManager:
         start_time = time.time()
 
         try:
-            cap = self._open_video_capture(rtsp_url)
+            cap, attempts = self._open_video_capture_with_diagnostics(source_text)
+            result['attempts'] = attempts
 
             if not cap.isOpened():
                 result['message'] = 'Unable to open stream'

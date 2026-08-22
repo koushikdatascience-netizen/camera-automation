@@ -860,7 +860,14 @@
                     document.getElementById('camera-preview').src = `${API_BASE}/cameras/test/snapshot?url=` + encodeURIComponent(rtspUrl) + '&t=' + Date.now();
                 } else {
                     testResult.className = 'test-result test-failure';
-                    testResult.innerHTML = `<strong>Connection Failed:</strong> ${result.message}`;
+                    const attempts = (result.attempts || [])
+                        .map(attempt => `${attempt.backend}: opened=${attempt.opened}, readable=${attempt.readable}${attempt.message ? ' - ' + attempt.message : ''}`)
+                        .join('<br>');
+                    testResult.innerHTML = `
+                        <strong>Connection Failed:</strong> ${result.message}<br>
+                        Source: ${result.source || rtspUrl}
+                        ${attempts ? '<br><br>' + attempts : ''}
+                    `;
                     document.getElementById('preview-container').style.display = 'none';
                 }
 
