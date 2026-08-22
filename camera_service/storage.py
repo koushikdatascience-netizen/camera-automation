@@ -34,6 +34,7 @@ class SQLiteStore:
             CREATE TABLE IF NOT EXISTS unknown_incidents(id TEXT PRIMARY KEY, store_id TEXT NOT NULL, camera_id TEXT NOT NULL, track_id TEXT NOT NULL, first_seen TEXT NOT NULL, confirmed_unknown_at TEXT NOT NULL, last_seen TEXT NOT NULL, recognition_attempts INTEGER NOT NULL, best_similarity REAL, best_face_snapshot TEXT, best_person_snapshot TEXT, clip_path TEXT, status TEXT NOT NULL DEFAULT 'OPEN', acknowledged_at TEXT);
             CREATE INDEX IF NOT EXISTS idx_unknown_active ON unknown_incidents(store_id,camera_id,track_id,status);
             ''')
+            self._ensure_column(c,'face_profiles','image_path','TEXT')
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
     def _ensure_column(self,conn,table,column,definition):
@@ -59,12 +60,16 @@ class SQLiteStore:
         allowed['updated_at']=self.now(); sql="UPDATE personnel SET "+','.join(f"{k}=?" for k in allowed)+" WHERE id=?"
         with self._lock,self._conn() as c: c.execute(sql,tuple(allowed.values())+(pid,))
         return self.get_person(pid)
-    def add_face(self,pid,embedding:list[float],quality:float):
+    def add_face(self,pid,embedding:list[float],quality:float,image_path=None):
         fid=str(uuid.uuid4())
-        with self._lock,self._conn() as c: c.execute("INSERT INTO face_profiles VALUES(?,?,?,?,?)",(fid,pid,json.dumps(embedding),quality,self.now()))
-        return {'id':fid,'person_id':pid,'quality':quality}
+        with self._lock,self._conn() as c:
+            c.execute("INSERT INTO face_profiles(id,person_id,embedding_json,quality,created_at,image_path) VALUES(?,?,?,?,?,?)",(fid,pid,json.dumps(embedding),quality,self.now(),image_path))
+        return {'id':fid,'person_id':pid,'quality':quality,'image_path':image_path}
     def list_faces(self,pid):
-        with self._conn() as c: return [dict(r) for r in c.execute("SELECT id,person_id,quality,created_at FROM face_profiles WHERE person_id=?",(pid,))]
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT id,person_id,quality,created_at,image_path FROM face_profiles WHERE person_id=? ORDER BY created_at DESC",(pid,))]
+    def get_face(self,pid,fid):
+        with self._conn() as c:
+            r=c.execute("SELECT id,person_id,quality,created_at,image_path FROM face_profiles WHERE person_id=? AND id=?",(pid,fid)).fetchone(); return dict(r) if r else None
     def delete_face(self,pid,fid):
         with self._lock,self._conn() as c:
             cur=c.execute("DELETE FROM face_profiles WHERE id=? AND person_id=?",(fid,pid)); return cur.rowcount>0

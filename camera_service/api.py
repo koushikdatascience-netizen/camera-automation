@@ -22,6 +22,7 @@ import threading
 import time
 import socket
 import sys
+from pathlib import Path
 
 config=load_config(); store=SQLiteStore(config.database_path); face_service=FaceService(store); attendance_engine=AttendanceEngine(store,config.store_id); supervisor=CameraSupervisor(config,store,face_service,attendance_engine)
 camera_manager=CameraManager(config.database_path)
@@ -35,6 +36,24 @@ async def lifespan(app:FastAPI):
 app=FastAPI(title='Camera Automation Production P0',lifespan=lifespan)
 
 def get_store(): return store
+
+def _face_image_url(person_id: str, face_id: str) -> str:
+    return f"/api/v1/personnel/{person_id}/faces/{face_id}/image"
+
+def _save_face_preview(person_id: str, image) -> str | None:
+    try:
+        output_dir = Path(config.evidence_dir).parent / "personnel_faces" / person_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        h, w = image.shape[:2]
+        scale = min(240 / max(h, w), 1.0)
+        if scale < 1.0:
+            image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        path = output_dir / f"{int(time.time() * 1000)}.jpg"
+        if cv2.imwrite(str(path), image):
+            return str(path)
+    except Exception:
+        return None
+    return None
 
 @app.get('/health')
 def health():
@@ -305,7 +324,17 @@ def create_person(body:PersonnelCreate,s=Depends(get_store)):
     except Exception as e: raise HTTPException(409,str(e))
 
 @app.get('/api/v1/personnel')
-def list_people(s=Depends(get_store)): return {'items':s.list_people()}
+def list_people(s=Depends(get_store)):
+    items = []
+    for person in s.list_people():
+        faces = s.list_faces(person['id'])
+        primary_face = faces[0] if faces else None
+        items.append({
+            **person,
+            'face_count': len(faces),
+            'primary_face_url': _face_image_url(person['id'], primary_face['id']) if primary_face and primary_face.get('image_path') else None,
+        })
+    return {'items':items}
 
 @app.get('/api/v1/personnel/{person_id}')
 def get_person(person_id:str,s=Depends(get_store)):
@@ -333,10 +362,32 @@ async def enroll_face(person_id:str,file:UploadFile=File(...),s=Depends(get_stor
     if img is None: raise HTTPException(400,'Invalid image')
     try: emb,q=face_service.enroll(img)
     except ValueError as e: raise HTTPException(400,str(e))
-    return s.add_face(person_id,emb,q)
+    preview_path = _save_face_preview(person_id, img)
+    face = s.add_face(person_id,emb,q,preview_path)
+    return {
+        **face,
+        'image_url': _face_image_url(person_id, face['id']) if preview_path else None,
+    }
 
 @app.get('/api/v1/personnel/{person_id}/faces')
-def faces(person_id:str,s=Depends(get_store)): return {'items':s.list_faces(person_id)}
+def faces(person_id:str,s=Depends(get_store)):
+    return {'items':[
+        {
+            **face,
+            'image_url': _face_image_url(person_id, face['id']) if face.get('image_path') else None,
+        }
+        for face in s.list_faces(person_id)
+    ]}
+
+@app.get('/api/v1/personnel/{person_id}/faces/{face_id}/image')
+def face_image(person_id:str,face_id:str,s=Depends(get_store)):
+    face = s.get_face(person_id, face_id)
+    if not face or not face.get('image_path'):
+        raise HTTPException(404,'Face image not found')
+    path = Path(face['image_path'])
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404,'Face image not found')
+    return Response(content=path.read_bytes(), media_type='image/jpeg')
 
 @app.delete('/api/v1/personnel/{person_id}/faces/{face_id}')
 def delete_face(person_id:str,face_id:str,s=Depends(get_store)):
