@@ -1,77 +1,79 @@
 import os
-import sys
-import time
-import webbrowser
 import threading
-import subprocess
-import socket
-from pathlib import Path
+import time
+import urllib.error
+import urllib.request
+import webbrowser
 
-def check_port(host, port, timeout=10):
-    """Check if a port is available"""
-    start_time = time.time()
-    while time.time() - start_time < timeout:
+import uvicorn
+
+from camera_service.api import app
+
+
+def env_bool(name: str, default: bool = True) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def wait_for_health(url: str, timeout_seconds: float = 60.0) -> bool:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
         try:
-            with socket.create_connection((host, port), timeout=1):
-                return True
-        except (socket.timeout, ConnectionRefusedError):
-            time.sleep(0.1)
+            with urllib.request.urlopen(url, timeout=2) as response:
+                if 200 <= response.status < 300:
+                    return True
+        except (OSError, urllib.error.URLError):
+            time.sleep(0.5)
     return False
 
-def open_browser(url):
-    """Open browser after a delay to ensure server is ready"""
-    time.sleep(2)  # Wait a bit for the server to start
-    try:
-        webbrowser.open(url)
-    except Exception as e:
-        print(f"Failed to open browser: {e}")
 
-def main():
-    # Set up environment
-    os.environ.setdefault('PYTHONUNBUFFERED', '1')
+def check_port(host: str, port: int, timeout: float = 60.0) -> bool:
+    return wait_for_health(f"http://{host}:{port}/health", timeout)
 
-    # Get the directory of this script
-    script_dir = Path(__file__).parent
 
-    # Start the FastAPI application
-    print("Starting Camera Automation...")
+def open_browser(url: str) -> None:
+    webbrowser.open(url)
 
-    # Use uvicorn to run the application
-    cmd = [
-        sys.executable, '-m', 'uvicorn',
-        'camera_service.api:app',
-        '--host', '127.0.0.1',
-        '--port', '8000'
-    ]
 
-    # Add reload flag only in debug mode
-    if os.environ.get('DEBUG', 'false').lower() == 'true':
-        cmd.append('--reload')
-
-    # Start the server process
-    process = subprocess.Popen(cmd, cwd=script_dir.parent)
-
-    # Check if server started successfully
-    if check_port('127.0.0.1', 8000, timeout=30):
-        print("Server started successfully on http://127.0.0.1:8000")
-
-        # Open browser if not in debug mode
-        if os.environ.get('AUTO_OPEN_BROWSER', 'true').lower() != 'false':
-            browser_thread = threading.Thread(target=open_browser, args=('http://127.0.0.1:8000/setup',))
-            browser_thread.daemon = True
-            browser_thread.start()
+def open_browser_when_ready(host: str, port: int) -> None:
+    health_url = f"http://{host}:{port}/health"
+    setup_url = f"http://{host}:{port}/setup"
+    if wait_for_health(health_url):
+        try:
+            open_browser(setup_url)
+        except Exception as exc:
+            print(f"Failed to open browser: {exc}")
     else:
-        print("Failed to start server")
-        process.terminate()
-        sys.exit(1)
+        print(f"Server health check did not become ready: {health_url}")
 
-    # Wait for the process to complete
-    try:
-        process.wait()
-    except KeyboardInterrupt:
-        print("Shutting down...")
-        process.terminate()
-        process.wait()
 
-if __name__ == '__main__':
+def main() -> None:
+    os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
+    log_level = os.environ.get("LOG_LEVEL", "info").lower()
+
+    print(f"Starting Camera Automation on http://{host}:{port}")
+
+    if env_bool("AUTO_OPEN_BROWSER", True):
+        browser_thread = threading.Thread(
+            target=open_browser_when_ready,
+            args=(host, port),
+            daemon=True,
+            name="BrowserOpenWhenReady",
+        )
+        browser_thread.start()
+
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=log_level,
+    )
+
+
+if __name__ == "__main__":
     main()

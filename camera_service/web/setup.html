@@ -414,8 +414,9 @@
                     </div>
 
                     <div class="form-group">
-                        <label for="rtsp-url">RTSP URL</label>
-                        <input type="text" id="rtsp-url" class="form-control" placeholder="rtsp://username:password@ip:port/stream" required>
+                        <label for="rtsp-url">Camera Source</label>
+                        <input type="text" id="rtsp-url" class="form-control" placeholder="RTSP URL or webcam index, for example 0" required>
+                        <small>Use a Hikvision RTSP substream like rtsp://user:pass@ip:554/Streaming/Channels/102, or use 0/1 for a local USB webcam.</small>
                     </div>
 
                     <div class="form-group">
@@ -610,6 +611,7 @@
     <script>
         // API Base URL
         const API_BASE = '/api/v1';
+        let editingCameraId = null;
 
         // DOM Elements
         const sections = {
@@ -734,6 +736,11 @@
                     cameraInfo.appendChild(cameraDetails);
                     cameraInfo.appendChild(cameraUrl);
 
+                    const statusText = document.createElement('p');
+                    statusText.textContent = 'Status: configured';
+                    statusText.id = `camera-status-${camera.camera_id}`;
+                    cameraInfo.appendChild(statusText);
+
                     const cameraActions = document.createElement('div');
                     cameraActions.className = 'camera-actions';
 
@@ -747,6 +754,20 @@
                     stopBtn.textContent = 'STOP';
                     stopBtn.addEventListener('click', () => stopCamera(camera.camera_id));
 
+                    const snapshotBtn = document.createElement('button');
+                    snapshotBtn.className = 'btn btn-secondary';
+                    snapshotBtn.textContent = 'SNAPSHOT';
+                    snapshotBtn.addEventListener('click', () => {
+                        window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/snapshot?t=${Date.now()}`, '_blank');
+                    });
+
+                    const streamBtn = document.createElement('button');
+                    streamBtn.className = 'btn btn-primary';
+                    streamBtn.textContent = 'LIVE';
+                    streamBtn.addEventListener('click', () => {
+                        window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/stream`, '_blank');
+                    });
+
                     const editBtn = document.createElement('button');
                     editBtn.className = 'btn btn-secondary';
                     editBtn.textContent = 'EDIT';
@@ -759,6 +780,8 @@
 
                     cameraActions.appendChild(startBtn);
                     cameraActions.appendChild(stopBtn);
+                    cameraActions.appendChild(snapshotBtn);
+                    cameraActions.appendChild(streamBtn);
                     cameraActions.appendChild(editBtn);
                     cameraActions.appendChild(deleteBtn);
 
@@ -775,11 +798,18 @@
 
         // Add Camera Form
         document.getElementById('add-camera-btn').addEventListener('click', () => {
+            editingCameraId = null;
+            document.getElementById('camera-setup-form').reset();
+            document.getElementById('camera-id').disabled = false;
+            document.getElementById('test-result').innerHTML = '';
+            document.getElementById('preview-container').style.display = 'none';
             document.getElementById('camera-form').style.display = 'block';
             document.getElementById('camera-list').style.display = 'none';
         });
 
         document.getElementById('cancel-camera-btn').addEventListener('click', () => {
+            editingCameraId = null;
+            document.getElementById('camera-id').disabled = false;
             document.getElementById('camera-form').style.display = 'none';
             document.getElementById('camera-list').style.display = 'block';
         });
@@ -819,7 +849,7 @@
                     testResult.className = 'test-result test-success';
                     testResult.innerHTML = `
                         <strong>Connection Successful!</strong><br>
-                        Resolution: ${result.resolution ? result.resolution.width + 'x' + result.resolution.height : 'N/A'}<br>
+                        Resolution: ${formatResolution(result.resolution)}<br>
                         FPS: ${result.fps}<br>
                         Connection Time: ${result.connection_ms}ms<br>
                         Frames Received: ${result.frames_received}
@@ -827,7 +857,7 @@
 
                     // Show preview container
                     document.getElementById('preview-container').style.display = 'block';
-                    document.getElementById('camera-preview').src = '/api/v1/cameras/test/snapshot?url=' + encodeURIComponent(rtspUrl);
+                    document.getElementById('camera-preview').src = `${API_BASE}/cameras/test/snapshot?url=` + encodeURIComponent(rtspUrl) + '&t=' + Date.now();
                 } else {
                     testResult.className = 'test-result test-failure';
                     testResult.innerHTML = `<strong>Connection Failed:</strong> ${result.message}`;
@@ -863,18 +893,33 @@
             };
 
             try {
-                const response = await fetch(`${API_BASE}/cameras`, {
-                    method: 'POST',
+                const url = editingCameraId
+                    ? `${API_BASE}/cameras/${encodeURIComponent(editingCameraId)}`
+                    : `${API_BASE}/cameras`;
+                const method = editingCameraId ? 'PATCH' : 'POST';
+
+                const response = await fetch(url, {
+                    method,
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify(cameraData)
+                    body: JSON.stringify(editingCameraId ? {
+                        name: cameraData.name,
+                        source_type: cameraData.source_type,
+                        rtsp_url: cameraData.rtsp_url,
+                        enabled: cameraData.enabled,
+                        camera_role: cameraData.camera_role,
+                        features: cameraData.features
+                    } : cameraData)
                 });
 
                 if (response.ok) {
-                    alert('Camera saved successfully!');
+                    alert(editingCameraId ? 'Camera updated successfully!' : 'Camera saved successfully!');
+                    editingCameraId = null;
+                    document.getElementById('camera-id').disabled = false;
                     document.getElementById('camera-form').style.display = 'none';
                     document.getElementById('camera-list').style.display = 'block';
+                    document.getElementById('camera-setup-form').reset();
                     loadCameras();
                 } else {
                     const error = await response.json();
@@ -887,6 +932,49 @@
         });
 
         // Camera Control Functions
+        function formatResolution(resolution) {
+            if (!resolution) {
+                return 'N/A';
+            }
+            if (Array.isArray(resolution)) {
+                return `${resolution[0]}x${resolution[1]}`;
+            }
+            if (resolution.width && resolution.height) {
+                return `${resolution.width}x${resolution.height}`;
+            }
+            return 'N/A';
+        }
+
+        async function editCamera(camera) {
+            try {
+                const response = await fetch(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}?include_secret=true`);
+                if (!response.ok) {
+                    const error = await response.json();
+                    alert('Error loading camera settings: ' + (error.detail || 'Unknown error'));
+                    return;
+                }
+                const fullCamera = await response.json();
+                editingCameraId = fullCamera.camera_id;
+
+                document.getElementById('camera-id').value = fullCamera.camera_id;
+                document.getElementById('camera-id').disabled = true;
+                document.getElementById('camera-name').value = fullCamera.name || '';
+                document.getElementById('rtsp-url').value = fullCamera.rtsp_url || '';
+                document.getElementById('camera-role').value = fullCamera.camera_role || 'GENERAL';
+                document.getElementById('feature-attendance').checked = !!(fullCamera.features && fullCamera.features.attendance);
+                document.getElementById('feature-face-recognition').checked = !!(fullCamera.features && fullCamera.features.face_recognition);
+                document.getElementById('feature-unknown-detection').checked = !!(fullCamera.features && fullCamera.features.unknown_detection);
+                document.getElementById('feature-shoplifting').checked = !!(fullCamera.features && fullCamera.features.shoplifting);
+                document.getElementById('test-result').innerHTML = '';
+                document.getElementById('preview-container').style.display = 'none';
+                document.getElementById('camera-form').style.display = 'block';
+                document.getElementById('camera-list').style.display = 'none';
+            } catch (error) {
+                console.error('Error editing camera:', error);
+                alert('Error editing camera: ' + error.message);
+            }
+        }
+
         async function startCamera(cameraId) {
             try {
                 const response = await fetch(`${API_BASE}/cameras/${cameraId}/start`, {
@@ -894,7 +982,13 @@
                 });
 
                 if (response.ok) {
-                    alert('Camera started successfully!');
+                    const result = await response.json();
+                    if (result.diagnostics && result.diagnostics.success) {
+                        alert(`Camera online. Frames: ${result.diagnostics.frames_received}, FPS: ${result.diagnostics.fps}`);
+                    } else {
+                        alert('Camera could not be started: ' + ((result.diagnostics && result.diagnostics.message) || result.status));
+                    }
+                    loadCameras();
                 } else {
                     const error = await response.json();
                     alert('Error starting camera: ' + (error.detail || 'Unknown error'));
@@ -913,6 +1007,7 @@
 
                 if (response.ok) {
                     alert('Camera stopped successfully!');
+                    loadCameras();
                 } else {
                     const error = await response.json();
                     alert('Error stopping camera: ' + (error.detail || 'Unknown error'));

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import contextmanager
 import json, sqlite3, threading, uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,6 +7,7 @@ from typing import Optional, List, Dict, Any
 import re
 import cv2
 import time
+import sys
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -59,10 +61,18 @@ class CameraManager:
         self._lock = threading.RLock()
         self._init_db()
 
+    @contextmanager
     def _conn(self):
         c = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
         c.row_factory = sqlite3.Row
-        return c
+        try:
+            yield c
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
 
     def _init_db(self):
         with self._conn() as c:
@@ -234,8 +244,18 @@ class CameraManager:
             cur = c.execute('DELETE FROM cameras WHERE camera_id = ?', (camera_id,))
             return cur.rowcount > 0
 
+    def _open_video_capture(self, source: str):
+        """Open RTSP/file sources normally, and numeric webcam indexes with DirectShow on Windows."""
+        source_text = str(source).strip()
+        if source_text.isdigit():
+            device_index = int(source_text)
+            if sys.platform.startswith("win"):
+                return cv2.VideoCapture(device_index, cv2.CAP_DSHOW)
+            return cv2.VideoCapture(device_index)
+        return cv2.VideoCapture(source_text)
+
     def test_rtsp_connection(self, rtsp_url: str, timeout: int = 5) -> Dict[str, Any]:
-        """Test RTSP connection and return diagnostics"""
+        """Test RTSP/webcam connection and return diagnostics."""
         result = {
             'success': False,
             'message': '',
@@ -248,8 +268,7 @@ class CameraManager:
         start_time = time.time()
 
         try:
-            # Open the RTSP stream
-            cap = cv2.VideoCapture(rtsp_url)
+            cap = self._open_video_capture(rtsp_url)
 
             if not cap.isOpened():
                 result['message'] = 'Unable to open stream'
@@ -300,7 +319,11 @@ class CameraManager:
             result.update({
                 'success': True,
                 'message': 'Camera connected successfully',
-                'resolution': resolutions[-1] if resolutions else None,
+                'resolution': (
+                    {"width": resolutions[-1][0], "height": resolutions[-1][1]}
+                    if resolutions
+                    else None
+                ),
                 'fps': round(fps, 2),
                 'connection_ms': round(connection_time, 2),
                 'frames_received': frames_read
@@ -356,7 +379,60 @@ class CameraManager:
                 status.last_error
             ))
 
+    def delete_camera_status(self, camera_id: str) -> None:
+        """Delete runtime status for a camera."""
+        with self._lock, self._conn() as c:
+            c.execute('DELETE FROM camera_status WHERE camera_id = ?', (camera_id,))
+
     def get_camera_snapshot(self, camera_id: str) -> Optional[bytes]:
-        """Get latest camera snapshot (to be implemented by worker)"""
-        # This will be implemented by the camera worker
-        return None
+        """Read a fresh JPEG snapshot from a saved camera RTSP URL."""
+        camera = self.get_camera(camera_id)
+        if not camera:
+            return None
+        return self.read_rtsp_snapshot(camera.rtsp_url)
+
+    def read_rtsp_snapshot(self, rtsp_url: str) -> Optional[bytes]:
+        """Open an RTSP URL or webcam index, read one frame, and return it as JPEG bytes."""
+        cap = self._open_video_capture(rtsp_url)
+        try:
+            if not cap.isOpened():
+                return None
+
+            frame = None
+            for _ in range(10):
+                ok, candidate = cap.read()
+                if ok and candidate is not None:
+                    frame = candidate
+                    break
+                time.sleep(0.05)
+
+            if frame is None:
+                return None
+
+            ok, encoded = cv2.imencode(".jpg", frame)
+            if not ok:
+                return None
+            return encoded.tobytes()
+        finally:
+            cap.release()
+
+    def iter_rtsp_mjpeg(self, rtsp_url: str):
+        """Yield MJPEG frames from an RTSP URL or webcam index for browser preview."""
+        cap = self._open_video_capture(rtsp_url)
+        try:
+            while cap.isOpened():
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    break
+                ok, encoded = cv2.imencode(".jpg", frame)
+                if not ok:
+                    continue
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + encoded.tobytes()
+                    + b"\r\n"
+                )
+                time.sleep(0.03)
+        finally:
+            cap.release()

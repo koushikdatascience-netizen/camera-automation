@@ -2,14 +2,14 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import cv2, numpy as np
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query
 from camera_service.config import load_config
 from camera_service.models import PersonnelCreate, PersonnelPatch
 from camera_service.storage import SQLiteStore
 from camera_service.face_service import FaceService
 from camera_service.attendance_engine import AttendanceEngine
 from camera_service.camera.supervisor import CameraSupervisor
-from camera_service.camera_manager import CameraManager, CameraConfig, CameraStatus
+from camera_service.camera_manager import CameraManager, CameraConfig, CameraStatus, CameraState
 from typing import Optional
 from pydantic import BaseModel
 import json
@@ -38,11 +38,19 @@ def ready(): return {'status':'ready','camera_supervisor_running':supervisor.is_
 
 # Setup UI Route
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 import os
 
-# Mount static files
-app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "web", "static")), name="static")
+# Mount static files. check_dir=False keeps fresh/source-only installs from
+# failing at import time if no static assets are currently present.
+app.mount(
+    "/static",
+    StaticFiles(
+        directory=os.path.join(os.path.dirname(__file__), "web", "static"),
+        check_dir=False,
+    ),
+    name="static",
+)
 
 @app.get("/setup", response_class=HTMLResponse)
 async def setup_ui():
@@ -89,13 +97,14 @@ def list_cameras():
     }
 
 @app.get('/api/v1/cameras/{camera_id}')
-def get_camera(camera_id: str):
+def get_camera(camera_id: str, include_secret: bool = False):
     camera = camera_manager.get_camera(camera_id)
     if not camera:
         raise HTTPException(404, 'Camera not found')
+    rtsp_url = camera.rtsp_url if include_secret else camera_manager._mask_rtsp_password(camera.rtsp_url)
     return {
         **camera.model_dump(),
-        'rtsp_url': camera_manager._mask_rtsp_password(camera.rtsp_url)
+        'rtsp_url': rtsp_url
     }
 
 @app.patch('/api/v1/cameras/{camera_id}')
@@ -112,6 +121,7 @@ def update_camera(camera_id: str, updates: dict):
 def delete_camera(camera_id: str):
     if not camera_manager.delete_camera(camera_id):
         raise HTTPException(404, 'Camera not found')
+    camera_manager.delete_camera_status(camera_id)
     return {'deleted': True}
 
 # RTSP Test Connection API
@@ -122,6 +132,13 @@ class RTSPTestRequest(BaseModel):
 def test_rtsp_connection(request: RTSPTestRequest):
     result = camera_manager.test_rtsp_connection(request.rtsp_url)
     return result
+
+@app.get('/api/v1/cameras/test/snapshot')
+def test_rtsp_snapshot(url: str = Query(...)):
+    snapshot = camera_manager.read_rtsp_snapshot(url)
+    if not snapshot:
+        raise HTTPException(404, 'No snapshot available')
+    return Response(content=snapshot, media_type='image/jpeg')
 
 # Camera Status API
 @app.get('/api/v1/cameras/{camera_id}/status')
@@ -134,18 +151,41 @@ def get_camera_status(camera_id: str):
 # Camera Control APIs
 @app.post('/api/v1/cameras/{camera_id}/start')
 def start_camera(camera_id: str):
-    # This will be implemented by the camera supervisor
-    return {'status': 'starting', 'camera_id': camera_id}
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    result = camera_manager.test_rtsp_connection(camera.rtsp_url)
+    state = CameraState.ONLINE if result.get('success') else CameraState.DEGRADED
+    camera_manager.update_camera_status(camera_id, CameraStatus(
+        camera_id=camera_id,
+        name=camera.name,
+        state=state,
+        online=bool(result.get('success')),
+        capture_fps=float(result.get('fps') or 0),
+        frames_received=int(result.get('frames_received') or 0),
+        last_error=None if result.get('success') else result.get('message', 'Unable to open stream'),
+    ))
+    return {'status': state.value.lower(), 'camera_id': camera_id, 'diagnostics': result}
 
 @app.post('/api/v1/cameras/{camera_id}/stop')
 def stop_camera(camera_id: str):
-    # This will be implemented by the camera supervisor
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    camera_manager.update_camera_status(camera_id, CameraStatus(
+        camera_id=camera_id,
+        name=camera.name,
+        state=CameraState.STOPPED,
+        online=False,
+    ))
     return {'status': 'stopping', 'camera_id': camera_id}
 
 @app.post('/api/v1/cameras/{camera_id}/restart')
 def restart_camera(camera_id: str):
-    # This will be implemented by the camera supervisor
-    return {'status': 'restarting', 'camera_id': camera_id}
+    stop_camera(camera_id)
+    started = start_camera(camera_id)
+    started['status'] = 'restarted_' + started['status']
+    return started
 
 # Camera Snapshot API
 @app.get('/api/v1/cameras/{camera_id}/snapshot')
@@ -153,7 +193,17 @@ def get_camera_snapshot(camera_id: str):
     snapshot = camera_manager.get_camera_snapshot(camera_id)
     if not snapshot:
         raise HTTPException(404, 'No snapshot available')
-    return {'image_data': snapshot.hex()}  # Return as hex for simplicity in this version
+    return Response(content=snapshot, media_type='image/jpeg')
+
+@app.get('/api/v1/cameras/{camera_id}/stream')
+def stream_camera(camera_id: str):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    return StreamingResponse(
+        camera_manager.iter_rtsp_mjpeg(camera.rtsp_url),
+        media_type='multipart/x-mixed-replace; boundary=frame',
+    )
 
 # Personnel APIs
 @app.post('/api/v1/personnel')

@@ -11,12 +11,16 @@ param (
 # Configuration
 $ProjectName = "CameraAutomation"
 $SpecFile = "packaging/windows/CameraAutomation.spec"
-$PythonPath = "python"
-$PyInstallerPath = "pyinstaller"
-
 # Ensure we're in the project root
 $ProjectRoot = $PSScriptRoot + "\..\.."
 Set-Location $ProjectRoot
+
+$RepoVenvPython = Join-Path $ProjectRoot ".venv311\Scripts\python.exe"
+if (Test-Path $RepoVenvPython) {
+    $PythonPath = $RepoVenvPython
+} else {
+    $PythonPath = "python"
+}
 
 # Clean previous build if requested
 if ($CleanBuild) {
@@ -53,7 +57,7 @@ $BuildArgs = @(
 
 try {
     Write-Host "Running PyInstaller with spec file: $SpecFile"
-    & $PyInstallerPath @BuildArgs $SpecFile
+    & $PythonPath -m PyInstaller @BuildArgs $SpecFile
 
     # Check exit code immediately
     if ($LASTEXITCODE -ne 0) {

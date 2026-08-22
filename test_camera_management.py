@@ -36,19 +36,19 @@ def test_camera_manager():
         }
 
         camera = manager.create_camera(camera_data)
-        print(f"✓ Camera created: {camera.camera_id}")
+        print(f"[OK] Camera created: {camera.camera_id}")
 
         # Test 2: List cameras
         print("\nTest 2: Listing cameras...")
         cameras = manager.list_cameras()
-        print(f"✓ Found {len(cameras)} cameras")
+        print(f"[OK] Found {len(cameras)} cameras")
         assert len(cameras) == 1
         assert cameras[0].camera_id == 'test_camera_01'
 
         # Test 3: Get camera by ID
         print("\nTest 3: Getting camera by ID...")
         retrieved_camera = manager.get_camera('test_camera_01')
-        print(f"✓ Retrieved camera: {retrieved_camera.name}")
+        print(f"[OK] Retrieved camera: {retrieved_camera.name}")
         assert retrieved_camera.name == 'Test Camera'
 
         # Test 4: Update camera
@@ -58,7 +58,7 @@ def test_camera_manager():
             'enabled': False
         }
         updated_camera = manager.update_camera('test_camera_01', updates)
-        print(f"✓ Camera updated: {updated_camera.name}, Enabled: {updated_camera.enabled}")
+        print(f"[OK] Camera updated: {updated_camera.name}, Enabled: {updated_camera.enabled}")
         assert updated_camera.name == 'Updated Test Camera'
         assert updated_camera.enabled == False
 
@@ -73,21 +73,21 @@ def test_camera_manager():
         # Test 6: Test RTSP connection (with invalid URL - should fail gracefully)
         print("\nTest 6: Testing RTSP connection...")
         result = manager.test_rtsp_connection('rtsp://invalid:url@192.168.1.255:554/nonexistent')
-        print(f"✓ RTSP test completed with success={result['success']}, message='{result['message']}'")
+        print(f"[OK] RTSP test completed with success={result['success']}, message='{result['message']}'")
         assert result['success'] == False
 
         # Test 7: Delete camera
         print("\nTest 7: Deleting camera...")
         success = manager.delete_camera('test_camera_01')
-        print(f"✓ Camera deleted: {success}")
+        print(f"[OK] Camera deleted: {success}")
         assert success == True
 
         # Verify deletion
         cameras_after_delete = manager.list_cameras()
-        print(f"✓ Cameras after deletion: {len(cameras_after_delete)}")
+        print(f"[OK] Cameras after deletion: {len(cameras_after_delete)}")
         assert len(cameras_after_delete) == 0
 
-        print("\n🎉 All camera management tests passed!")
+        print("\n[DONE] All camera management tests passed!")
 
     finally:
         # Clean up

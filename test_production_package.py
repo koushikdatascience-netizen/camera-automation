@@ -15,7 +15,7 @@ from pathlib import Path
 
 def test_api_endpoints():
     """Test all the new API endpoints"""
-    print("🧪 Testing API Endpoints...")
+    print("[TEST] Testing API Endpoints...")
 
     # Start the application in a separate process
     print("Starting test server...")
@@ -39,7 +39,7 @@ def test_api_endpoints():
             if response.status_code == 200:
                 data = response.json()
                 if data.get('status') == 'ok':
-                    print("✓ Health endpoint working")
+                    print("[OK] Health endpoint working")
                     break
         except requests.exceptions.RequestException:
             pass
@@ -63,7 +63,7 @@ def test_api_endpoints():
                 data = response.json()
                 # Check for 'status' field which is what the endpoint actually returns
                 if data.get('status') == 'ready':
-                    print("✓ Ready endpoint reports ready")
+                    print("[OK] Ready endpoint reports ready")
                     break
             elif response.status_code == 503:
                 # Still initializing, continue polling
@@ -84,14 +84,14 @@ def test_api_endpoints():
         assert response.status_code == 200
         data = response.json()
         assert data['status'] == 'ok'
-        print("✓ Health endpoint working")
+        print("[OK] Health endpoint working")
 
         # Test 2: Setup UI endpoint
         print("\n2. Testing /setup endpoint...")
         response = requests.get(f"{base_url}/setup")
         assert response.status_code == 200
         assert "Camera Automation Setup" in response.text
-        print("✓ Setup UI endpoint working")
+        print("[OK] Setup UI endpoint working")
 
         # Test 3: Camera CRUD endpoints
         print("\n3. Testing Camera CRUD endpoints...")
@@ -117,7 +117,7 @@ def test_api_endpoints():
         created_camera = response.json()['camera']
         assert created_camera['camera_id'] == "test_camera_01"
         assert "*****" in created_camera['rtsp_url']  # Password should be masked
-        print("✓ Camera creation working with password masking")
+        print("[OK] Camera creation working with password masking")
 
         # List cameras
         response = requests.get(f"{base_url}/api/v1/cameras")
@@ -125,14 +125,14 @@ def test_api_endpoints():
         cameras = response.json()['items']
         assert len(cameras) == 1
         assert cameras[0]['camera_id'] == "test_camera_01"
-        print("✓ Camera listing working")
+        print("[OK] Camera listing working")
 
         # Get single camera
         response = requests.get(f"{base_url}/api/v1/cameras/test_camera_01")
         assert response.status_code == 200
         camera = response.json()
         assert camera['camera_id'] == "test_camera_01"
-        print("✓ Single camera retrieval working")
+        print("[OK] Single camera retrieval working")
 
         # Update camera
         update_data = {
@@ -144,7 +144,7 @@ def test_api_endpoints():
         updated_camera = response.json()
         assert updated_camera['name'] == "Updated Test Camera"
         assert updated_camera['enabled'] == False
-        print("✓ Camera update working")
+        print("[OK] Camera update working")
 
         # Test 4: RTSP connection test
         print("\n4. Testing RTSP connection endpoint...")
@@ -156,41 +156,41 @@ def test_api_endpoints():
         result = response.json()
         assert result['success'] == False
         assert 'message' in result
-        print("✓ RTSP connection test working (fails gracefully with invalid URL)")
+        print("[OK] RTSP connection test working (fails gracefully with invalid URL)")
 
         # Test 5: Camera status endpoint
         print("\n5. Testing camera status endpoint...")
         response = requests.get(f"{base_url}/api/v1/cameras/test_camera_01/status")
         # This might return 404 if status not set, which is expected for this test
         if response.status_code == 404:
-            print("✓ Camera status endpoint working (returns 404 for non-existent status)")
+            print("[OK] Camera status endpoint working (returns 404 for non-existent status)")
         else:
             assert response.status_code == 200
-            print("✓ Camera status endpoint working")
+            print("[OK] Camera status endpoint working")
 
         # Test 6: Camera control endpoints
         print("\n6. Testing camera control endpoints...")
         response = requests.post(f"{base_url}/api/v1/cameras/test_camera_01/start")
         assert response.status_code == 200
-        assert response.json()['status'] == 'starting'
-        print("✓ Camera start endpoint working")
+        assert response.json()['status'] in {'online', 'degraded'}
+        print("[OK] Camera start endpoint working")
 
         response = requests.post(f"{base_url}/api/v1/cameras/test_camera_01/stop")
         assert response.status_code == 200
         assert response.json()['status'] == 'stopping'
-        print("✓ Camera stop endpoint working")
+        print("[OK] Camera stop endpoint working")
 
         response = requests.post(f"{base_url}/api/v1/cameras/test_camera_01/restart")
         assert response.status_code == 200
-        assert response.json()['status'] == 'restarting'
-        print("✓ Camera restart endpoint working")
+        assert response.json()['status'] in {'restarted_online', 'restarted_degraded'}
+        print("[OK] Camera restart endpoint working")
 
         # Test 7: Delete camera
         print("\n7. Testing camera deletion...")
         response = requests.delete(f"{base_url}/api/v1/cameras/test_camera_01")
         assert response.status_code == 200
         assert response.json()['deleted'] == True
-        print("✓ Camera deletion working")
+        print("[OK] Camera deletion working")
 
         # Test 8: Personnel endpoints (existing functionality)
         print("\n8. Testing personnel endpoints...")
@@ -203,26 +203,26 @@ def test_api_endpoints():
         assert response.status_code == 200
         person = response.json()
         assert person['employee_code'] == personnel_data['employee_code']
-        print("✓ Personnel creation working")
+        print("[OK] Personnel creation working")
 
         # Test 9: Attendance endpoints (existing functionality)
         print("\n9. Testing attendance endpoints...")
         response = requests.get(f"{base_url}/api/v1/attendance")
         assert response.status_code == 200
         assert 'items' in response.json()
-        print("✓ Attendance endpoints working")
+        print("[OK] Attendance endpoints working")
 
         # Test 10: Unknown incidents endpoints (existing functionality)
         print("\n10. Testing unknown incidents endpoints...")
         response = requests.get(f"{base_url}/api/v1/unknown-incidents")
         assert response.status_code == 200
         assert 'items' in response.json()
-        print("✓ Unknown incidents endpoints working")
+        print("[OK] Unknown incidents endpoints working")
 
-        print("\n🎉 All API endpoint tests passed!")
+        print("\n[DONE] All API endpoint tests passed!")
 
     except Exception as e:
-        print(f"❌ API test failed: {e}")
+        print(f"[ERROR] API test failed: {e}")
         raise
     finally:
         # Clean up
@@ -231,7 +231,7 @@ def test_api_endpoints():
 
 def test_camera_manager_directly():
     """Test the camera manager directly"""
-    print("\n🧪 Testing Camera Manager Directly...")
+    print("\n[TEST] Testing Camera Manager Directly...")
 
     # Create a temporary database
     with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp_db:
@@ -247,15 +247,15 @@ def test_camera_manager_directly():
         masked_url = manager._mask_rtsp_password(test_url)
         assert "*****" in masked_url
         assert "secret123" not in masked_url
-        print("✓ Password masking working")
+        print("[OK] Password masking working")
 
         # Test RTSP connection (should fail gracefully)
         result = manager.test_rtsp_connection("rtsp://invalid:url@192.168.1.255:554/nonexistent")
         assert result['success'] == False
         assert 'message' in result
-        print("✓ RTSP connection test working")
+        print("[OK] RTSP connection test working")
 
-        print("✓ Camera manager direct tests passed!")
+        print("[OK] Camera manager direct tests passed!")
 
     finally:
         if os.path.exists(db_path):
@@ -263,7 +263,7 @@ def test_camera_manager_directly():
 
 def test_launcher_script():
     """Test the launcher script functionality"""
-    print("\n🧪 Testing Launcher Script...")
+    print("\n[TEST] Testing Launcher Script...")
 
     # Test that the launcher script exists and is valid Python
     launcher_path = "camera_service/launcher.py"
@@ -276,11 +276,11 @@ def test_launcher_script():
         assert 'uvicorn' in launcher_code
         assert 'main' in launcher_code
 
-    print("✓ Launcher script structure validated!")
+    print("[OK] Launcher script structure validated!")
 
 def test_packaging_files():
     """Test that all packaging files exist"""
-    print("\n🧪 Testing Packaging Files...")
+    print("\n[TEST] Testing Packaging Files...")
 
     required_files = [
         "packaging/windows/build_windows.ps1",
@@ -295,10 +295,10 @@ def test_packaging_files():
 
     for file_path in required_files:
         if not os.path.exists(file_path):
-            print(f"❌ Missing file: {file_path}")
+            print(f"[ERROR] Missing file: {file_path}")
             return False
 
-    print("✓ All packaging files present!")
+    print("[OK] All packaging files present!")
 
     # Test build script content
     with open("packaging/windows/build_windows.ps1", 'r') as f:
@@ -307,18 +307,18 @@ def test_packaging_files():
         assert 'CameraAutomation' in build_script
         assert 'pyinstaller' in build_script
 
-    print("✓ Build script content validated!")
+    print("[OK] Build script content validated!")
 
     return True
 
 def main():
     """Run all tests"""
-    print("🚀 Starting Camera Automation Production Package Tests\n")
+    print("[START] Starting Camera Automation Production Package Tests\n")
 
     try:
         # Test 1: Packaging files
         if not test_packaging_files():
-            print("❌ Packaging files test failed")
+            print("[ERROR] Packaging files test failed")
             return False
 
         # Test 2: Camera manager directly
@@ -330,12 +330,12 @@ def main():
         # Test 4: API endpoints (this will start a test server)
         test_api_endpoints()
 
-        print("\n🎉 ALL TESTS PASSED! Production package is ready!")
+        print("\n[DONE] ALL TESTS PASSED! Production package is ready!")
 
         return True
 
     except Exception as e:
-        print(f"\n❌ Test failed with error: {e}")
+        print(f"\n[ERROR] Test failed with error: {e}")
         import traceback
         traceback.print_exc()
         return False
