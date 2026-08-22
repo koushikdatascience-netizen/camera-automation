@@ -50,6 +50,7 @@ class CameraConfig(BaseModel):
     tracking_fps: float = 3.0
     tracking_imgsz: int = 384
     tracking_quality: int = 65
+    tracking_mode: str = "detect"
     features: CameraFeatures = Field(default_factory=CameraFeatures)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -130,6 +131,7 @@ class CameraManager:
             self._ensure_column(c, 'cameras', 'tracking_fps', 'REAL NOT NULL DEFAULT 3.0')
             self._ensure_column(c, 'cameras', 'tracking_imgsz', 'INTEGER NOT NULL DEFAULT 384')
             self._ensure_column(c, 'cameras', 'tracking_quality', 'INTEGER NOT NULL DEFAULT 65')
+            self._ensure_column(c, 'cameras', 'tracking_mode', "TEXT NOT NULL DEFAULT 'detect'")
 
     def _ensure_column(self, conn, table: str, column: str, definition: str):
         existing = {row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -170,6 +172,7 @@ class CameraManager:
             tracking_fps=max(1.0, min(float(camera_data.get('tracking_fps', 3.0) or 3.0), 12.0)),
             tracking_imgsz=max(256, min(int(camera_data.get('tracking_imgsz', 384) or 384), 640)),
             tracking_quality=max(35, min(int(camera_data.get('tracking_quality', 65) or 65), 95)),
+            tracking_mode=str(camera_data.get('tracking_mode', 'detect') or 'detect').strip().lower() if str(camera_data.get('tracking_mode', 'detect') or 'detect').strip().lower() in {'detect','track'} else 'detect',
             features=CameraFeatures(**features),
             created_at=datetime.now(timezone.utc).isoformat(),
             updated_at=datetime.now(timezone.utc).isoformat()
@@ -180,8 +183,8 @@ class CameraManager:
                 INSERT INTO cameras
                 (id, camera_id, name, source_type, rtsp_url, enabled, camera_role,
                  camera_zone, crowd_threshold, tracking_fps, tracking_imgsz,
-                 tracking_quality, features_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tracking_quality, tracking_mode, features_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 str(uuid.uuid4()),
                 config.camera_id,
@@ -195,6 +198,7 @@ class CameraManager:
                 config.tracking_fps,
                 config.tracking_imgsz,
                 config.tracking_quality,
+                config.tracking_mode,
                 json.dumps(config.features.model_dump()),
                 config.created_at,
                 config.updated_at
@@ -225,6 +229,7 @@ class CameraManager:
                 tracking_fps=float(row['tracking_fps']),
                 tracking_imgsz=int(row['tracking_imgsz']),
                 tracking_quality=int(row['tracking_quality']),
+                tracking_mode=row['tracking_mode'] if row['tracking_mode'] in {'detect','track'} else 'detect',
                 features=CameraFeatures(**json.loads(row['features_json'])),
                 created_at=row['created_at'],
                 updated_at=row['updated_at']
@@ -247,6 +252,7 @@ class CameraManager:
                     tracking_fps=float(row['tracking_fps']),
                     tracking_imgsz=int(row['tracking_imgsz']),
                     tracking_quality=int(row['tracking_quality']),
+                    tracking_mode=row['tracking_mode'] if row['tracking_mode'] in {'detect','track'} else 'detect',
                     features=CameraFeatures(**json.loads(row['features_json'])),
                     created_at=row['created_at'],
                     updated_at=row['updated_at']
@@ -281,6 +287,9 @@ class CameraManager:
                 camera.tracking_imgsz = max(256, min(int(updates['tracking_imgsz']), 640))
             if 'tracking_quality' in updates:
                 camera.tracking_quality = max(35, min(int(updates['tracking_quality']), 95))
+            if 'tracking_mode' in updates:
+                mode = str(updates['tracking_mode']).strip().lower()
+                camera.tracking_mode = mode if mode in {'detect','track'} else 'detect'
             if 'features' in updates:
                 camera.features = CameraFeatures(**updates['features'])
 
@@ -292,6 +301,7 @@ class CameraManager:
                     SET name = ?, source_type = ?, rtsp_url = ?, enabled = ?,
                         camera_role = ?, camera_zone = ?, crowd_threshold = ?,
                         tracking_fps = ?, tracking_imgsz = ?, tracking_quality = ?,
+                        tracking_mode = ?,
                         features_json = ?, updated_at = ?
                     WHERE camera_id = ?
                 ''', (
@@ -305,6 +315,7 @@ class CameraManager:
                     camera.tracking_fps,
                     camera.tracking_imgsz,
                     camera.tracking_quality,
+                    camera.tracking_mode,
                     json.dumps(camera.features.model_dump()),
                     camera.updated_at,
                     camera_id
@@ -477,15 +488,25 @@ class CameraManager:
 
             try:
                 imgsz = int(getattr(camera_config, "tracking_imgsz", 384) or 384)
-                results = model.track(
-                    frame,
-                    persist=True,
-                    tracker="bytetrack.yaml",
-                    conf=0.20,
-                    imgsz=imgsz,
-                    max_det=40,
-                    verbose=False,
-                )
+                mode = getattr(camera_config, "tracking_mode", "detect") or "detect"
+                if mode == "track":
+                    results = model.track(
+                        frame,
+                        persist=True,
+                        tracker="bytetrack.yaml",
+                        conf=0.20,
+                        imgsz=imgsz,
+                        max_det=40,
+                        verbose=False,
+                    )
+                else:
+                    results = model.predict(
+                        frame,
+                        conf=0.20,
+                        imgsz=imgsz,
+                        max_det=40,
+                        verbose=False,
+                    )
             except Exception:
                 results = model.predict(
                     frame,

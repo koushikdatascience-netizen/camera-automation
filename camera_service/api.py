@@ -170,6 +170,7 @@ class CameraCreate(BaseModel):
     tracking_fps: float = 3.0
     tracking_imgsz: int = 384
     tracking_quality: int = 65
+    tracking_mode: str = "detect"
     features: dict = {}
 
 @app.post('/api/v1/cameras')
