@@ -740,8 +740,7 @@
                 const camerasData = await camerasResponse.json();
                 document.getElementById('camera-count').textContent = camerasData.items.length;
 
-                // Count online cameras (placeholder)
-                document.getElementById('online-cameras').textContent = '0';
+                document.getElementById('online-cameras').textContent = camerasData.items.filter(camera => camera.status && camera.status.online).length;
 
                 // Load personnel count
                 const personnelResponse = await fetch(`${API_BASE}/personnel`);
@@ -815,7 +814,11 @@
                     cameraInfo.appendChild(cameraUrl);
 
                     const statusText = document.createElement('p');
-                    statusText.textContent = 'Status: configured';
+                    const status = camera.status;
+                    statusText.textContent = status
+                        ? `Status: ${status.state}${status.last_error ? ' - ' + status.last_error : ''}`
+                        : 'Status: configured';
+                    statusText.className = status && status.online ? 'status-ok' : 'status-warning';
                     statusText.id = `camera-status-${camera.camera_id}`;
                     cameraInfo.appendChild(statusText);
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json, sqlite3, threading, uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -7,8 +8,17 @@ from typing import Optional
 class SQLiteStore:
     def __init__(self, path: str):
         self.path=path; Path(path).parent.mkdir(parents=True, exist_ok=True); self._lock=threading.RLock(); self._init()
+    @contextmanager
     def _conn(self):
-        c=sqlite3.connect(self.path, timeout=30, check_same_thread=False); c.row_factory=sqlite3.Row; return c
+        c=sqlite3.connect(self.path, timeout=30, check_same_thread=False); c.row_factory=sqlite3.Row
+        try:
+            yield c
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
     def _init(self):
         with self._conn() as c:
             c.executescript('''

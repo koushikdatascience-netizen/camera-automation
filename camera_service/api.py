@@ -31,7 +31,14 @@ app=FastAPI(title='Camera Automation Production P0',lifespan=lifespan)
 def get_store(): return store
 
 @app.get('/health')
-def health(): return {'status':'ok','store_id':config.store_id,'cameras':len(config.cameras)}
+def health():
+    statuses = [camera_manager.get_camera_status(cam.camera_id) for cam in camera_manager.list_cameras()]
+    return {
+        'status':'ok',
+        'store_id':config.store_id,
+        'cameras':len(camera_manager.list_cameras()),
+        'online_cameras':sum(1 for status in statuses if status and status.online),
+    }
 
 @app.get('/ready')
 def ready(): return {'status':'ready','camera_supervisor_running':supervisor.is_running()}
@@ -87,13 +94,16 @@ def create_camera(camera_data: CameraCreate):
 @app.get('/api/v1/cameras')
 def list_cameras():
     cameras = camera_manager.list_cameras()
+    items = []
+    for cam in cameras:
+        status = camera_manager.get_camera_status(cam.camera_id)
+        items.append({
+            **cam.model_dump(),
+            'rtsp_url': camera_manager._mask_rtsp_password(cam.rtsp_url),
+            'status': status.model_dump() if status else None,
+        })
     return {
-        'items': [
-            {
-                **cam.model_dump(),
-                'rtsp_url': camera_manager._mask_rtsp_password(cam.rtsp_url)
-            } for cam in cameras
-        ]
+        'items': items
     }
 
 @app.get('/api/v1/cameras/{camera_id}')
@@ -211,7 +221,7 @@ def stream_camera_tracking(camera_id: str):
     if not camera:
         raise HTTPException(404, 'Camera not found')
     return StreamingResponse(
-        camera_manager.iter_tracking_mjpeg(camera.rtsp_url, config.yolo_model, face_service, config.recognition),
+        camera_manager.iter_tracking_mjpeg(camera.rtsp_url, config.yolo_model, face_service, config.recognition, camera.camera_id, attendance_engine),
         media_type='multipart/x-mixed-replace; boundary=frame',
     )
 

@@ -12,6 +12,7 @@ import sys
 import subprocess
 from pydantic import BaseModel, Field
 from enum import Enum
+from camera_service.models import IdentitySeen
 
 class CameraRole(str, Enum):
     ENTRANCE_EXIT = "ENTRANCE_EXIT"
@@ -63,6 +64,7 @@ class CameraManager:
         self._lock = threading.RLock()
         self._tracking_models = {}
         self._tracking_error = None
+        self._stream_active_tracks = {}
         self._init_db()
 
     @contextmanager
@@ -158,6 +160,7 @@ class CameraManager:
                 config.created_at,
                 config.updated_at
             ))
+            c.execute("INSERT OR REPLACE INTO camera_status(camera_id,state,online) VALUES(?,?,0)",(config.camera_id,CameraState.STOPPED.value))
 
         return config
 
@@ -374,7 +377,7 @@ class CameraManager:
                 except subprocess.TimeoutExpired:
                     process.kill()
 
-    def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None):
+    def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_id: str | None = None, attendance_engine=None):
         try:
             model = self._tracking_models.get(model_path)
             if model is None:
@@ -403,16 +406,53 @@ class CameraManager:
             confs = boxes.conf.cpu().tolist() if boxes.conf is not None else []
             classes = boxes.cls.int().cpu().tolist() if boxes.cls is not None else []
             track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [None] * len(xyxy)
+            active_known_tracks = set()
 
             for coords, conf, class_id, track_id in zip(xyxy, confs, classes, track_ids):
                 x1, y1, x2, y2 = [int(v) for v in coords]
                 label = names.get(class_id, f"class_{class_id}")
+                recognized_text = None
+
+                if (
+                    label == "person"
+                    and track_id is not None
+                    and face_service is not None
+                    and recognition_config is not None
+                    and camera_id is not None
+                    and attendance_engine is not None
+                ):
+                    roi = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
+                    if roi.size:
+                        faces = face_service.detect(roi)
+                        if faces:
+                            best = max(faces, key=lambda face: face_service.quality(face, roi.shape))
+                            if face_service.quality(best, roi.shape) >= recognition_config.minimum_face_quality:
+                                match, score = face_service.recognize(best.get("embedding"), recognition_config.known_threshold)
+                                if match:
+                                    active_known_tracks.add(str(track_id))
+                                    recognized_text = f"{match['full_name']} {score:.2f}"
+                                    attendance_engine.on_identity(IdentitySeen(
+                                        store_id=attendance_engine.store_id,
+                                        camera_id=camera_id,
+                                        track_id=str(track_id),
+                                        person_id=match["person_id"],
+                                        timestamp=datetime.now(timezone.utc),
+                                        confidence=score,
+                                        bbox=(float(x1), float(y1), float(x2), float(y2)),
+                                    ))
+
                 track_text = f" ID {track_id}" if track_id is not None else ""
-                text = f"{label}{track_text} {conf:.2f}"
+                text = recognized_text or f"{label}{track_text} {conf:.2f}"
                 color = (0, 180, 255) if label == "person" else (40, 220, 80)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 220), y1), color, -1)
                 cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+
+            if camera_id is not None and attendance_engine is not None:
+                previous = self._stream_active_tracks.get(camera_id, set())
+                for lost_track in previous - active_known_tracks:
+                    attendance_engine.on_track_lost(camera_id, lost_track)
+                self._stream_active_tracks[camera_id] = active_known_tracks
 
             if face_service is not None and recognition_config is not None:
                 try:
@@ -456,8 +496,8 @@ class CameraManager:
             )
             return frame
 
-    def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None) -> Optional[bytes]:
-        annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config)
+    def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_id: str | None = None, attendance_engine=None) -> Optional[bytes]:
+        annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_id, attendance_engine)
         ok, encoded = cv2.imencode(".jpg", annotated)
         if not ok:
             return None
@@ -759,14 +799,14 @@ class CameraManager:
         finally:
             cap.release()
 
-    def iter_tracking_mjpeg(self, rtsp_url: str, model_path: str, face_service=None, recognition_config=None):
+    def iter_tracking_mjpeg(self, rtsp_url: str, model_path: str, face_service=None, recognition_config=None, camera_id: str | None = None, attendance_engine=None):
         """Yield browser-preview MJPEG frames with YOLO tracking overlays."""
         if self._is_dshow_source(rtsp_url):
             for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=6):
                 frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if frame is None:
                     continue
-                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config)
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_id, attendance_engine)
                 if encoded:
                     yield (
                         b"--frame\r\n"
@@ -782,7 +822,7 @@ class CameraManager:
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     break
-                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config)
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_id, attendance_engine)
                 if encoded:
                     yield (
                         b"--frame\r\n"
