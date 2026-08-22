@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import re
 import cv2
+import numpy as np
 import time
 import sys
+import subprocess
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -250,6 +252,51 @@ class CameraManager:
         cap, _ = self._open_video_capture_with_diagnostics(source)
         return cap
 
+    def _is_dshow_source(self, source: str) -> bool:
+        return str(source).strip().lower().startswith("dshow:")
+
+    def _dshow_device_name(self, source: str) -> str:
+        return str(source).strip().split(":", 1)[1].strip()
+
+    def _read_dshow_snapshot(self, source: str) -> Optional[bytes]:
+        device_name = self._dshow_device_name(source)
+        if not device_name:
+            return None
+
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "dshow",
+            "-video_size",
+            "640x480",
+            "-i",
+            f"video={device_name}",
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "-",
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+        if completed.returncode != 0 or not completed.stdout:
+            return None
+        return completed.stdout
+
     def _open_video_capture_with_diagnostics(self, source: str):
         """Open a video source and return both the capture and backend attempts."""
         source_text = str(source).strip()
@@ -330,6 +377,39 @@ class CameraManager:
         start_time = time.time()
 
         try:
+            if self._is_dshow_source(source_text):
+                snapshot = self._read_dshow_snapshot(source_text)
+                if not snapshot:
+                    result['message'] = 'Unable to read DirectShow camera through ffmpeg'
+                    result['attempts'] = [{
+                        "backend": "FFMPEG_DSHOW",
+                        "opened": False,
+                        "readable": False,
+                        "message": "ffmpeg could not capture a frame",
+                    }]
+                    return result
+
+                image = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if image is None:
+                    result['message'] = 'DirectShow camera returned an invalid frame'
+                    return result
+                h, w = image.shape[:2]
+                result.update({
+                    'success': True,
+                    'message': 'Camera connected successfully via ffmpeg DirectShow',
+                    'attempts': [{
+                        "backend": "FFMPEG_DSHOW",
+                        "opened": True,
+                        "readable": True,
+                        "frame_shape": list(image.shape),
+                    }],
+                    'resolution': {"width": w, "height": h},
+                    'fps': 1,
+                    'connection_ms': round((time.time() - start_time) * 1000, 2),
+                    'frames_received': 1,
+                })
+                return result
+
             cap, attempts = self._open_video_capture_with_diagnostics(source_text)
             result['attempts'] = attempts
 
@@ -456,6 +536,9 @@ class CameraManager:
 
     def read_rtsp_snapshot(self, rtsp_url: str) -> Optional[bytes]:
         """Open an RTSP URL or webcam index, read one frame, and return it as JPEG bytes."""
+        if self._is_dshow_source(rtsp_url):
+            return self._read_dshow_snapshot(rtsp_url)
+
         cap = self._open_video_capture(rtsp_url)
         try:
             if not cap.isOpened():
@@ -481,6 +564,20 @@ class CameraManager:
 
     def iter_rtsp_mjpeg(self, rtsp_url: str):
         """Yield MJPEG frames from an RTSP URL or webcam index for browser preview."""
+        if self._is_dshow_source(rtsp_url):
+            while True:
+                snapshot = self._read_dshow_snapshot(rtsp_url)
+                if not snapshot:
+                    break
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + snapshot
+                    + b"\r\n"
+                )
+                time.sleep(0.2)
+            return
+
         cap = self._open_video_capture(rtsp_url)
         try:
             while cap.isOpened():
