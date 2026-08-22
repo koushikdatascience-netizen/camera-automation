@@ -725,9 +725,6 @@ class CameraManager:
     def _draw_tracking_demo_overlay(self, frame, camera_config: CameraConfig, stream_state: dict, attendance_engine=None, store=None):
         overlays = stream_state.get("latest_overlays") or []
         summary = stream_state.get("latest_summary") or {}
-        now = time.monotonic()
-        last_ai_at = summary.get("updated_at") or stream_state.get("last_ai_at") or 0.0
-        age = now - last_ai_at if last_ai_at else None
 
         for overlay in overlays:
             x1, y1, x2, y2 = overlay["bbox"]
@@ -738,61 +735,10 @@ class CameraManager:
             cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + label_width), y1), color, -1)
             cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
 
-        panel_h = 172
-        panel_w = min(560, frame.shape[1] - 20)
-        x0, y0 = 10, 10
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-
-        ai_status = "AI DETECTING"
-        if stream_state.get("ai_running"):
-            ai_status = "AI SCANNING..."
-        elif age is None:
-            ai_status = "AI WARMING UP"
-        elif age > 5:
-            ai_status = "AI WAITING FOR NEXT FRAME"
-
-        if summary.get("error"):
-            ai_status = "AI ERROR"
-
-        class_counts = summary.get("class_counts") or {}
-        item_parts = [
-            f"{name}:{count}"
-            for name, count in sorted(class_counts.items(), key=lambda item: (-item[1], item[0]))
-            if name != "person"
-        ][:5]
-        item_text = ", ".join(item_parts) if item_parts else "none"
-        recognized = summary.get("recognized_names") or []
-        recognized_text = ", ".join(dict.fromkeys(recognized)) if recognized else "none"
-        enabled_features = summary.get("feature_lines") or []
-        feature_text = ", ".join(enabled_features) if enabled_features else "Basic Tracking"
-
-        lines = [
-            f"LIVE TRACKING - {camera_config.name}",
-            f"{ai_status} | camera {camera_config.camera_id}",
-            f"People {summary.get('people', 0)} | Objects {summary.get('objects', 0)} | Known {summary.get('known', 0)} | Unknown {summary.get('unknown', 0)}",
-            f"Names: {recognized_text}",
-            f"Items: {item_text}",
-            f"Enabled: {feature_text}",
-        ]
-        if summary.get("error"):
-            lines[-1] = f"Error: {str(summary['error'])[:48]}"
-        elif age is not None:
-            lines.append(f"AI age {age:.1f}s")
-        if summary.get("shoplifting_watch"):
-            lines.append(f"Shoplifting watch: {summary['shoplifting_watch']}")
-
-        for idx, line in enumerate(lines[:7]):
-            color = (80, 255, 120) if idx == 0 else (255, 255, 255)
-            if line.startswith("Shoplifting watch:"):
-                color = (0, 220, 255)
-            cv2.putText(frame, line[:74], (x0 + 12, y0 + 26 + idx * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.54, color, 2)
-
-        if not overlays:
-            message = "Scanning for people and objects..."
-            cv2.putText(frame, message, (20, min(frame.shape[0] - 24, y0 + panel_h + 34)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
-        self._draw_tracking_activity_overlay(frame, stream_state, attendance_engine, store)
+        clock_text = datetime.now().strftime("%H:%M:%S")
+        top_line = f"People: {summary.get('people', 0)}  Objects: {summary.get('objects', 0)}  {clock_text}"
+        cv2.putText(frame, top_line, (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 3)
+        cv2.putText(frame, top_line, (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 0, 0), 1)
         return frame
 
     def _draw_tracking_activity_overlay(self, frame, stream_state: dict, attendance_engine=None, store=None):
