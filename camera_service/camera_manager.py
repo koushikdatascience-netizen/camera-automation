@@ -498,9 +498,18 @@ class CameraManager:
                 "objects": len(classes),
                 "known": 0,
                 "unknown": 0,
+                "class_counts": {},
+                "recognized_names": [],
+                "feature_lines": [],
+                "shoplifting_watch": None,
                 "updated_at": time.monotonic(),
                 "error": None,
             }
+            enabled_features = []
+            if camera_config is not None:
+                feature_flags = camera_config.features.model_dump()
+                enabled_features = [name.replace("_", " ").title() for name, enabled in feature_flags.items() if enabled]
+                summary["feature_lines"] = enabled_features
             recognition_enabled = bool(
                 face_service is not None
                 and recognition_config is not None
@@ -510,6 +519,9 @@ class CameraManager:
             face_recheck_seconds = self._face_recheck_seconds(recognition_config) if recognition_enabled else 2.0
             person_count = sum(1 for class_id in classes if names.get(class_id, f"class_{class_id}") == "person")
             summary["people"] = person_count
+            for class_id in classes:
+                class_name = names.get(class_id, f"class_{class_id}")
+                summary["class_counts"][class_name] = summary["class_counts"].get(class_name, 0) + 1
             cv2.putText(frame, f"People: {person_count}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 3)
             cv2.putText(frame, f"People: {person_count}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 1)
 
@@ -548,7 +560,8 @@ class CameraManager:
                                 if match:
                                     active_known_tracks.add(str(track_id))
                                     snapshot_path = self._save_event_snapshot(roi, camera_id, "known")
-                                    recognized_text = f"{match['full_name']} {score:.2f}"
+                                    recognized_name = match["full_name"]
+                                    recognized_text = f"{recognized_name} {score:.2f}"
                                     attendance_engine.on_identity(IdentitySeen(
                                         store_id=attendance_engine.store_id,
                                         camera_id=camera_id,
@@ -563,6 +576,7 @@ class CameraManager:
                                         "checked_at": now,
                                         "person_id": match["person_id"],
                                         "text": recognized_text,
+                                        "name": recognized_name,
                                         "score": score,
                                     }
                                 elif camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
@@ -597,6 +611,10 @@ class CameraManager:
                         summary["unknown"] += 1
                     elif not recognized_text.startswith("Face too small"):
                         summary["known"] += 1
+                        cached_name = None
+                        if label == "person" and track_id is not None and camera_id is not None:
+                            cached_name = (self._track_identity_cache.get(f"{camera_id}:{track_id}") or {}).get("name")
+                        summary["recognized_names"].append(cached_name or recognized_text.rsplit(" ", 1)[0])
                 overlays.append({
                     "bbox": (x1, y1, x2, y2),
                     "text": text,
@@ -660,6 +678,23 @@ class CameraManager:
                         2,
                     )
 
+            if camera_config is not None and camera_config.features.shoplifting:
+                carry_item_names = {"backpack", "handbag", "suitcase", "bottle", "cell phone", "book", "umbrella"}
+                carried = {
+                    name: count
+                    for name, count in summary["class_counts"].items()
+                    if name in carry_item_names
+                }
+                if person_count and carried:
+                    item_text = ", ".join(f"{name}:{count}" for name, count in carried.items())
+                    summary["shoplifting_watch"] = f"Review person + item activity ({item_text})"
+                    if store and self._should_emit_alert(f"shoplifting_watch:{camera_id}", 45):
+                        store.add_person_event(None, getattr(attendance_engine, "store_id", "store-1"), camera_id, "SHOPLIFTING_WATCH", datetime.now(timezone.utc), {"person_count": person_count, "items": carried})
+                elif person_count:
+                    summary["shoplifting_watch"] = "Watching customer movement and item handling"
+                else:
+                    summary["shoplifting_watch"] = "Armed, waiting for people"
+
             if stream_state is not None:
                 stream_state["latest_overlays"] = overlays
                 stream_state["latest_summary"] = summary
@@ -703,8 +738,8 @@ class CameraManager:
             cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + label_width), y1), color, -1)
             cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
 
-        panel_h = 118
-        panel_w = min(420, frame.shape[1] - 20)
+        panel_h = 172
+        panel_w = min(560, frame.shape[1] - 20)
         x0, y0 = 10, 10
         overlay = frame.copy()
         cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 0, 0), -1)
@@ -721,20 +756,38 @@ class CameraManager:
         if summary.get("error"):
             ai_status = "AI ERROR"
 
+        class_counts = summary.get("class_counts") or {}
+        item_parts = [
+            f"{name}:{count}"
+            for name, count in sorted(class_counts.items(), key=lambda item: (-item[1], item[0]))
+            if name != "person"
+        ][:5]
+        item_text = ", ".join(item_parts) if item_parts else "none"
+        recognized = summary.get("recognized_names") or []
+        recognized_text = ", ".join(dict.fromkeys(recognized)) if recognized else "none"
+        enabled_features = summary.get("feature_lines") or []
+        feature_text = ", ".join(enabled_features) if enabled_features else "Basic Tracking"
+
         lines = [
             f"LIVE TRACKING - {camera_config.name}",
             f"{ai_status} | camera {camera_config.camera_id}",
             f"People {summary.get('people', 0)} | Objects {summary.get('objects', 0)} | Known {summary.get('known', 0)} | Unknown {summary.get('unknown', 0)}",
-            f"Features: YOLO tracking, face recognition, attendance, alerts",
+            f"Names: {recognized_text}",
+            f"Items: {item_text}",
+            f"Enabled: {feature_text}",
         ]
         if summary.get("error"):
             lines[-1] = f"Error: {str(summary['error'])[:48]}"
         elif age is not None:
-            lines[-1] = f"Features: YOLO tracking, face recognition, attendance, alerts | AI age {age:.1f}s"
+            lines.append(f"AI age {age:.1f}s")
+        if summary.get("shoplifting_watch"):
+            lines.append(f"Shoplifting watch: {summary['shoplifting_watch']}")
 
-        for idx, line in enumerate(lines):
+        for idx, line in enumerate(lines[:7]):
             color = (80, 255, 120) if idx == 0 else (255, 255, 255)
-            cv2.putText(frame, line, (x0 + 12, y0 + 26 + idx * 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, color, 2)
+            if line.startswith("Shoplifting watch:"):
+                color = (0, 220, 255)
+            cv2.putText(frame, line[:74], (x0 + 12, y0 + 26 + idx * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.54, color, 2)
 
         if not overlays:
             message = "Scanning for people and objects..."
