@@ -245,12 +245,39 @@ class CameraManager:
             return cur.rowcount > 0
 
     def _open_video_capture(self, source: str):
-        """Open RTSP/file sources normally, and numeric webcam indexes with DirectShow on Windows."""
+        """Open RTSP/file sources normally, with Windows webcam backend fallbacks."""
         source_text = str(source).strip()
         if source_text.isdigit():
             device_index = int(source_text)
             if sys.platform.startswith("win"):
-                return cv2.VideoCapture(device_index, cv2.CAP_DSHOW)
+                backends = [
+                    getattr(cv2, "CAP_DSHOW", None),
+                    getattr(cv2, "CAP_MSMF", None),
+                    None,
+                ]
+                fallback = None
+                for backend in backends:
+                    cap = (
+                        cv2.VideoCapture(device_index)
+                        if backend is None
+                        else cv2.VideoCapture(device_index, backend)
+                    )
+                    if fallback is None:
+                        fallback = cap
+                    if not cap.isOpened():
+                        if cap is not fallback:
+                            cap.release()
+                        continue
+                    for _ in range(5):
+                        ok, frame = cap.read()
+                        if ok and frame is not None:
+                            if fallback is not cap and fallback is not None:
+                                fallback.release()
+                            return cap
+                        time.sleep(0.05)
+                    if cap is not fallback:
+                        cap.release()
+                return fallback or cv2.VideoCapture(device_index)
             return cv2.VideoCapture(device_index)
         return cv2.VideoCapture(source_text)
 
