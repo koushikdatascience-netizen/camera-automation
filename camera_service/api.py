@@ -10,6 +10,8 @@ from camera_service.face_service import FaceService
 from camera_service.attendance_engine import AttendanceEngine
 from camera_service.camera.supervisor import CameraSupervisor
 from camera_service.camera_manager import CameraManager, CameraConfig, CameraStatus, CameraState
+from camera_service.alert_dispatcher import AlertDispatcher
+from camera_service.cloud_client import CloudSyncClient
 from typing import Optional
 from pydantic import BaseModel
 import json
@@ -22,6 +24,8 @@ import sys
 
 config=load_config(); store=SQLiteStore(config.database_path); face_service=FaceService(store); attendance_engine=AttendanceEngine(store,config.store_id); supervisor=CameraSupervisor(config,store,face_service,attendance_engine)
 camera_manager=CameraManager(config.database_path)
+cloud_client=CloudSyncClient(config.cloud_sync)
+alert_dispatcher=AlertDispatcher(config.alerts)
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
@@ -42,6 +46,47 @@ def health():
 
 @app.get('/ready')
 def ready(): return {'status':'ready','camera_supervisor_running':supervisor.is_running()}
+
+@app.get('/api/v1/edge/status')
+def edge_status():
+    return {
+        'edge': config.edge.model_dump(),
+        'cloud_sync_enabled': cloud_client.enabled(),
+        'queue': store.event_queue_status(),
+        'alert_recipients': alert_dispatcher.preview_recipients(),
+    }
+
+@app.post('/api/v1/edge/sync')
+def sync_edge_events():
+    if not cloud_client.enabled():
+        return {'synced': 0, 'failed': 0, 'enabled': False, 'message': 'Cloud sync is disabled'}
+
+    synced = 0
+    failed = 0
+    for row in store.queued_events(config.cloud_sync.batch_size):
+        event = json.loads(row['payload_json'])
+        try:
+            cloud_client.post_event(config.edge, event)
+            store.mark_event_synced(row['id'])
+            synced += 1
+        except Exception as exc:
+            store.mark_event_failed(row['id'], str(exc))
+            failed += 1
+    return {'synced': synced, 'failed': failed, 'enabled': True}
+
+@app.get('/api/v1/alerts/preview')
+def alert_preview():
+    previews = []
+    for row in store.queued_events(20):
+        event = json.loads(row['payload_json'])
+        if alert_dispatcher.should_alert(event.get('event_type')):
+            previews.append({
+                'event_id': row['id'],
+                'event_type': event.get('event_type'),
+                'message': alert_dispatcher.format_message(event),
+                'recipients': alert_dispatcher.preview_recipients(),
+            })
+    return {'items': previews}
 
 # Setup UI Route
 from fastapi.staticfiles import StaticFiles

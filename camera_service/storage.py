@@ -29,6 +29,8 @@ class SQLiteStore:
             CREATE TABLE IF NOT EXISTS attendance_sessions(id TEXT PRIMARY KEY, person_id TEXT NOT NULL, store_id TEXT NOT NULL, arrival_time TEXT NOT NULL, exit_time TEXT, arrival_camera TEXT, exit_camera TEXT, arrival_confidence REAL, exit_confidence REAL, arrival_snapshot TEXT, exit_snapshot TEXT, status TEXT NOT NULL, FOREIGN KEY(person_id) REFERENCES personnel(id));
             CREATE INDEX IF NOT EXISTS idx_attendance_person_status ON attendance_sessions(person_id,store_id,status);
             CREATE TABLE IF NOT EXISTS person_events(id TEXT PRIMARY KEY, person_id TEXT, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, metadata_json TEXT);
+            CREATE TABLE IF NOT EXISTS edge_event_queue(id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at TEXT NOT NULL, synced_at TEXT);
+            CREATE INDEX IF NOT EXISTS idx_edge_event_queue_status ON edge_event_queue(status,created_at);
             CREATE TABLE IF NOT EXISTS unknown_incidents(id TEXT PRIMARY KEY, store_id TEXT NOT NULL, camera_id TEXT NOT NULL, track_id TEXT NOT NULL, first_seen TEXT NOT NULL, confirmed_unknown_at TEXT NOT NULL, last_seen TEXT NOT NULL, recognition_attempts INTEGER NOT NULL, best_similarity REAL, best_face_snapshot TEXT, best_person_snapshot TEXT, clip_path TEXT, status TEXT NOT NULL DEFAULT 'OPEN', acknowledged_at TEXT);
             CREATE INDEX IF NOT EXISTS idx_unknown_active ON unknown_incidents(store_id,camera_id,track_id,status);
             ''')
@@ -95,7 +97,10 @@ class SQLiteStore:
         with self._conn() as c: return [dict(r) for r in c.execute(q,args)]
     def add_person_event(self,person_id,store_id,camera_id,event_type,ts,metadata=None):
         eid=str(uuid.uuid4())
-        with self._lock,self._conn() as c: c.execute("INSERT INTO person_events VALUES(?,?,?,?,?,?,?)",(eid,person_id,store_id,camera_id,event_type,ts.isoformat(),json.dumps(metadata or {})))
+        payload={'event_id':eid,'person_id':person_id,'store_id':store_id,'camera_id':camera_id,'event_type':event_type,'event_time':ts.isoformat(),'metadata':metadata or {}}
+        with self._lock,self._conn() as c:
+            c.execute("INSERT INTO person_events VALUES(?,?,?,?,?,?,?)",(eid,person_id,store_id,camera_id,event_type,ts.isoformat(),json.dumps(metadata or {})))
+            c.execute("INSERT INTO edge_event_queue(id,event_type,payload_json,created_at) VALUES(?,?,?,?)",(eid,event_type,json.dumps(payload),self.now()))
         return eid
     def person_events(self,person_id=None):
         q='''SELECT e.*,p.employee_code,p.full_name,p.role FROM person_events e LEFT JOIN personnel p ON p.id=e.person_id'''
@@ -111,7 +116,10 @@ class SQLiteStore:
                 if row:
                     c.execute("UPDATE unknown_incidents SET last_seen=?,recognition_attempts=?,best_similarity=COALESCE(?,best_similarity),best_face_snapshot=COALESCE(?,best_face_snapshot),best_person_snapshot=COALESCE(?,best_person_snapshot),clip_path=COALESCE(?,clip_path) WHERE id=?",(last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path,row['id']))
                     return row['id'],False
-                iid=str(uuid.uuid4()); c.execute("INSERT INTO unknown_incidents(id,store_id,camera_id,track_id,first_seen,confirmed_unknown_at,last_seen,recognition_attempts,best_similarity,best_face_snapshot,best_person_snapshot,clip_path,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')",(iid,store_id,camera_id,track_id,first_seen.isoformat(),confirmed.isoformat(),last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path)); return iid,True
+                iid=str(uuid.uuid4()); c.execute("INSERT INTO unknown_incidents(id,store_id,camera_id,track_id,first_seen,confirmed_unknown_at,last_seen,recognition_attempts,best_similarity,best_face_snapshot,best_person_snapshot,clip_path,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')",(iid,store_id,camera_id,track_id,first_seen.isoformat(),confirmed.isoformat(),last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path))
+                payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path}}
+                c.execute("INSERT INTO edge_event_queue(id,event_type,payload_json,created_at) VALUES(?,?,?,?)",(iid,'UNKNOWN_INCIDENT',json.dumps(payload),self.now()))
+                return iid,True
     def unknowns(self):
         with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM unknown_incidents ORDER BY confirmed_unknown_at DESC")]
     def unknown(self,iid):
@@ -119,3 +127,19 @@ class SQLiteStore:
     def acknowledge_unknown(self,iid):
         with self._lock,self._conn() as c: c.execute("UPDATE unknown_incidents SET status='ACKNOWLEDGED',acknowledged_at=? WHERE id=?",(self.now(),iid))
         return self.unknown(iid)
+    def queued_events(self,limit=50):
+        with self._conn() as c:
+            rows=c.execute("SELECT * FROM edge_event_queue WHERE status='PENDING' ORDER BY created_at LIMIT ?",(limit,)).fetchall()
+            return [dict(r) for r in rows]
+    def mark_event_synced(self,event_id):
+        with self._lock,self._conn() as c:
+            c.execute("UPDATE edge_event_queue SET status='SYNCED',synced_at=?,last_error=NULL WHERE id=?",(self.now(),event_id))
+    def mark_event_failed(self,event_id,error):
+        with self._lock,self._conn() as c:
+            c.execute("UPDATE edge_event_queue SET attempts=attempts+1,last_error=? WHERE id=?",(str(error)[:1000],event_id))
+    def event_queue_status(self):
+        with self._conn() as c:
+            rows=c.execute("SELECT status,COUNT(*) AS count FROM edge_event_queue GROUP BY status").fetchall()
+            counts={r['status']:r['count'] for r in rows}
+            failed=c.execute("SELECT id,event_type,attempts,last_error,created_at FROM edge_event_queue WHERE status='PENDING' AND last_error IS NOT NULL ORDER BY created_at DESC LIMIT 5").fetchall()
+            return {'counts':counts,'recent_errors':[dict(r) for r in failed]}

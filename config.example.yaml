@@ -2,6 +2,23 @@ store_id: client-shop-01
 database_path: data/camera_automation.db
 evidence_dir: data/evidence
 yolo_model: yolo11n.pt
+edge:
+  edge_id: edge-client-shop-01
+  tenant_id: tenant-demo
+  site_id: client-shop-01
+cloud_sync:
+  enabled: false
+  base_url: https://your-platform.example.com
+  api_token: CHANGE_ME
+  timeout_seconds: 10
+  batch_size: 50
+alerts:
+  whatsapp_enabled: false
+  whatsapp_recipients:
+    - "+910000000000"
+  send_unknown_inside: true
+  send_crowd_alerts: true
+  send_long_break_alerts: true
 recognition:
   known_threshold: 0.65
   required_known_observations: 2
@@ -16,6 +33,8 @@ cameras:
     source: rtsp://USER:PASS@192.168.1.2:554/Streaming/Channels/102
     enabled: false
     camera_role: ENTRANCE_EXIT
+    camera_zone: inside
+    crowd_threshold: 10
     features:
       face_recognition: true
       attendance: true

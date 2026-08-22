@@ -24,6 +24,25 @@ class RecognitionConfig(BaseModel):
     max_recognition_attempts: int = 5
     known_recheck_seconds: float = 15.0
 
+class EdgeConfig(BaseModel):
+    edge_id: str = "local-edge-01"
+    tenant_id: str = "demo-tenant"
+    site_id: str = "demo-site"
+
+class CloudSyncConfig(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    api_token: str = ""
+    timeout_seconds: float = 10.0
+    batch_size: int = 50
+
+class AlertConfig(BaseModel):
+    whatsapp_enabled: bool = False
+    whatsapp_recipients: list[str] = Field(default_factory=list)
+    send_unknown_inside: bool = True
+    send_crowd_alerts: bool = True
+    send_long_break_alerts: bool = True
+
 class CameraConfig(BaseModel):
     camera_id: str
     name: str
@@ -40,6 +59,9 @@ class AppConfig(BaseModel):
     database_path: str = "data/camera_automation.db"
     evidence_dir: str = "data/evidence"
     yolo_model: str = "yolo11n.pt"
+    edge: EdgeConfig = Field(default_factory=EdgeConfig)
+    cloud_sync: CloudSyncConfig = Field(default_factory=CloudSyncConfig)
+    alerts: AlertConfig = Field(default_factory=AlertConfig)
     recognition: RecognitionConfig = Field(default_factory=RecognitionConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 

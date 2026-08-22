@@ -398,6 +398,18 @@
                     <h3>Unknown Incidents Today</h3>
                     <p id="unknown-incidents">0</p>
                 </div>
+                <div class="status-item">
+                    <h3>Edge Agent</h3>
+                    <p id="edge-id">Loading...</p>
+                </div>
+                <div class="status-item">
+                    <h3>Cloud Sync</h3>
+                    <p id="cloud-sync-status">Loading...</p>
+                </div>
+                <div class="status-item">
+                    <h3>Queued Events</h3>
+                    <p id="queued-events">0</p>
+                </div>
             </div>
         </div>
 
@@ -766,6 +778,13 @@
                 const personnelResponse = await fetch(`${API_BASE}/personnel`);
                 const personnelData = await personnelResponse.json();
                 document.getElementById('active-personnel').textContent = personnelData.items.length;
+
+                const edgeResponse = await fetch(`${API_BASE}/edge/status`);
+                const edgeData = await edgeResponse.json();
+                document.getElementById('edge-id').textContent = `${edgeData.edge.edge_id} / ${edgeData.edge.site_id}`;
+                document.getElementById('cloud-sync-status').textContent = edgeData.cloud_sync_enabled ? 'Enabled' : 'Local only';
+                document.getElementById('cloud-sync-status').className = edgeData.cloud_sync_enabled ? 'status-ok' : 'status-warning';
+                document.getElementById('queued-events').textContent = edgeData.queue.counts.PENDING || 0;
 
                 await refreshUnknownAlert();
 

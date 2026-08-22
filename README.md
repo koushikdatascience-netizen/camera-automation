@@ -97,6 +97,27 @@ If unknown detection is enabled and an unrecognized person is confirmed, the UI 
 
 Open incidents can be acknowledged from the UI.
 
+## Edge And Cloud Sync
+
+The product is designed as a local edge agent plus cloud platform.
+
+```text
+Local PC: cameras, models, tracking, recognition, evidence, offline queue
+Cloud: login UI, reports, WhatsApp alerts, central database, snapshots/clips
+```
+
+The local agent queues events in SQLite. Configure `cloud_sync` in `config.yaml` when the platform API is ready.
+
+Useful endpoints:
+
+```text
+GET  /api/v1/edge/status
+POST /api/v1/edge/sync
+GET  /api/v1/alerts/preview
+```
+
+Cloud sync is disabled by default so client demos keep working offline.
+
 ## Common Fixes
 
 Port already busy:
