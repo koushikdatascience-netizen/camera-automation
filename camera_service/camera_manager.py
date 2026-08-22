@@ -308,6 +308,72 @@ class CameraManager:
         snapshot, _ = self._read_dshow_snapshot_result(source)
         return snapshot
 
+    def _iter_dshow_mjpeg_frames(self, source: str, fps: int = 8):
+        device_name = self._dshow_device_name(source)
+        if not device_name:
+            return
+
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "dshow",
+            "-video_size",
+            "640x480",
+            "-framerate",
+            str(fps),
+            "-i",
+            f"video={device_name}",
+            "-an",
+            "-vf",
+            f"fps={fps}",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "-q:v",
+            "6",
+            "-",
+        ]
+        process = None
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            if process.stdout is None:
+                return
+
+            buffer = bytearray()
+            while True:
+                chunk = process.stdout.read(8192)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+
+                while True:
+                    start = buffer.find(b"\xff\xd8")
+                    end = buffer.find(b"\xff\xd9", start + 2)
+                    if start < 0 or end < 0:
+                        if start > 0:
+                            del buffer[:start]
+                        break
+
+                    frame = bytes(buffer[start:end + 2])
+                    del buffer[:end + 2]
+                    yield frame
+        finally:
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+
     def _annotate_tracking_frame(self, frame, model_path: str):
         try:
             model = self._tracking_models.get(model_path)
@@ -637,17 +703,13 @@ class CameraManager:
     def iter_rtsp_mjpeg(self, rtsp_url: str):
         """Yield MJPEG frames from an RTSP URL or webcam index for browser preview."""
         if self._is_dshow_source(rtsp_url):
-            while True:
-                snapshot = self._read_dshow_snapshot(rtsp_url)
-                if not snapshot:
-                    break
+            for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=10):
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n"
                     + snapshot
                     + b"\r\n"
                 )
-                time.sleep(0.2)
             return
 
         cap = self._open_video_capture(rtsp_url)
@@ -672,13 +734,10 @@ class CameraManager:
     def iter_tracking_mjpeg(self, rtsp_url: str, model_path: str):
         """Yield browser-preview MJPEG frames with YOLO tracking overlays."""
         if self._is_dshow_source(rtsp_url):
-            while True:
-                snapshot = self._read_dshow_snapshot(rtsp_url)
-                if not snapshot:
-                    break
+            for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=6):
                 frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if frame is None:
-                    break
+                    continue
                 encoded = self._encode_tracking_frame(frame, model_path)
                 if encoded:
                     yield (
@@ -687,7 +746,6 @@ class CameraManager:
                         + encoded
                         + b"\r\n"
                     )
-                time.sleep(0.2)
             return
 
         cap = self._open_video_capture(rtsp_url)
