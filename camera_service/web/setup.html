@@ -524,6 +524,29 @@
                     </div>
 
                     <div class="form-group">
+                        <label>Tracking Performance</label>
+                        <div class="form-row">
+                            <div class="form-col">
+                                <input type="number" id="tracking-fps" class="form-control" value="3" min="1" max="12" step="0.5">
+                                <small>Tracking FPS. Use 2-4 on low-end laptops.</small>
+                            </div>
+                            <div class="form-col">
+                                <select id="tracking-imgsz" class="form-control">
+                                    <option value="320">Fast 320</option>
+                                    <option value="384" selected>Balanced 384</option>
+                                    <option value="480">Sharper 480</option>
+                                    <option value="640">Best 640</option>
+                                </select>
+                                <small>AI image size. Smaller is faster.</small>
+                            </div>
+                            <div class="form-col">
+                                <input type="number" id="tracking-quality" class="form-control" value="65" min="35" max="95" step="5">
+                                <small>Stream quality. 55-70 is best for weak PCs.</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
                         <button type="button" class="btn btn-secondary" id="test-connection-btn">
                             <span id="test-btn-text">TEST CONNECTION</span>
                             <span id="test-btn-loading" class="loading" style="display: none;"></span>
@@ -885,7 +908,7 @@
                     cameraName.textContent = camera.name;
 
                     const cameraDetails = document.createElement('p');
-                    cameraDetails.textContent = `${camera.camera_id} | ${camera.camera_role} | ${camera.camera_zone || 'inside'} | crowd>${camera.crowd_threshold || 10}`;
+                    cameraDetails.textContent = `${camera.camera_id} | ${camera.camera_role} | ${camera.camera_zone || 'inside'} | crowd>${camera.crowd_threshold || 10} | tracking ${camera.tracking_fps || 3}fps ${camera.tracking_imgsz || 384}px q${camera.tracking_quality || 65}`;
 
                     const cameraUrl = document.createElement('p');
                     cameraUrl.textContent = camera.rtsp_url;
@@ -1066,6 +1089,9 @@
                 camera_role: document.getElementById('camera-role').value,
                 camera_zone: document.getElementById('camera-zone').value,
                 crowd_threshold: Number(document.getElementById('crowd-threshold').value || 10),
+                tracking_fps: Number(document.getElementById('tracking-fps').value || 3),
+                tracking_imgsz: Number(document.getElementById('tracking-imgsz').value || 384),
+                tracking_quality: Number(document.getElementById('tracking-quality').value || 65),
                 features: {
                     attendance: document.getElementById('feature-attendance').checked,
                     face_recognition: document.getElementById('feature-face-recognition').checked,
@@ -1093,6 +1119,9 @@
                         camera_role: cameraData.camera_role,
                         camera_zone: cameraData.camera_zone,
                         crowd_threshold: cameraData.crowd_threshold,
+                        tracking_fps: cameraData.tracking_fps,
+                        tracking_imgsz: cameraData.tracking_imgsz,
+                        tracking_quality: cameraData.tracking_quality,
                         features: cameraData.features
                     } : cameraData)
                 });
@@ -1147,6 +1176,9 @@
                 document.getElementById('camera-role').value = fullCamera.camera_role || 'GENERAL';
                 document.getElementById('camera-zone').value = fullCamera.camera_zone || 'inside';
                 document.getElementById('crowd-threshold').value = fullCamera.crowd_threshold || 10;
+                document.getElementById('tracking-fps').value = fullCamera.tracking_fps || 3;
+                document.getElementById('tracking-imgsz').value = fullCamera.tracking_imgsz || 384;
+                document.getElementById('tracking-quality').value = fullCamera.tracking_quality || 65;
                 document.getElementById('feature-attendance').checked = !!(fullCamera.features && fullCamera.features.attendance);
                 document.getElementById('feature-face-recognition').checked = !!(fullCamera.features && fullCamera.features.face_recognition);
                 document.getElementById('feature-unknown-detection').checked = !!(fullCamera.features && fullCamera.features.unknown_detection);

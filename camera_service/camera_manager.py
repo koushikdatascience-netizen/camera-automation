@@ -47,6 +47,9 @@ class CameraConfig(BaseModel):
     camera_role: CameraRole = CameraRole.GENERAL
     camera_zone: CameraZone = CameraZone.INSIDE
     crowd_threshold: int = 10
+    tracking_fps: float = 3.0
+    tracking_imgsz: int = 384
+    tracking_quality: int = 65
     features: CameraFeatures = Field(default_factory=CameraFeatures)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -124,6 +127,9 @@ class CameraManager:
             ''')
             self._ensure_column(c, 'cameras', 'camera_zone', "TEXT NOT NULL DEFAULT 'inside'")
             self._ensure_column(c, 'cameras', 'crowd_threshold', 'INTEGER NOT NULL DEFAULT 10')
+            self._ensure_column(c, 'cameras', 'tracking_fps', 'REAL NOT NULL DEFAULT 3.0')
+            self._ensure_column(c, 'cameras', 'tracking_imgsz', 'INTEGER NOT NULL DEFAULT 384')
+            self._ensure_column(c, 'cameras', 'tracking_quality', 'INTEGER NOT NULL DEFAULT 65')
 
     def _ensure_column(self, conn, table: str, column: str, definition: str):
         existing = {row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -161,6 +167,9 @@ class CameraManager:
             camera_role=camera_data.get('camera_role', CameraRole.GENERAL),
             camera_zone=camera_data.get('camera_zone', CameraZone.INSIDE),
             crowd_threshold=max(1, int(camera_data.get('crowd_threshold', 10) or 10)),
+            tracking_fps=max(1.0, min(float(camera_data.get('tracking_fps', 3.0) or 3.0), 12.0)),
+            tracking_imgsz=max(256, min(int(camera_data.get('tracking_imgsz', 384) or 384), 640)),
+            tracking_quality=max(35, min(int(camera_data.get('tracking_quality', 65) or 65), 95)),
             features=CameraFeatures(**features),
             created_at=datetime.now(timezone.utc).isoformat(),
             updated_at=datetime.now(timezone.utc).isoformat()
@@ -170,8 +179,9 @@ class CameraManager:
             c.execute('''
                 INSERT INTO cameras
                 (id, camera_id, name, source_type, rtsp_url, enabled, camera_role,
-                 camera_zone, crowd_threshold, features_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 camera_zone, crowd_threshold, tracking_fps, tracking_imgsz,
+                 tracking_quality, features_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 str(uuid.uuid4()),
                 config.camera_id,
@@ -182,6 +192,9 @@ class CameraManager:
                 config.camera_role.value,
                 config.camera_zone.value,
                 config.crowd_threshold,
+                config.tracking_fps,
+                config.tracking_imgsz,
+                config.tracking_quality,
                 json.dumps(config.features.model_dump()),
                 config.created_at,
                 config.updated_at
@@ -209,6 +222,9 @@ class CameraManager:
                 camera_role=CameraRole(row['camera_role']),
                 camera_zone=CameraZone(row['camera_zone']),
                 crowd_threshold=int(row['crowd_threshold']),
+                tracking_fps=float(row['tracking_fps']),
+                tracking_imgsz=int(row['tracking_imgsz']),
+                tracking_quality=int(row['tracking_quality']),
                 features=CameraFeatures(**json.loads(row['features_json'])),
                 created_at=row['created_at'],
                 updated_at=row['updated_at']
@@ -228,6 +244,9 @@ class CameraManager:
                     camera_role=CameraRole(row['camera_role']),
                     camera_zone=CameraZone(row['camera_zone']),
                     crowd_threshold=int(row['crowd_threshold']),
+                    tracking_fps=float(row['tracking_fps']),
+                    tracking_imgsz=int(row['tracking_imgsz']),
+                    tracking_quality=int(row['tracking_quality']),
                     features=CameraFeatures(**json.loads(row['features_json'])),
                     created_at=row['created_at'],
                     updated_at=row['updated_at']
@@ -256,6 +275,12 @@ class CameraManager:
                 camera.camera_zone = CameraZone(updates['camera_zone'])
             if 'crowd_threshold' in updates:
                 camera.crowd_threshold = max(1, int(updates['crowd_threshold']))
+            if 'tracking_fps' in updates:
+                camera.tracking_fps = max(1.0, min(float(updates['tracking_fps']), 12.0))
+            if 'tracking_imgsz' in updates:
+                camera.tracking_imgsz = max(256, min(int(updates['tracking_imgsz']), 640))
+            if 'tracking_quality' in updates:
+                camera.tracking_quality = max(35, min(int(updates['tracking_quality']), 95))
             if 'features' in updates:
                 camera.features = CameraFeatures(**updates['features'])
 
@@ -266,6 +291,7 @@ class CameraManager:
                     UPDATE cameras
                     SET name = ?, source_type = ?, rtsp_url = ?, enabled = ?,
                         camera_role = ?, camera_zone = ?, crowd_threshold = ?,
+                        tracking_fps = ?, tracking_imgsz = ?, tracking_quality = ?,
                         features_json = ?, updated_at = ?
                     WHERE camera_id = ?
                 ''', (
@@ -276,6 +302,9 @@ class CameraManager:
                     camera.camera_role.value,
                     camera.camera_zone.value,
                     camera.crowd_threshold,
+                    camera.tracking_fps,
+                    camera.tracking_imgsz,
+                    camera.tracking_quality,
                     json.dumps(camera.features.model_dump()),
                     camera.updated_at,
                     camera_id
@@ -447,12 +476,13 @@ class CameraManager:
                 self._tracking_models[model_path] = model
 
             try:
+                imgsz = int(getattr(camera_config, "tracking_imgsz", 384) or 384)
                 results = model.track(
                     frame,
                     persist=True,
                     tracker="bytetrack.yaml",
                     conf=0.20,
-                    imgsz=480,
+                    imgsz=imgsz,
                     max_det=40,
                     verbose=False,
                 )
@@ -460,7 +490,7 @@ class CameraManager:
                 results = model.predict(
                     frame,
                     conf=0.20,
-                    imgsz=480,
+                    imgsz=int(getattr(camera_config, "tracking_imgsz", 384) or 384),
                     max_det=40,
                     verbose=False,
                 )
@@ -795,7 +825,8 @@ class CameraManager:
 
     def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None) -> Optional[bytes]:
         annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
-        ok, encoded = cv2.imencode(".jpg", annotated)
+        quality = max(35, min(int(getattr(camera_config, "tracking_quality", 65) or 65), 95))
+        ok, encoded = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
         if not ok:
             return None
         return encoded.tobytes()
@@ -1105,8 +1136,11 @@ class CameraManager:
     def iter_tracking_mjpeg(self, camera_config: CameraConfig, model_path: str, face_service=None, recognition_config=None, attendance_engine=None, store=None):
         """Yield MJPEG frames with YOLO/ByteTrack annotations drawn before each frame is sent."""
         rtsp_url = camera_config.rtsp_url
+        target_fps = max(1.0, min(float(getattr(camera_config, "tracking_fps", 3.0) or 3.0), 12.0))
+        frame_delay = 1.0 / target_fps
         if self._is_dshow_source(rtsp_url):
-            for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=10):
+            for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=max(1, int(target_fps))):
+                started_at = time.monotonic()
                 frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if frame is None:
                     continue
@@ -1118,11 +1152,15 @@ class CameraManager:
                         + encoded
                         + b"\r\n"
                     )
+                elapsed = time.monotonic() - started_at
+                if elapsed < frame_delay:
+                    time.sleep(frame_delay - elapsed)
             return
 
         cap = self._open_video_capture(rtsp_url)
         try:
             while cap.isOpened():
+                started_at = time.monotonic()
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     break
@@ -1134,6 +1172,8 @@ class CameraManager:
                         + encoded
                         + b"\r\n"
                     )
-                time.sleep(0.03)
+                elapsed = time.monotonic() - started_at
+                if elapsed < frame_delay:
+                    time.sleep(frame_delay - elapsed)
         finally:
             cap.release()

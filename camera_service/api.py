@@ -167,6 +167,9 @@ class CameraCreate(BaseModel):
     camera_role: str = "GENERAL"
     camera_zone: str = "inside"
     crowd_threshold: int = 10
+    tracking_fps: float = 3.0
+    tracking_imgsz: int = 384
+    tracking_quality: int = 65
     features: dict = {}
 
 @app.post('/api/v1/cameras')
