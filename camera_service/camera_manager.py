@@ -446,15 +446,24 @@ class CameraManager:
                 model = YOLO(model_path)
                 self._tracking_models[model_path] = model
 
-            results = model.track(
-                frame,
-                persist=True,
-                tracker="bytetrack.yaml",
-                conf=0.25,
-                imgsz=480,
-                max_det=40,
-                verbose=False,
-            )
+            try:
+                results = model.track(
+                    frame,
+                    persist=True,
+                    tracker="bytetrack.yaml",
+                    conf=0.20,
+                    imgsz=480,
+                    max_det=40,
+                    verbose=False,
+                )
+            except Exception:
+                results = model.predict(
+                    frame,
+                    conf=0.20,
+                    imgsz=480,
+                    max_det=40,
+                    verbose=False,
+                )
             if not results:
                 if stream_state is not None:
                     stream_state["latest_overlays"] = []
@@ -487,7 +496,7 @@ class CameraManager:
             xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else []
             confs = boxes.conf.cpu().tolist() if boxes.conf is not None else []
             classes = boxes.cls.int().cpu().tolist() if boxes.cls is not None else []
-            track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [None] * len(xyxy)
+            track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else list(range(1, len(xyxy) + 1))
             active_known_tracks = set()
             now = time.monotonic()
             camera_id = camera_config.camera_id if camera_config is not None else None
