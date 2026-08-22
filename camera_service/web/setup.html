@@ -410,6 +410,14 @@
                     <h3>Queued Events</h3>
                     <p id="queued-events">0</p>
                 </div>
+                <div class="status-item">
+                    <h3>Activation</h3>
+                    <p id="license-status">Loading...</p>
+                </div>
+                <div class="status-item">
+                    <h3>Machine Code</h3>
+                    <p id="machine-code">Loading...</p>
+                </div>
             </div>
         </div>
 
@@ -785,6 +793,9 @@
                 document.getElementById('cloud-sync-status').textContent = edgeData.cloud_sync_enabled ? 'Enabled' : 'Local only';
                 document.getElementById('cloud-sync-status').className = edgeData.cloud_sync_enabled ? 'status-ok' : 'status-warning';
                 document.getElementById('queued-events').textContent = edgeData.queue.counts.PENDING || 0;
+                document.getElementById('license-status').textContent = edgeData.license.active ? `${edgeData.license.mode} (${edgeData.license.plan})` : 'Activation required';
+                document.getElementById('license-status').className = edgeData.license.active ? 'status-ok' : 'status-error';
+                document.getElementById('machine-code').textContent = edgeData.license.machine_code;
 
                 await refreshUnknownAlert();
 

@@ -6,6 +6,9 @@ edge:
   edge_id: edge-client-shop-01
   tenant_id: tenant-demo
   site_id: client-shop-01
+  activation_required: false
+  activation_token: ""
+  plan: demo
 cloud_sync:
   enabled: false
   base_url: https://your-platform.example.com
@@ -19,6 +22,11 @@ alerts:
   send_unknown_inside: true
   send_crowd_alerts: true
   send_long_break_alerts: true
+evidence:
+  snapshot_enabled: true
+  clip_enabled: false
+  pre_event_seconds: 30
+  post_event_seconds: 30
 recognition:
   known_threshold: 0.65
   required_known_observations: 2

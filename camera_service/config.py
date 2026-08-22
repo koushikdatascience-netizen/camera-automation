@@ -28,6 +28,9 @@ class EdgeConfig(BaseModel):
     edge_id: str = "local-edge-01"
     tenant_id: str = "demo-tenant"
     site_id: str = "demo-site"
+    activation_required: bool = False
+    activation_token: str = ""
+    plan: str = "demo"
 
 class CloudSyncConfig(BaseModel):
     enabled: bool = False
@@ -42,6 +45,12 @@ class AlertConfig(BaseModel):
     send_unknown_inside: bool = True
     send_crowd_alerts: bool = True
     send_long_break_alerts: bool = True
+
+class EvidenceConfig(BaseModel):
+    snapshot_enabled: bool = True
+    clip_enabled: bool = False
+    pre_event_seconds: int = 30
+    post_event_seconds: int = 30
 
 class CameraConfig(BaseModel):
     camera_id: str
@@ -62,6 +71,7 @@ class AppConfig(BaseModel):
     edge: EdgeConfig = Field(default_factory=EdgeConfig)
     cloud_sync: CloudSyncConfig = Field(default_factory=CloudSyncConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
+    evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     recognition: RecognitionConfig = Field(default_factory=RecognitionConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 

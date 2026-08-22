@@ -27,6 +27,7 @@ event_queue.py         Local SQLite queue for events waiting to sync
 cloud_client.py        Sends events/snapshots/clips to platform API
 alert_dispatcher.py    Sends WhatsApp/SMS/email through configured providers
 rules_engine.py        Runs configurable rules like crowd, long break, after-hours
+licensing.py           Gates cloud sync and paid alert delivery by tenant/site activation
 ```
 
 ## Cloud Platform API
@@ -36,6 +37,7 @@ Minimum endpoints:
 ```text
 POST /edge/v1/events
 POST /edge/v1/evidence
+POST /edge/v1/activate
 GET  /edge/v1/config
 POST /edge/v1/health
 POST /edge/v1/heartbeat
@@ -57,6 +59,7 @@ POST /dashboard/alerts/{id}/acknowledge
 ```text
 Local rule creates alert event
 Edge uploads event + snapshot
+Edge uploads serious alert clip when enabled
 Cloud stores event
 Cloud sends WhatsApp message with snapshot link
 Owner opens link after login
@@ -64,6 +67,8 @@ Owner acknowledges alert
 ```
 
 Do not send WhatsApp directly from the video loop. Alerts must be async.
+
+Do not stream every live feed to the server. Continuous live tracking stays local; the cloud receives attendance snapshots, alert snapshots, short clips, and health/event data.
 
 ## Customization Points
 

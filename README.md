@@ -108,12 +108,24 @@ Cloud: login UI, reports, WhatsApp alerts, central database, snapshots/clips
 
 The local agent queues events in SQLite. Configure `cloud_sync` in `config.yaml` when the platform API is ready.
 
+Live camera/tracking should stay local for scale and speed. The cloud should receive only business events and evidence:
+
+```text
+Attendance: name, ID, event time, camera, snapshot
+Alerts: unknown inside, crowd/queue, short evidence window
+Evidence target: previous 30 seconds + next 30 seconds when clip capture is enabled
+```
+
+For paid deployments, set `edge.activation_required: true` and activate the edge from the cloud portal. Without activation, local setup/demo can still run, but cloud sync and paid alert delivery remain blocked.
+
 Useful endpoints:
 
 ```text
 GET  /api/v1/edge/status
 POST /api/v1/edge/sync
 GET  /api/v1/alerts/preview
+GET  /api/v1/license/status
+GET  /api/v1/license/machine-code
 ```
 
 Cloud sync is disabled by default so client demos keep working offline.

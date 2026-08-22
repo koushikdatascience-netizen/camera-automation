@@ -12,6 +12,7 @@ from camera_service.camera.supervisor import CameraSupervisor
 from camera_service.camera_manager import CameraManager, CameraConfig, CameraStatus, CameraState
 from camera_service.alert_dispatcher import AlertDispatcher
 from camera_service.cloud_client import CloudSyncClient
+from camera_service.licensing import LicenseManager
 from typing import Optional
 from pydantic import BaseModel
 import json
@@ -26,6 +27,7 @@ config=load_config(); store=SQLiteStore(config.database_path); face_service=Face
 camera_manager=CameraManager(config.database_path)
 cloud_client=CloudSyncClient(config.cloud_sync)
 alert_dispatcher=AlertDispatcher(config.alerts)
+license_manager=LicenseManager(config.edge)
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
@@ -49,17 +51,24 @@ def ready(): return {'status':'ready','camera_supervisor_running':supervisor.is_
 
 @app.get('/api/v1/edge/status')
 def edge_status():
+    license_status = license_manager.status()
     return {
         'edge': config.edge.model_dump(),
+        'license': license_status.model_dump(),
         'cloud_sync_enabled': cloud_client.enabled(),
+        'cloud_sync_allowed': cloud_client.enabled() and license_status.active,
         'queue': store.event_queue_status(),
         'alert_recipients': alert_dispatcher.preview_recipients(),
+        'evidence': config.evidence.model_dump(),
     }
 
 @app.post('/api/v1/edge/sync')
 def sync_edge_events():
+    license_status = license_manager.status()
     if not cloud_client.enabled():
         return {'synced': 0, 'failed': 0, 'enabled': False, 'message': 'Cloud sync is disabled'}
+    if not license_status.active:
+        return {'synced': 0, 'failed': 0, 'enabled': True, 'blocked': True, 'license': license_status.model_dump()}
 
     synced = 0
     failed = 0
@@ -74,8 +83,25 @@ def sync_edge_events():
             failed += 1
     return {'synced': synced, 'failed': failed, 'enabled': True}
 
+@app.get('/api/v1/license/status')
+def license_status():
+    return license_manager.status().model_dump()
+
+@app.get('/api/v1/license/machine-code')
+def license_machine_code():
+    return {'machine_code': license_manager.machine_code()}
+
 @app.get('/api/v1/alerts/preview')
 def alert_preview():
+    license_status = license_manager.status()
+    if config.edge.activation_required and not license_status.active:
+        return {
+            'items': [],
+            'delivery_allowed': False,
+            'license': license_status.model_dump(),
+            'message': 'Paid alert delivery requires activation from the platform.',
+        }
+
     previews = []
     for row in store.queued_events(20):
         event = json.loads(row['payload_json'])
@@ -86,7 +112,7 @@ def alert_preview():
                 'message': alert_dispatcher.format_message(event),
                 'recipients': alert_dispatcher.preview_recipients(),
             })
-    return {'items': previews}
+    return {'items': previews, 'delivery_allowed': True}
 
 # Setup UI Route
 from fastapi.staticfiles import StaticFiles

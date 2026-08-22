@@ -9,6 +9,8 @@ Our platform = login UI, central database, alerts, reports, remote monitoring
 
 The camera/video/model workload must stay local at each client site because RTSP streams are heavy, private, and unreliable over the public internet. The cloud should receive events, snapshots, short clips, health status, and summaries.
 
+Live tracking should be viewed locally at the shop PC unless the client explicitly starts a secure on-demand live session. This keeps the product fast for many clients and avoids pushing continuous video through our server.
+
 ## Main Components
 
 ### 1. Edge Agent
@@ -25,6 +27,7 @@ Detect known staff, unknown persons, crowd alerts, break events
 Save local evidence when internet is down
 Sync events/snapshots/clips to cloud when online
 Expose local fallback UI for setup/debug
+Require activation for paid cloud sync and alert delivery
 ```
 
 Current repo is the start of this edge agent.
@@ -47,6 +50,8 @@ Remote configuration updates to edge agents
 ```
 
 The cloud should not pull full camera streams by default. It should show live/tracking only through secure on-demand relay or local network access.
+
+The EXE is not the complete paid product by itself. It runs the local edge agent, but cloud login, central reports, WhatsApp delivery, and remote access are controlled by tenant/site activation on our platform.
 
 ### 3. Sync Service
 
@@ -189,7 +194,7 @@ Break start snapshot
 Break end snapshot
 Unknown person snapshot
 Crowd snapshot
-Optional 5-15 second clip
+Optional short clip, normally previous 30 seconds plus next 30 seconds for serious alerts
 ```
 
 Local edge agent writes evidence first. Cloud upload happens async.
@@ -210,6 +215,7 @@ Minimum production requirements:
 Tenant/site separation
 User login with roles
 Encrypted API tokens between edge and cloud
+Tenant/site activation and plan enforcement
 Do not expose RTSP passwords in cloud UI
 Do not stream cameras publicly without signed access
 Audit logs for alert acknowledgement
