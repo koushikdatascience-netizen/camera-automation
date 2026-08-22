@@ -75,6 +75,8 @@ class CameraCreate(BaseModel):
     rtsp_url: str
     enabled: bool = True
     camera_role: str = "GENERAL"
+    camera_zone: str = "inside"
+    crowd_threshold: int = 10
     features: dict = {}
 
 @app.post('/api/v1/cameras')
@@ -221,7 +223,7 @@ def stream_camera_tracking(camera_id: str):
     if not camera:
         raise HTTPException(404, 'Camera not found')
     return StreamingResponse(
-        camera_manager.iter_tracking_mjpeg(camera.rtsp_url, config.yolo_model, face_service, config.recognition, camera.camera_id, attendance_engine),
+        camera_manager.iter_tracking_mjpeg(camera, config.yolo_model, face_service, config.recognition, attendance_engine, store),
         media_type='multipart/x-mixed-replace; boundary=frame',
     )
 

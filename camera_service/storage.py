@@ -26,12 +26,18 @@ class SQLiteStore:
             CREATE TABLE IF NOT EXISTS personnel(id TEXT PRIMARY KEY, employee_code TEXT UNIQUE NOT NULL, full_name TEXT NOT NULL, role TEXT NOT NULL, phone TEXT, email TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS face_profiles(id TEXT PRIMARY KEY, person_id TEXT NOT NULL, embedding_json TEXT NOT NULL, quality REAL NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(person_id) REFERENCES personnel(id));
             CREATE INDEX IF NOT EXISTS idx_face_person ON face_profiles(person_id);
-            CREATE TABLE IF NOT EXISTS attendance_sessions(id TEXT PRIMARY KEY, person_id TEXT NOT NULL, store_id TEXT NOT NULL, arrival_time TEXT NOT NULL, exit_time TEXT, arrival_camera TEXT, exit_camera TEXT, arrival_confidence REAL, exit_confidence REAL, status TEXT NOT NULL, FOREIGN KEY(person_id) REFERENCES personnel(id));
+            CREATE TABLE IF NOT EXISTS attendance_sessions(id TEXT PRIMARY KEY, person_id TEXT NOT NULL, store_id TEXT NOT NULL, arrival_time TEXT NOT NULL, exit_time TEXT, arrival_camera TEXT, exit_camera TEXT, arrival_confidence REAL, exit_confidence REAL, arrival_snapshot TEXT, exit_snapshot TEXT, status TEXT NOT NULL, FOREIGN KEY(person_id) REFERENCES personnel(id));
             CREATE INDEX IF NOT EXISTS idx_attendance_person_status ON attendance_sessions(person_id,store_id,status);
             CREATE TABLE IF NOT EXISTS person_events(id TEXT PRIMARY KEY, person_id TEXT, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, metadata_json TEXT);
             CREATE TABLE IF NOT EXISTS unknown_incidents(id TEXT PRIMARY KEY, store_id TEXT NOT NULL, camera_id TEXT NOT NULL, track_id TEXT NOT NULL, first_seen TEXT NOT NULL, confirmed_unknown_at TEXT NOT NULL, last_seen TEXT NOT NULL, recognition_attempts INTEGER NOT NULL, best_similarity REAL, best_face_snapshot TEXT, best_person_snapshot TEXT, clip_path TEXT, status TEXT NOT NULL DEFAULT 'OPEN', acknowledged_at TEXT);
             CREATE INDEX IF NOT EXISTS idx_unknown_active ON unknown_incidents(store_id,camera_id,track_id,status);
             ''')
+            self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
+            self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
+    def _ensure_column(self,conn,table,column,definition):
+        existing={row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
     @staticmethod
     def now(): return datetime.now(timezone.utc).isoformat()
     def create_person(self, d):
@@ -67,18 +73,18 @@ class SQLiteStore:
     def open_session(self,person_id,store_id):
         with self._conn() as c:
             r=c.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? AND status='OPEN' ORDER BY arrival_time DESC LIMIT 1",(person_id,store_id)).fetchone(); return dict(r) if r else None
-    def create_arrival(self,person_id,store_id,ts,camera,confidence):
+    def create_arrival(self,person_id,store_id,ts,camera,confidence,snapshot_path=None):
         with self._lock:
             existing=self.open_session(person_id,store_id)
             if existing: return existing,False
             sid=str(uuid.uuid4())
-            with self._conn() as c: c.execute("INSERT INTO attendance_sessions(id,person_id,store_id,arrival_time,arrival_camera,arrival_confidence,status) VALUES(?,?,?,?,?,?, 'OPEN')",(sid,person_id,store_id,ts.isoformat(),camera,confidence))
+            with self._conn() as c: c.execute("INSERT INTO attendance_sessions(id,person_id,store_id,arrival_time,arrival_camera,arrival_confidence,arrival_snapshot,status) VALUES(?,?,?,?,?,?,?, 'OPEN')",(sid,person_id,store_id,ts.isoformat(),camera,confidence,snapshot_path))
             return self.open_session(person_id,store_id),True
-    def close_exit(self,person_id,store_id,ts,camera,confidence):
+    def close_exit(self,person_id,store_id,ts,camera,confidence,snapshot_path=None):
         with self._lock:
             s=self.open_session(person_id,store_id)
             if not s: return None,False
-            with self._conn() as c: c.execute("UPDATE attendance_sessions SET exit_time=?,exit_camera=?,exit_confidence=?,status='CLOSED' WHERE id=?",(ts.isoformat(),camera,confidence,s['id']))
+            with self._conn() as c: c.execute("UPDATE attendance_sessions SET exit_time=?,exit_camera=?,exit_confidence=?,exit_snapshot=?,status='CLOSED' WHERE id=?",(ts.isoformat(),camera,confidence,snapshot_path,s['id']))
             return self.get_attendance_id(s['id']),True
     def get_attendance_id(self,sid):
         with self._conn() as c: r=c.execute("SELECT * FROM attendance_sessions WHERE id=?",(sid,)).fetchone(); return dict(r) if r else None

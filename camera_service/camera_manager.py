@@ -28,6 +28,10 @@ class CameraState(str, Enum):
     OFFLINE = "OFFLINE"
     STOPPED = "STOPPED"
 
+class CameraZone(str, Enum):
+    INSIDE = "inside"
+    OUTSIDE = "outside"
+
 class CameraFeatures(BaseModel):
     attendance: bool = False
     face_recognition: bool = False
@@ -41,6 +45,8 @@ class CameraConfig(BaseModel):
     rtsp_url: str
     enabled: bool = True
     camera_role: CameraRole = CameraRole.GENERAL
+    camera_zone: CameraZone = CameraZone.INSIDE
+    crowd_threshold: int = 10
     features: CameraFeatures = Field(default_factory=CameraFeatures)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -65,6 +71,7 @@ class CameraManager:
         self._tracking_models = {}
         self._tracking_error = None
         self._stream_active_tracks = {}
+        self._alert_last_sent = {}
         self._init_db()
 
     @contextmanager
@@ -91,6 +98,8 @@ class CameraManager:
                 rtsp_url TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 camera_role TEXT NOT NULL,
+                camera_zone TEXT NOT NULL DEFAULT 'inside',
+                crowd_threshold INTEGER NOT NULL DEFAULT 10,
                 features_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -110,6 +119,13 @@ class CameraManager:
                 FOREIGN KEY(camera_id) REFERENCES cameras(camera_id)
             );
             ''')
+            self._ensure_column(c, 'cameras', 'camera_zone', "TEXT NOT NULL DEFAULT 'inside'")
+            self._ensure_column(c, 'cameras', 'crowd_threshold', 'INTEGER NOT NULL DEFAULT 10')
+
+    def _ensure_column(self, conn, table: str, column: str, definition: str):
+        existing = {row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def _mask_rtsp_password(self, rtsp_url: str) -> str:
         """Mask password in RTSP URL for security"""
@@ -140,6 +156,8 @@ class CameraManager:
             rtsp_url=str(camera_data['rtsp_url']).strip(),
             enabled=camera_data.get('enabled', True),
             camera_role=camera_data.get('camera_role', CameraRole.GENERAL),
+            camera_zone=camera_data.get('camera_zone', CameraZone.INSIDE),
+            crowd_threshold=max(1, int(camera_data.get('crowd_threshold', 10) or 10)),
             features=CameraFeatures(**features),
             created_at=datetime.now(timezone.utc).isoformat(),
             updated_at=datetime.now(timezone.utc).isoformat()
@@ -147,7 +165,10 @@ class CameraManager:
 
         with self._lock, self._conn() as c:
             c.execute('''
-                INSERT INTO cameras VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO cameras
+                (id, camera_id, name, source_type, rtsp_url, enabled, camera_role,
+                 camera_zone, crowd_threshold, features_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 str(uuid.uuid4()),
                 config.camera_id,
@@ -156,6 +177,8 @@ class CameraManager:
                 config.rtsp_url,
                 1 if config.enabled else 0,
                 config.camera_role.value,
+                config.camera_zone.value,
+                config.crowd_threshold,
                 json.dumps(config.features.model_dump()),
                 config.created_at,
                 config.updated_at
@@ -181,6 +204,8 @@ class CameraManager:
                 rtsp_url=row['rtsp_url'],
                 enabled=bool(row['enabled']),
                 camera_role=CameraRole(row['camera_role']),
+                camera_zone=CameraZone(row['camera_zone']),
+                crowd_threshold=int(row['crowd_threshold']),
                 features=CameraFeatures(**json.loads(row['features_json'])),
                 created_at=row['created_at'],
                 updated_at=row['updated_at']
@@ -198,6 +223,8 @@ class CameraManager:
                     rtsp_url=row['rtsp_url'],
                     enabled=bool(row['enabled']),
                     camera_role=CameraRole(row['camera_role']),
+                    camera_zone=CameraZone(row['camera_zone']),
+                    crowd_threshold=int(row['crowd_threshold']),
                     features=CameraFeatures(**json.loads(row['features_json'])),
                     created_at=row['created_at'],
                     updated_at=row['updated_at']
@@ -222,6 +249,10 @@ class CameraManager:
                 camera.enabled = updates['enabled']
             if 'camera_role' in updates:
                 camera.camera_role = CameraRole(updates['camera_role'])
+            if 'camera_zone' in updates:
+                camera.camera_zone = CameraZone(updates['camera_zone'])
+            if 'crowd_threshold' in updates:
+                camera.crowd_threshold = max(1, int(updates['crowd_threshold']))
             if 'features' in updates:
                 camera.features = CameraFeatures(**updates['features'])
 
@@ -231,7 +262,8 @@ class CameraManager:
                 c.execute('''
                     UPDATE cameras
                     SET name = ?, source_type = ?, rtsp_url = ?, enabled = ?,
-                        camera_role = ?, features_json = ?, updated_at = ?
+                        camera_role = ?, camera_zone = ?, crowd_threshold = ?,
+                        features_json = ?, updated_at = ?
                     WHERE camera_id = ?
                 ''', (
                     camera.name,
@@ -239,6 +271,8 @@ class CameraManager:
                     camera.rtsp_url,
                     1 if camera.enabled else 0,
                     camera.camera_role.value,
+                    camera.camera_zone.value,
+                    camera.crowd_threshold,
                     json.dumps(camera.features.model_dump()),
                     camera.updated_at,
                     camera_id
@@ -377,7 +411,25 @@ class CameraManager:
                 except subprocess.TimeoutExpired:
                     process.kill()
 
-    def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_id: str | None = None, attendance_engine=None):
+    def _save_event_snapshot(self, frame, camera_id: str, prefix: str) -> Optional[str]:
+        try:
+            root = Path("data/evidence") / camera_id
+            root.mkdir(parents=True, exist_ok=True)
+            path = root / f"{prefix}_{int(time.time() * 1000)}.jpg"
+            cv2.imwrite(str(path), frame)
+            return str(path)
+        except Exception:
+            return None
+
+    def _should_emit_alert(self, key: str, cooldown_seconds: float = 30.0) -> bool:
+        now = time.monotonic()
+        last = self._alert_last_sent.get(key, 0)
+        if now - last < cooldown_seconds:
+            return False
+        self._alert_last_sent[key] = now
+        return True
+
+    def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None):
         try:
             model = self._tracking_models.get(model_path)
             if model is None:
@@ -407,6 +459,17 @@ class CameraManager:
             classes = boxes.cls.int().cpu().tolist() if boxes.cls is not None else []
             track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [None] * len(xyxy)
             active_known_tracks = set()
+            camera_id = camera_config.camera_id if camera_config is not None else None
+            camera_zone = camera_config.camera_zone.value if camera_config is not None else "inside"
+            crowd_threshold = camera_config.crowd_threshold if camera_config is not None else 10
+            person_count = sum(1 for class_id in classes if names.get(class_id, f"class_{class_id}") == "person")
+            cv2.putText(frame, f"People: {person_count}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 3)
+            cv2.putText(frame, f"People: {person_count}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 1)
+
+            if camera_id and store and person_count > crowd_threshold and self._should_emit_alert(f"crowd:{camera_id}"):
+                store.add_person_event(None, getattr(attendance_engine, "store_id", "store-1"), camera_id, "CROWD_ALERT", datetime.now(timezone.utc), {"person_count": person_count, "threshold": crowd_threshold, "camera_zone": camera_zone})
+            if person_count > crowd_threshold:
+                cv2.putText(frame, f"ALERT: crowd limit {person_count}/{crowd_threshold}", (20, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
 
             for coords, conf, class_id, track_id in zip(xyxy, confs, classes, track_ids):
                 x1, y1, x2, y2 = [int(v) for v in coords]
@@ -430,6 +493,7 @@ class CameraManager:
                                 match, score = face_service.recognize(best.get("embedding"), recognition_config.known_threshold)
                                 if match:
                                     active_known_tracks.add(str(track_id))
+                                    snapshot_path = self._save_event_snapshot(roi, camera_id, "known")
                                     recognized_text = f"{match['full_name']} {score:.2f}"
                                     attendance_engine.on_identity(IdentitySeen(
                                         store_id=attendance_engine.store_id,
@@ -439,7 +503,11 @@ class CameraManager:
                                         timestamp=datetime.now(timezone.utc),
                                         confidence=score,
                                         bbox=(float(x1), float(y1), float(x2), float(y2)),
+                                        snapshot_path=snapshot_path,
                                     ))
+                                elif camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
+                                    snapshot_path = self._save_event_snapshot(roi, camera_id, "unknown")
+                                    store.add_person_event(None, getattr(attendance_engine, "store_id", "store-1"), camera_id, "UNKNOWN_INSIDE_ALERT", datetime.now(timezone.utc), {"track_id": track_id, "score": score, "snapshot_path": snapshot_path})
 
                 track_text = f" ID {track_id}" if track_id is not None else ""
                 text = recognized_text or f"{label}{track_text} {conf:.2f}"
@@ -496,8 +564,8 @@ class CameraManager:
             )
             return frame
 
-    def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_id: str | None = None, attendance_engine=None) -> Optional[bytes]:
-        annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_id, attendance_engine)
+    def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None) -> Optional[bytes]:
+        annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
         ok, encoded = cv2.imencode(".jpg", annotated)
         if not ok:
             return None
@@ -799,14 +867,15 @@ class CameraManager:
         finally:
             cap.release()
 
-    def iter_tracking_mjpeg(self, rtsp_url: str, model_path: str, face_service=None, recognition_config=None, camera_id: str | None = None, attendance_engine=None):
+    def iter_tracking_mjpeg(self, camera_config: CameraConfig, model_path: str, face_service=None, recognition_config=None, attendance_engine=None, store=None):
         """Yield browser-preview MJPEG frames with YOLO tracking overlays."""
+        rtsp_url = camera_config.rtsp_url
         if self._is_dshow_source(rtsp_url):
             for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=6):
                 frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if frame is None:
                     continue
-                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_id, attendance_engine)
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
                 if encoded:
                     yield (
                         b"--frame\r\n"
@@ -822,7 +891,7 @@ class CameraManager:
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     break
-                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_id, attendance_engine)
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
                 if encoded:
                     yield (
                         b"--frame\r\n"

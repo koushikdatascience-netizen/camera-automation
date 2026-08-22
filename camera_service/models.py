@@ -36,6 +36,7 @@ class IdentitySeen(BaseModel):
     timestamp: datetime
     confidence: float
     bbox: tuple[float, float, float, float]
+    snapshot_path: Optional[str] = None
 
 class LineCrossingEvent(BaseModel):
     store_id: str
