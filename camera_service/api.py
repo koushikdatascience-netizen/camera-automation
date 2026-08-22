@@ -205,6 +205,16 @@ def stream_camera(camera_id: str):
         media_type='multipart/x-mixed-replace; boundary=frame',
     )
 
+@app.get('/api/v1/cameras/{camera_id}/tracking-stream')
+def stream_camera_tracking(camera_id: str):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    return StreamingResponse(
+        camera_manager.iter_tracking_mjpeg(camera.rtsp_url, config.yolo_model),
+        media_type='multipart/x-mixed-replace; boundary=frame',
+    )
+
 # Personnel APIs
 @app.post('/api/v1/personnel')
 def create_person(body:PersonnelCreate,s=Depends(get_store)):

@@ -61,6 +61,8 @@ class CameraManager:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._lock = threading.RLock()
+        self._tracking_models = {}
+        self._tracking_error = None
         self._init_db()
 
     @contextmanager
@@ -305,6 +307,67 @@ class CameraManager:
     def _read_dshow_snapshot(self, source: str) -> Optional[bytes]:
         snapshot, _ = self._read_dshow_snapshot_result(source)
         return snapshot
+
+    def _annotate_tracking_frame(self, frame, model_path: str):
+        try:
+            model = self._tracking_models.get(model_path)
+            if model is None:
+                from ultralytics import YOLO
+
+                model = YOLO(model_path)
+                self._tracking_models[model_path] = model
+
+            results = model.track(
+                frame,
+                persist=True,
+                tracker="bytetrack.yaml",
+                conf=0.25,
+                verbose=False,
+            )
+            if not results:
+                return frame
+
+            result = results[0]
+            names = getattr(result, "names", {}) or {}
+            boxes = result.boxes
+            if boxes is None:
+                return frame
+
+            xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else []
+            confs = boxes.conf.cpu().tolist() if boxes.conf is not None else []
+            classes = boxes.cls.int().cpu().tolist() if boxes.cls is not None else []
+            track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [None] * len(xyxy)
+
+            for coords, conf, class_id, track_id in zip(xyxy, confs, classes, track_ids):
+                x1, y1, x2, y2 = [int(v) for v in coords]
+                label = names.get(class_id, f"class_{class_id}")
+                track_text = f" ID {track_id}" if track_id is not None else ""
+                text = f"{label}{track_text} {conf:.2f}"
+                color = (0, 180, 255) if label == "person" else (40, 220, 80)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 220), y1), color, -1)
+                cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+
+            return frame
+        except Exception as exc:
+            self._tracking_error = str(exc)
+            cv2.putText(
+                frame,
+                f"Tracking unavailable: {exc}",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+            )
+            return frame
+
+    def _encode_tracking_frame(self, frame, model_path: str) -> Optional[bytes]:
+        annotated = self._annotate_tracking_frame(frame, model_path)
+        ok, encoded = cv2.imencode(".jpg", annotated)
+        if not ok:
+            return None
+        return encoded.tobytes()
 
     def _open_video_capture_with_diagnostics(self, source: str):
         """Open a video source and return both the capture and backend attempts."""
@@ -602,6 +665,45 @@ class CameraManager:
                     + encoded.tobytes()
                     + b"\r\n"
                 )
+                time.sleep(0.03)
+        finally:
+            cap.release()
+
+    def iter_tracking_mjpeg(self, rtsp_url: str, model_path: str):
+        """Yield browser-preview MJPEG frames with YOLO tracking overlays."""
+        if self._is_dshow_source(rtsp_url):
+            while True:
+                snapshot = self._read_dshow_snapshot(rtsp_url)
+                if not snapshot:
+                    break
+                frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if frame is None:
+                    break
+                encoded = self._encode_tracking_frame(frame, model_path)
+                if encoded:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + encoded
+                        + b"\r\n"
+                    )
+                time.sleep(0.2)
+            return
+
+        cap = self._open_video_capture(rtsp_url)
+        try:
+            while cap.isOpened():
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    break
+                encoded = self._encode_tracking_frame(frame, model_path)
+                if encoded:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + encoded
+                        + b"\r\n"
+                    )
                 time.sleep(0.03)
         finally:
             cap.release()

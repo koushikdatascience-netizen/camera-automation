@@ -416,7 +416,7 @@
                     <div class="form-group">
                         <label for="rtsp-url">Camera Source</label>
                         <input type="text" id="rtsp-url" class="form-control" placeholder="RTSP URL or webcam index, for example 0" required>
-                        <small>Use a Hikvision RTSP substream like rtsp://user:pass@ip:554/Streaming/Channels/102, or use 0/1 for a local USB webcam.</small>
+                        <small>Use a Hikvision RTSP substream like rtsp://user:pass@ip:554/Streaming/Channels/102, 0/1 for OpenCV webcam, or dshow:USB Camera for Windows USB camera.</small>
                     </div>
 
                     <div class="form-group">
@@ -768,6 +768,13 @@
                         window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/stream`, '_blank');
                     });
 
+                    const trackingBtn = document.createElement('button');
+                    trackingBtn.className = 'btn btn-primary';
+                    trackingBtn.textContent = 'TRACKING';
+                    trackingBtn.addEventListener('click', () => {
+                        window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/tracking-stream`, '_blank');
+                    });
+
                     const editBtn = document.createElement('button');
                     editBtn.className = 'btn btn-secondary';
                     editBtn.textContent = 'EDIT';
@@ -782,6 +789,7 @@
                     cameraActions.appendChild(stopBtn);
                     cameraActions.appendChild(snapshotBtn);
                     cameraActions.appendChild(streamBtn);
+                    cameraActions.appendChild(trackingBtn);
                     cameraActions.appendChild(editBtn);
                     cameraActions.appendChild(deleteBtn);
 
