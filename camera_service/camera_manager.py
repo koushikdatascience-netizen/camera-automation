@@ -120,17 +120,18 @@ class CameraManager:
 
     def create_camera(self, camera_data: Dict[str, Any]) -> CameraConfig:
         """Create a new camera configuration"""
-        camera_id = camera_data.get('camera_id')
+        camera_id = str(camera_data.get('camera_id', '')).strip()
         if not camera_id:
             raise ValueError("camera_id is required")
+        camera_data = {**camera_data, 'camera_id': camera_id}
 
         # Validate and create camera config
         features = camera_data.get('features', {})
         config = CameraConfig(
             camera_id=camera_id,
-            name=camera_data['name'],
-            source_type=camera_data.get('source_type', 'rtsp'),
-            rtsp_url=camera_data['rtsp_url'],
+            name=str(camera_data['name']).strip(),
+            source_type=str(camera_data.get('source_type', 'rtsp')).strip() or 'rtsp',
+            rtsp_url=str(camera_data['rtsp_url']).strip(),
             enabled=camera_data.get('enabled', True),
             camera_role=camera_data.get('camera_role', CameraRole.GENERAL),
             features=CameraFeatures(**features),
@@ -205,11 +206,11 @@ class CameraManager:
 
             # Apply updates
             if 'name' in updates:
-                camera.name = updates['name']
+                camera.name = str(updates['name']).strip()
             if 'source_type' in updates:
-                camera.source_type = updates['source_type']
+                camera.source_type = str(updates['source_type']).strip() or 'rtsp'
             if 'rtsp_url' in updates:
-                camera.rtsp_url = updates['rtsp_url']
+                camera.rtsp_url = str(updates['rtsp_url']).strip()
             if 'enabled' in updates:
                 camera.enabled = updates['enabled']
             if 'camera_role' in updates:

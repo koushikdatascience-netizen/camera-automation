@@ -816,7 +816,7 @@
 
         // Test Connection
         document.getElementById('test-connection-btn').addEventListener('click', async () => {
-            const rtspUrl = document.getElementById('rtsp-url').value;
+            const rtspUrl = document.getElementById('rtsp-url').value.trim();
             const testBtnText = document.getElementById('test-btn-text');
             const testBtnLoading = document.getElementById('test-btn-loading');
             const testResult = document.getElementById('test-result');
@@ -878,10 +878,10 @@
             e.preventDefault();
 
             const cameraData = {
-                camera_id: document.getElementById('camera-id').value,
-                name: document.getElementById('camera-name').value,
+                camera_id: document.getElementById('camera-id').value.trim(),
+                name: document.getElementById('camera-name').value.trim(),
                 source_type: 'rtsp',
-                rtsp_url: document.getElementById('rtsp-url').value,
+                rtsp_url: document.getElementById('rtsp-url').value.trim(),
                 enabled: true,
                 camera_role: document.getElementById('camera-role').value,
                 features: {
