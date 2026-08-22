@@ -6,7 +6,7 @@ from camera_service.models import IdentitySeen, LineCrossingEvent
 
 @dataclass
 class Presence:
-    person_id:str; status:str='PRESENT'; attendance_session_id:str|None=None; first_seen_today:datetime|None=None; last_seen_at:datetime|None=None; last_camera_id:str|None=None; last_confidence:float=0.0
+    person_id:str; status:str='PRESENT'; attendance_session_id:str|None=None; first_seen_today:datetime|None=None; last_seen_at:datetime|None=None; last_camera_id:str|None=None; last_confidence:float=0.0; current_track_id:str|None=None; break_started_at:datetime|None=None
 
 class AttendanceEngine:
     def __init__(self, store, store_id:str, pending_window_seconds:float=5.0):
@@ -16,7 +16,11 @@ class AttendanceEngine:
         with self._lock:
             self.identities[key]=ev
             p=self.presence.get(ev.person_id) or Presence(person_id=ev.person_id,first_seen_today=ev.timestamp)
+            if p.status=='BREAK':
+                self.store.add_person_event(ev.person_id,self.store_id,ev.camera_id,'BREAK_END',ev.timestamp,{'track_id':ev.track_id,'break_started_at':p.break_started_at.isoformat() if p.break_started_at else None})
+                p.break_started_at=None
             p.last_seen_at=ev.timestamp; p.last_camera_id=ev.camera_id; p.last_confidence=ev.confidence; p.status='PRESENT'; self.presence[ev.person_id]=p
+            p.current_track_id=ev.track_id
             cross=self.crossings.get(key)
             if cross and abs((ev.timestamp-cross.timestamp).total_seconds())<=self.pending_window_seconds: return self._apply(ev,cross)
         return None
@@ -40,8 +44,12 @@ class AttendanceEngine:
                 return {'type':'EXIT_WITHOUT_OPEN_SESSION'}
             return {'type':'EXIT','session':s}
     def on_track_lost(self,camera_id,track_id):
-        # Explicitly no attendance EXIT here.
         with self._lock:
-            self.identities.pop((camera_id,track_id),None); self.crossings.pop((camera_id,track_id),None)
+            ident=self.identities.pop((camera_id,track_id),None); self.crossings.pop((camera_id,track_id),None)
+            if ident:
+                p=self.presence.get(ident.person_id)
+                if p and p.status=='PRESENT' and p.current_track_id==track_id:
+                    p.status='BREAK'; p.break_started_at=ident.timestamp; p.last_seen_at=ident.timestamp; p.last_camera_id=camera_id
+                    self.store.add_person_event(ident.person_id,self.store_id,camera_id,'BREAK_START',ident.timestamp,{'track_id':track_id})
     def presence_list(self):
         return [vars(v).copy() for v in self.presence.values()]

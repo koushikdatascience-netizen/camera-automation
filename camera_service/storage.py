@@ -81,6 +81,13 @@ class SQLiteStore:
         eid=str(uuid.uuid4())
         with self._lock,self._conn() as c: c.execute("INSERT INTO person_events VALUES(?,?,?,?,?,?,?)",(eid,person_id,store_id,camera_id,event_type,ts.isoformat(),json.dumps(metadata or {})))
         return eid
+    def person_events(self,person_id=None):
+        q='''SELECT e.*,p.employee_code,p.full_name,p.role FROM person_events e LEFT JOIN personnel p ON p.id=e.person_id'''
+        args=[]
+        if person_id:
+            q+=' WHERE e.person_id=?'; args.append(person_id)
+        q+=' ORDER BY e.event_time DESC'
+        with self._conn() as c: return [dict(r) for r in c.execute(q,args)]
     def upsert_unknown(self,store_id,camera_id,track_id,first_seen,confirmed,last_seen,attempts,best_similarity,face_path=None,person_path=None,clip_path=None):
         with self._lock:
             with self._conn() as c:

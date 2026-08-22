@@ -272,7 +272,18 @@ def attendance_person(person_id:str,s=Depends(get_store)): return {'items':s.att
 
 # Presence API
 @app.get('/api/v1/presence')
-def presence(): return {'items':attendance_engine.presence_list()}
+def presence(s=Depends(get_store)):
+    people = {person['id']: person for person in s.list_people()}
+    items = []
+    for item in attendance_engine.presence_list():
+        person = people.get(item.get('person_id'))
+        if person:
+            item = {**item, 'full_name': person.get('full_name'), 'employee_code': person.get('employee_code'), 'role': person.get('role')}
+        items.append(item)
+    return {'items':items}
+
+@app.get('/api/v1/person-events')
+def person_events(person_id:str|None=None,s=Depends(get_store)): return {'items':s.person_events(person_id)}
 
 # Unknown Incidents APIs
 @app.get('/api/v1/unknown-incidents')

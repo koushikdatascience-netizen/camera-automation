@@ -337,6 +337,17 @@
         .status-error {
             color: #dc3545;
         }
+
+        .alert-banner {
+            display: none;
+            margin-bottom: 20px;
+            padding: 14px 16px;
+            border-radius: 6px;
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            font-weight: 600;
+        }
     </style>
 </head>
 <body>
@@ -354,6 +365,8 @@
     </header>
 
     <div class="container">
+        <div id="unknown-alert-banner" class="alert-banner"></div>
+
         <!-- System Status Section -->
         <div id="system-section" class="main-content active">
             <div class="section-header">
@@ -584,6 +597,44 @@
                     </tbody>
                 </table>
             </div>
+
+            <h3>Current Presence</h3>
+            <div class="table-container">
+                <table id="presence-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Employee Code</th>
+                            <th>Status</th>
+                            <th>Last Seen</th>
+                            <th>Camera</th>
+                            <th>Confidence</th>
+                            <th>Break Started</th>
+                        </tr>
+                    </thead>
+                    <tbody id="presence-list">
+                        <!-- Presence will be loaded here -->
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Break / Person Events</h3>
+            <div class="table-container">
+                <table id="person-events-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Employee Code</th>
+                            <th>Event</th>
+                            <th>Time</th>
+                            <th>Camera</th>
+                        </tr>
+                    </thead>
+                    <tbody id="person-events-list">
+                        <!-- Person events will be loaded here -->
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <!-- Unknown Persons Section -->
@@ -697,13 +748,33 @@
                 const personnelData = await personnelResponse.json();
                 document.getElementById('active-personnel').textContent = personnelData.items.length;
 
-                // Load unknown incidents (placeholder)
-                document.getElementById('unknown-incidents').textContent = '0';
+                await refreshUnknownAlert();
 
             } catch (error) {
                 console.error('Error loading system status:', error);
                 document.getElementById('app-status').textContent = 'Error';
                 document.getElementById('app-status').className = 'status-error';
+            }
+        }
+
+        async function refreshUnknownAlert() {
+            try {
+                const response = await fetch(`${API_BASE}/unknown-incidents`);
+                const data = await response.json();
+                const openIncidents = (data.items || []).filter(item => item.status === 'OPEN');
+                document.getElementById('unknown-incidents').textContent = openIncidents.length;
+
+                const banner = document.getElementById('unknown-alert-banner');
+                if (openIncidents.length > 0) {
+                    const cameras = [...new Set(openIncidents.map(item => item.camera_id))].join(', ');
+                    banner.textContent = `ALERT: ${openIncidents.length} unidentified person incident(s) open${cameras ? ' on camera(s): ' + cameras : ''}`;
+                    banner.style.display = 'block';
+                } else {
+                    banner.textContent = '';
+                    banner.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Error refreshing unknown alerts:', error);
             }
         }
 
@@ -1354,6 +1425,34 @@
                     attendanceList.appendChild(row);
                 });
 
+                const presenceResponse = await fetch(`${API_BASE}/presence`);
+                const presenceData = await presenceResponse.json();
+                const presenceList = document.getElementById('presence-list');
+                presenceList.innerHTML = '';
+                presenceData.items.forEach(item => {
+                    const row = document.createElement('tr');
+                    [item.full_name || item.person_id, item.employee_code || '-', item.status, item.last_seen_at ? new Date(item.last_seen_at).toLocaleString() : '-', item.last_camera_id || '-', item.last_confidence ? Number(item.last_confidence).toFixed(2) : '-', item.break_started_at ? new Date(item.break_started_at).toLocaleString() : '-'].forEach(value => {
+                        const cell = document.createElement('td');
+                        cell.textContent = value;
+                        row.appendChild(cell);
+                    });
+                    presenceList.appendChild(row);
+                });
+
+                const eventsResponse = await fetch(`${API_BASE}/person-events`);
+                const eventsData = await eventsResponse.json();
+                const eventsList = document.getElementById('person-events-list');
+                eventsList.innerHTML = '';
+                eventsData.items.forEach(item => {
+                    const row = document.createElement('tr');
+                    [item.full_name || item.person_id || '-', item.employee_code || '-', item.event_type, item.event_time ? new Date(item.event_time).toLocaleString() : '-', item.camera_id || '-'].forEach(value => {
+                        const cell = document.createElement('td');
+                        cell.textContent = value;
+                        row.appendChild(cell);
+                    });
+                    eventsList.appendChild(row);
+                });
+
             } catch (error) {
                 console.error('Error loading attendance:', error);
             }
@@ -1439,6 +1538,7 @@
                 if (response.ok) {
                     alert('Unknown incident acknowledged!');
                     loadUnknownPersons();
+                    refreshUnknownAlert();
                 } else {
                     const error = await response.json();
                     alert('Error acknowledging incident: ' + (error.detail || 'Unknown error'));
@@ -1451,6 +1551,7 @@
 
         // Initialize
         loadSystemStatus();
+        setInterval(refreshUnknownAlert, 5000);
     </script>
 </body>
 </html>
