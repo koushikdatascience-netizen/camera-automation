@@ -464,6 +464,48 @@ class CameraManager:
         except Exception:
             return None
 
+    def _begin_security_clip(self, stream_state: dict | None, alert_id: str, camera_id: str):
+        if stream_state is None or stream_state.get("security_clip"):
+            return
+        stream_state["security_clip"] = {
+            "alert_id": alert_id,
+            "camera_id": camera_id,
+            "started_at": time.monotonic(),
+            "duration": 10.0,
+            "frames": [],
+        }
+
+    def _record_security_clip_frame(self, stream_state: dict | None, frame):
+        if stream_state is None or not stream_state.get("security_clip"):
+            return
+        clip = stream_state["security_clip"]
+        clip["frames"].append(frame.copy())
+        if time.monotonic() - clip["started_at"] >= clip["duration"]:
+            self._finalize_security_clip(stream_state)
+
+    def _finalize_security_clip(self, stream_state: dict | None, store=None):
+        if stream_state is None or not stream_state.get("security_clip"):
+            return
+        clip = stream_state.pop("security_clip")
+        frames = clip.get("frames") or []
+        if not frames:
+            return
+        try:
+            root = Path("data/evidence") / clip["camera_id"]
+            root.mkdir(parents=True, exist_ok=True)
+            path = root / f"security_clip_{int(time.time() * 1000)}.mp4"
+            h, w = frames[0].shape[:2]
+            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), max(1.0, len(frames) / max(1.0, clip["duration"])), (w, h))
+            for frame in frames:
+                if frame.shape[:2] != (h, w):
+                    frame = cv2.resize(frame, (w, h))
+                writer.write(frame)
+            writer.release()
+            if store is not None:
+                store.update_security_alert_clip(clip["alert_id"], str(path))
+        except Exception:
+            return
+
     def _should_emit_alert(self, key: str, cooldown_seconds: float = 30.0) -> bool:
         now = time.monotonic()
         last = self._alert_last_sent.get(key, 0)
@@ -680,6 +722,25 @@ class CameraManager:
                     "text": text,
                     "color": color,
                 })
+                if (
+                    label.lower() == "scissors"
+                    and camera_config is not None
+                    and camera_config.features.shoplifting
+                    and store is not None
+                    and self._should_emit_alert(f"security_object:{camera_id}:scissors", 20)
+                ):
+                    snapshot_path = self._save_event_snapshot(frame, camera_id, "scissors_alert")
+                    alert = store.create_security_alert(
+                        getattr(attendance_engine, "store_id", "store-1"),
+                        camera_id,
+                        "SECURITY_OBJECT_ALERT",
+                        "scissors",
+                        float(conf),
+                        datetime.now(timezone.utc),
+                        snapshot_path=snapshot_path,
+                        metadata={"bbox": [float(x1), float(y1), float(x2), float(y2)], "source": "tracking_stream"},
+                    )
+                    self._begin_security_clip(stream_state, alert["id"], camera_id)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 220), y1), color, -1)
                 cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
@@ -1159,23 +1220,28 @@ class CameraManager:
         rtsp_url = camera_config.rtsp_url
         target_fps = max(1.0, min(float(getattr(camera_config, "tracking_fps", 3.0) or 3.0), 12.0))
         frame_delay = 1.0 / target_fps
+        stream_state = {"security_clip": None}
         if self._is_dshow_source(rtsp_url):
-            for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=max(1, int(target_fps))):
-                started_at = time.monotonic()
-                frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
-                if frame is None:
-                    continue
-                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
-                if encoded:
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n\r\n"
-                        + encoded
-                        + b"\r\n"
-                    )
-                elapsed = time.monotonic() - started_at
-                if elapsed < frame_delay:
-                    time.sleep(frame_delay - elapsed)
+            try:
+                for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=max(1, int(target_fps))):
+                    started_at = time.monotonic()
+                    frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if frame is None:
+                        continue
+                    encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
+                    self._record_security_clip_frame(stream_state, frame)
+                    if encoded:
+                        yield (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n\r\n"
+                            + encoded
+                            + b"\r\n"
+                        )
+                    elapsed = time.monotonic() - started_at
+                    if elapsed < frame_delay:
+                        time.sleep(frame_delay - elapsed)
+            finally:
+                self._finalize_security_clip(stream_state, store)
             return
 
         cap = self._open_video_capture(rtsp_url)
@@ -1185,7 +1251,8 @@ class CameraManager:
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     break
-                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store)
+                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
+                self._record_security_clip_frame(stream_state, frame)
                 if encoded:
                     yield (
                         b"--frame\r\n"
@@ -1198,3 +1265,4 @@ class CameraManager:
                     time.sleep(frame_delay - elapsed)
         finally:
             cap.release()
+            self._finalize_security_clip(stream_state, store)

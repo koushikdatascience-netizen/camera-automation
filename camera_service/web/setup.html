@@ -382,6 +382,7 @@
                 <a href="#" data-section="cameras">Cameras</a>
                 <a href="#" data-section="personnel">Personnel</a>
                 <a href="#" data-section="attendance">Attendance</a>
+                <a href="#" data-section="security">Security Alerts</a>
                 <a href="#" data-section="unknown">Unknown Persons</a>
             </nav>
         </div>
@@ -732,6 +733,33 @@
         </div>
 
         <!-- Unknown Persons Section -->
+        <div id="security-section" class="main-content">
+            <div class="section-header">
+                <h2 class="section-title">Security Alerts</h2>
+            </div>
+
+            <div class="table-container">
+                <table id="security-table">
+                    <thead>
+                        <tr>
+                            <th>Snapshot</th>
+                            <th>Clip</th>
+                            <th>Object</th>
+                            <th>Confidence</th>
+                            <th>Camera</th>
+                            <th>Time</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="security-alerts-list">
+                        <!-- Security alerts will be loaded here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Unknown Persons Section -->
         <div id="unknown-section" class="main-content">
             <div class="section-header">
                 <h2 class="section-title">Unknown Persons</h2>
@@ -764,6 +792,7 @@
         const API_BASE = '/api/v1';
         let editingCameraId = null;
         let editingPersonId = null;
+        let seenOpenSecurityAlertIds = new Set();
 
         // DOM Elements
         const sections = {
@@ -771,6 +800,7 @@
             cameras: document.getElementById('cameras-section'),
             personnel: document.getElementById('personnel-section'),
             attendance: document.getElementById('attendance-section'),
+            security: document.getElementById('security-section'),
             unknown: document.getElementById('unknown-section')
         };
 
@@ -809,6 +839,9 @@
                     break;
                 case 'attendance':
                     loadAttendance();
+                    break;
+                case 'security':
+                    loadSecurityAlerts();
                     break;
                 case 'unknown':
                     loadUnknownPersons();
@@ -867,20 +900,30 @@
                 const openIncidents = (data.items || []).filter(item => item.status === 'OPEN');
                 const eventsResponse = await fetch(`${API_BASE}/person-events`);
                 const eventsData = await eventsResponse.json();
+                const securityResponse = await fetch(`${API_BASE}/security-alerts`);
+                const securityData = await securityResponse.json();
                 const recentCutoff = Date.now() - (5 * 60 * 1000);
                 const alertEvents = (eventsData.items || []).filter(item =>
                     ['UNKNOWN_INSIDE_ALERT', 'CROWD_ALERT'].includes(item.event_type)
                     && item.event_time
                     && new Date(item.event_time).getTime() >= recentCutoff
                 );
+                const openSecurityAlerts = (securityData.items || []).filter(item => item.status === 'OPEN');
 
-                document.getElementById('unknown-incidents').textContent = openIncidents.length + alertEvents.length;
+                document.getElementById('unknown-incidents').textContent = openIncidents.length + alertEvents.length + openSecurityAlerts.length;
+
+                const newOpenAlerts = openSecurityAlerts.filter(item => !seenOpenSecurityAlertIds.has(item.id));
+                if (newOpenAlerts.length) {
+                    playAlertBeep();
+                }
+                seenOpenSecurityAlertIds = new Set(openSecurityAlerts.map(item => item.id));
 
                 const banner = document.getElementById('unknown-alert-banner');
-                if (openIncidents.length > 0 || alertEvents.length > 0) {
+                if (openIncidents.length > 0 || alertEvents.length > 0 || openSecurityAlerts.length > 0) {
                     const cameras = [...new Set(openIncidents.map(item => item.camera_id))].join(', ');
                     const eventText = alertEvents.length ? ` Recent operational alert(s): ${alertEvents.map(item => `${item.event_type} on ${item.camera_id}`).join(', ')}` : '';
-                    banner.textContent = `ALERT: ${openIncidents.length} unidentified person incident(s) open${cameras ? ' on camera(s): ' + cameras : ''}.${eventText}`;
+                    const securityText = openSecurityAlerts.length ? ` Security alert(s): ${openSecurityAlerts.map(item => `${item.object_label} on ${item.camera_id}`).join(', ')}` : '';
+                    banner.textContent = `ALERT: ${openIncidents.length} unidentified person incident(s) open${cameras ? ' on camera(s): ' + cameras : ''}.${eventText}${securityText}`;
                     banner.style.display = 'block';
                 } else {
                     banner.textContent = '';
@@ -888,6 +931,26 @@
                 }
             } catch (error) {
                 console.error('Error refreshing unknown alerts:', error);
+            }
+        }
+
+        function playAlertBeep() {
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                const ctx = new AudioContext();
+                const oscillator = ctx.createOscillator();
+                const gain = ctx.createGain();
+                oscillator.type = 'sine';
+                oscillator.frequency.value = 880;
+                oscillator.connect(gain);
+                gain.connect(ctx.destination);
+                gain.gain.setValueAtTime(0.001, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.35, ctx.currentTime + 0.02);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
+                oscillator.start();
+                oscillator.stop(ctx.currentTime + 0.5);
+            } catch (error) {
+                console.error('Alert beep failed:', error);
             }
         }
 
@@ -1617,6 +1680,96 @@
             }
         }
 
+        async function loadSecurityAlerts() {
+            try {
+                const response = await fetch(`${API_BASE}/security-alerts`);
+                const data = await response.json();
+                const list = document.getElementById('security-alerts-list');
+                list.innerHTML = '';
+
+                data.items.forEach(alertItem => {
+                    const row = document.createElement('tr');
+
+                    const snapshotCell = document.createElement('td');
+                    if (alertItem.snapshot_path) {
+                        const img = document.createElement('img');
+                        img.src = `${API_BASE}/security-alerts/${encodeURIComponent(alertItem.id)}/snapshot?t=${Date.now()}`;
+                        img.style.width = '100px';
+                        img.style.height = '100px';
+                        img.style.objectFit = 'cover';
+                        snapshotCell.appendChild(img);
+                    } else {
+                        snapshotCell.textContent = '-';
+                    }
+
+                    const clipCell = document.createElement('td');
+                    if (alertItem.clip_path) {
+                        const link = document.createElement('a');
+                        link.href = `${API_BASE}/security-alerts/${encodeURIComponent(alertItem.id)}/clip`;
+                        link.target = '_blank';
+                        link.textContent = 'Open clip';
+                        clipCell.appendChild(link);
+                    } else {
+                        clipCell.textContent = 'Recording...';
+                    }
+
+                    const objectCell = document.createElement('td');
+                    objectCell.textContent = alertItem.object_label;
+
+                    const confidenceCell = document.createElement('td');
+                    confidenceCell.textContent = Number(alertItem.confidence || 0).toFixed(2);
+
+                    const cameraCell = document.createElement('td');
+                    cameraCell.textContent = alertItem.camera_id;
+
+                    const timeCell = document.createElement('td');
+                    timeCell.textContent = alertItem.event_time ? new Date(alertItem.event_time).toLocaleString() : '-';
+
+                    const statusCell = document.createElement('td');
+                    statusCell.textContent = alertItem.status;
+                    statusCell.className = alertItem.status === 'OPEN' ? 'status-error' : 'status-ok';
+
+                    const actionsCell = document.createElement('td');
+                    if (alertItem.status === 'OPEN') {
+                        const ackBtn = document.createElement('button');
+                        ackBtn.className = 'btn btn-primary';
+                        ackBtn.textContent = 'ACKNOWLEDGE';
+                        ackBtn.addEventListener('click', () => acknowledgeSecurityAlert(alertItem.id));
+                        actionsCell.appendChild(ackBtn);
+                    }
+
+                    row.appendChild(snapshotCell);
+                    row.appendChild(clipCell);
+                    row.appendChild(objectCell);
+                    row.appendChild(confidenceCell);
+                    row.appendChild(cameraCell);
+                    row.appendChild(timeCell);
+                    row.appendChild(statusCell);
+                    row.appendChild(actionsCell);
+                    list.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Error loading security alerts:', error);
+            }
+        }
+
+        async function acknowledgeSecurityAlert(alertId) {
+            try {
+                const response = await fetch(`${API_BASE}/security-alerts/${encodeURIComponent(alertId)}/acknowledge`, {
+                    method: 'POST'
+                });
+                if (response.ok) {
+                    loadSecurityAlerts();
+                    refreshUnknownAlert();
+                } else {
+                    const error = await response.json();
+                    alert('Error acknowledging alert: ' + (error.detail || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error acknowledging alert: ' + error.message);
+            }
+        }
+
         // Unknown Persons
         async function loadUnknownPersons() {
             try {
@@ -1711,6 +1864,11 @@
         // Initialize
         loadSystemStatus();
         setInterval(refreshUnknownAlert, 5000);
+        setInterval(() => {
+            if (sections.security.classList.contains('active')) {
+                loadSecurityAlerts();
+            }
+        }, 5000);
     </script>
 </body>
 </html>

@@ -33,6 +33,8 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_edge_event_queue_status ON edge_event_queue(status,created_at);
             CREATE TABLE IF NOT EXISTS unknown_incidents(id TEXT PRIMARY KEY, store_id TEXT NOT NULL, camera_id TEXT NOT NULL, track_id TEXT NOT NULL, first_seen TEXT NOT NULL, confirmed_unknown_at TEXT NOT NULL, last_seen TEXT NOT NULL, recognition_attempts INTEGER NOT NULL, best_similarity REAL, best_face_snapshot TEXT, best_person_snapshot TEXT, clip_path TEXT, status TEXT NOT NULL DEFAULT 'OPEN', acknowledged_at TEXT);
             CREATE INDEX IF NOT EXISTS idx_unknown_active ON unknown_incidents(store_id,camera_id,track_id,status);
+            CREATE TABLE IF NOT EXISTS security_alerts(id TEXT PRIMARY KEY, store_id TEXT NOT NULL, camera_id TEXT NOT NULL, alert_type TEXT NOT NULL, object_label TEXT NOT NULL, confidence REAL NOT NULL, event_time TEXT NOT NULL, snapshot_path TEXT, clip_path TEXT, status TEXT NOT NULL DEFAULT 'OPEN', acknowledged_at TEXT, metadata_json TEXT);
+            CREATE INDEX IF NOT EXISTS idx_security_alerts_status ON security_alerts(status,event_time);
             ''')
             self._ensure_column(c,'face_profiles','image_path','TEXT')
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
@@ -137,6 +139,23 @@ class SQLiteStore:
     def acknowledge_unknown(self,iid):
         with self._lock,self._conn() as c: c.execute("UPDATE unknown_incidents SET status='ACKNOWLEDGED',acknowledged_at=? WHERE id=?",(self.now(),iid))
         return self.unknown(iid)
+    def create_security_alert(self,store_id,camera_id,alert_type,object_label,confidence,event_time,snapshot_path=None,clip_path=None,metadata=None):
+        aid=str(uuid.uuid4())
+        payload={'event_id':aid,'store_id':store_id,'camera_id':camera_id,'event_type':alert_type,'event_time':event_time.isoformat(),'metadata':metadata or {}}
+        with self._lock,self._conn() as c:
+            c.execute("INSERT INTO security_alerts(id,store_id,camera_id,alert_type,object_label,confidence,event_time,snapshot_path,clip_path,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)",(aid,store_id,camera_id,alert_type,object_label,confidence,event_time.isoformat(),snapshot_path,clip_path,json.dumps(metadata or {})))
+            c.execute("INSERT INTO edge_event_queue(id,event_type,payload_json,created_at) VALUES(?,?,?,?)",(aid,alert_type,json.dumps(payload),self.now()))
+        return self.security_alert(aid)
+    def security_alerts(self):
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM security_alerts ORDER BY event_time DESC")]
+    def security_alert(self,aid):
+        with self._conn() as c: r=c.execute("SELECT * FROM security_alerts WHERE id=?",(aid,)).fetchone(); return dict(r) if r else None
+    def update_security_alert_clip(self,aid,clip_path):
+        with self._lock,self._conn() as c: c.execute("UPDATE security_alerts SET clip_path=? WHERE id=?",(clip_path,aid))
+        return self.security_alert(aid)
+    def acknowledge_security_alert(self,aid):
+        with self._lock,self._conn() as c: c.execute("UPDATE security_alerts SET status='ACKNOWLEDGED',acknowledged_at=? WHERE id=?",(self.now(),aid))
+        return self.security_alert(aid)
     def queued_events(self,limit=50):
         with self._conn() as c:
             rows=c.execute("SELECT * FROM edge_event_queue WHERE status='PENDING' ORDER BY created_at LIMIT ?",(limit,)).fetchall()

@@ -35,3 +35,11 @@ def test_entry_exit_times_and_snapshots_are_stored(tmp_path):
  assert row['arrival_camera']=='entrance' and row['exit_camera']=='entrance'
  assert row['arrival_snapshot']=='data/evidence/entrance/first_seen.jpg' and row['exit_snapshot']=='data/evidence/entrance/exit.jpg'
  assert row['arrival_confidence']==.91 and row['exit_confidence']==.91 and row['status']=='CLOSED'
+def test_security_alert_history_snapshot_clip_and_ack(tmp_path):
+ s=SQLiteStore(str(tmp_path/'db.sqlite')); t=datetime(2026,8,24,10,0,0,tzinfo=timezone.utc)
+ alert=s.create_security_alert('store','jewel_cam','SECURITY_OBJECT_ALERT','scissors',.77,t,snapshot_path='snap.jpg',metadata={'bbox':[1,2,3,4]})
+ assert alert['status']=='OPEN' and alert['object_label']=='scissors' and alert['snapshot_path']=='snap.jpg'
+ updated=s.update_security_alert_clip(alert['id'],'clip.mp4')
+ assert updated['clip_path']=='clip.mp4' and s.security_alerts()[0]['id']==alert['id']
+ ack=s.acknowledge_security_alert(alert['id'])
+ assert ack['status']=='ACKNOWLEDGED' and ack['acknowledged_at']

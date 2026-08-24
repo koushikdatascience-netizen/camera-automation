@@ -423,6 +423,38 @@ def presence(s=Depends(get_store)):
 @app.get('/api/v1/person-events')
 def person_events(person_id:str|None=None,s=Depends(get_store)): return {'items':s.person_events(person_id)}
 
+# Security Alert APIs
+@app.get('/api/v1/security-alerts')
+def security_alerts(s=Depends(get_store)): return {'items':s.security_alerts()}
+
+@app.get('/api/v1/security-alerts/{alert_id}')
+def security_alert(alert_id:str,s=Depends(get_store)):
+    alert=s.security_alert(alert_id)
+    if not alert: raise HTTPException(404,'Security alert not found')
+    return alert
+
+@app.get('/api/v1/security-alerts/{alert_id}/snapshot')
+def security_alert_snapshot(alert_id:str,s=Depends(get_store)):
+    alert=s.security_alert(alert_id)
+    if not alert or not alert.get('snapshot_path'): raise HTTPException(404,'Snapshot not found')
+    path=Path(alert['snapshot_path'])
+    if not path.exists() or not path.is_file(): raise HTTPException(404,'Snapshot not found')
+    return Response(content=path.read_bytes(),media_type='image/jpeg')
+
+@app.get('/api/v1/security-alerts/{alert_id}/clip')
+def security_alert_clip(alert_id:str,s=Depends(get_store)):
+    alert=s.security_alert(alert_id)
+    if not alert or not alert.get('clip_path'): raise HTTPException(404,'Clip not found')
+    path=Path(alert['clip_path'])
+    if not path.exists() or not path.is_file(): raise HTTPException(404,'Clip not found')
+    return Response(content=path.read_bytes(),media_type='video/mp4')
+
+@app.post('/api/v1/security-alerts/{alert_id}/acknowledge')
+def acknowledge_security_alert(alert_id:str,s=Depends(get_store)):
+    alert=s.acknowledge_security_alert(alert_id)
+    if not alert: raise HTTPException(404,'Security alert not found')
+    return alert
+
 # Unknown Incidents APIs
 @app.get('/api/v1/unknown-incidents')
 def unknowns(s=Depends(get_store)): return {'items':s.unknowns()}
