@@ -19,7 +19,7 @@ class AttendanceEngine:
             if p.status=='BREAK':
                 self.store.add_person_event(ev.person_id,self.store_id,ev.camera_id,'BREAK_END',ev.timestamp,{'track_id':ev.track_id,'break_started_at':p.break_started_at.isoformat() if p.break_started_at else None,'snapshot_path':ev.snapshot_path})
                 p.break_started_at=None
-            session, _ = self.store.create_arrival(ev.person_id,self.store_id,ev.timestamp,ev.camera_id,ev.confidence,ev.snapshot_path)
+            session, _ = self.store.create_arrival(ev.person_id,self.store_id,ev.timestamp,ev.camera_id,ev.confidence,ev.snapshot_path,confirmed=False)
             p.attendance_session_id=session['id'] if session else p.attendance_session_id
             p.last_seen_at=ev.timestamp; p.last_camera_id=ev.camera_id; p.last_confidence=ev.confidence; p.status='PRESENT'; self.presence[ev.person_id]=p
             p.current_track_id=ev.track_id; p.last_snapshot_path=ev.snapshot_path or p.last_snapshot_path
@@ -35,7 +35,7 @@ class AttendanceEngine:
         return None
     def _apply(self, ident:IdentitySeen, cross:LineCrossingEvent):
         if cross.direction=='ENTRY':
-            s,created=self.store.create_arrival(ident.person_id,self.store_id,cross.timestamp,cross.camera_id,ident.confidence,ident.snapshot_path)
+            s,created=self.store.create_arrival(ident.person_id,self.store_id,cross.timestamp,cross.camera_id,ident.confidence,ident.snapshot_path,confirmed=True)
             p=self.presence[ident.person_id]; p.attendance_session_id=s['id']; p.status='PRESENT'
             return {'type':'ARRIVAL' if created else 'PRESENCE','session':s}
         if cross.direction=='EXIT':

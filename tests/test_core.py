@@ -23,3 +23,15 @@ def test_lost_track_does_not_exit(tmp_path):
 def test_duplicate_arrival_and_exit(tmp_path):
  s=SQLiteStore(str(tmp_path/'db.sqlite')); p=s.create_person(PersonnelCreate(employee_code='E1',full_name='A',role=PersonnelRole.WORKER)); a=AttendanceEngine(s,'store'); t=datetime.now(timezone.utc)
  i=IdentitySeen(store_id='store',camera_id='cam',track_id='1',person_id=p['id'],timestamp=t,confidence=.9,bbox=(0,0,10,20)); a.on_identity(i); a.on_crossing(LineCrossingEvent(store_id='store',camera_id='cam',track_id='1',direction='ENTRY',timestamp=t,bbox=(0,0,10,20))); a.on_crossing(LineCrossingEvent(store_id='store',camera_id='cam',track_id='1',direction='ENTRY',timestamp=t,bbox=(0,0,10,20))); assert len(s.attendance(p['id']))==1; te=t+timedelta(hours=1); a.on_identity(i.model_copy(update={'timestamp':te})); a.on_crossing(LineCrossingEvent(store_id='store',camera_id='cam',track_id='1',direction='EXIT',timestamp=te,bbox=(0,0,10,20))); assert s.attendance(p['id'])[0]['status']=='CLOSED'
+def test_entry_exit_times_and_snapshots_are_stored(tmp_path):
+ s=SQLiteStore(str(tmp_path/'db.sqlite')); p=s.create_person(PersonnelCreate(employee_code='E2',full_name='B',role=PersonnelRole.WORKER)); a=AttendanceEngine(s,'store'); first_seen=datetime(2026,8,24,8,59,55,tzinfo=timezone.utc); entry=first_seen+timedelta(seconds=5); exit_time=entry+timedelta(hours=8)
+ entry_seen=IdentitySeen(store_id='store',camera_id='entrance',track_id='11',person_id=p['id'],timestamp=first_seen,confidence=.91,bbox=(0,0,10,20),snapshot_path='data/evidence/entrance/first_seen.jpg')
+ exit_seen=entry_seen.model_copy(update={'timestamp':exit_time,'snapshot_path':'data/evidence/entrance/exit.jpg'})
+ a.on_identity(entry_seen); a.on_crossing(LineCrossingEvent(store_id='store',camera_id='entrance',track_id='11',direction='ENTRY',timestamp=entry,bbox=(0,0,10,20)))
+ a.on_crossing(LineCrossingEvent(store_id='store',camera_id='entrance',track_id='11',direction='ENTRY',timestamp=entry+timedelta(minutes=1),bbox=(0,0,10,20)))
+ a.on_identity(exit_seen); a.on_crossing(LineCrossingEvent(store_id='store',camera_id='entrance',track_id='11',direction='EXIT',timestamp=exit_time,bbox=(0,0,10,20)))
+ row=s.attendance(p['id'])[0]
+ assert row['arrival_time']==entry.isoformat() and row['exit_time']==exit_time.isoformat()
+ assert row['arrival_camera']=='entrance' and row['exit_camera']=='entrance'
+ assert row['arrival_snapshot']=='data/evidence/entrance/first_seen.jpg' and row['exit_snapshot']=='data/evidence/entrance/exit.jpg'
+ assert row['arrival_confidence']==.91 and row['exit_confidence']==.91 and row['status']=='CLOSED'

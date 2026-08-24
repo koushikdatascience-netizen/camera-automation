@@ -37,6 +37,7 @@ class SQLiteStore:
             self._ensure_column(c,'face_profiles','image_path','TEXT')
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
+            self._ensure_column(c,'attendance_sessions','entry_confirmed','INTEGER NOT NULL DEFAULT 0')
     def _ensure_column(self,conn,table,column,definition):
         existing={row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in existing:
@@ -80,12 +81,16 @@ class SQLiteStore:
     def open_session(self,person_id,store_id):
         with self._conn() as c:
             r=c.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? AND status='OPEN' ORDER BY arrival_time DESC LIMIT 1",(person_id,store_id)).fetchone(); return dict(r) if r else None
-    def create_arrival(self,person_id,store_id,ts,camera,confidence,snapshot_path=None):
+    def create_arrival(self,person_id,store_id,ts,camera,confidence,snapshot_path=None,confirmed=False):
         with self._lock:
             existing=self.open_session(person_id,store_id)
-            if existing: return existing,False
+            if existing:
+                if confirmed and not existing.get('entry_confirmed'):
+                    with self._conn() as c: c.execute("UPDATE attendance_sessions SET arrival_time=?,arrival_camera=?,arrival_confidence=?,arrival_snapshot=?,entry_confirmed=1 WHERE id=?",(ts.isoformat(),camera,confidence,snapshot_path,existing['id']))
+                    return self.open_session(person_id,store_id),False
+                return existing,False
             sid=str(uuid.uuid4())
-            with self._conn() as c: c.execute("INSERT INTO attendance_sessions(id,person_id,store_id,arrival_time,arrival_camera,arrival_confidence,arrival_snapshot,status) VALUES(?,?,?,?,?,?,?, 'OPEN')",(sid,person_id,store_id,ts.isoformat(),camera,confidence,snapshot_path))
+            with self._conn() as c: c.execute("INSERT INTO attendance_sessions(id,person_id,store_id,arrival_time,arrival_camera,arrival_confidence,arrival_snapshot,status,entry_confirmed) VALUES(?,?,?,?,?,?,?, 'OPEN',?)",(sid,person_id,store_id,ts.isoformat(),camera,confidence,snapshot_path,1 if confirmed else 0))
             return self.open_session(person_id,store_id),True
     def close_exit(self,person_id,store_id,ts,camera,confidence,snapshot_path=None):
         with self._lock:
