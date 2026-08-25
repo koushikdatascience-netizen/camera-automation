@@ -1249,56 +1249,174 @@ class CameraManager:
             cap.release()
 
     def iter_tracking_mjpeg(self, camera_config: CameraConfig, model_path: str, face_service=None, recognition_config=None, attendance_engine=None, store=None):
-        """Yield MJPEG frames with YOLO/ByteTrack annotations drawn before each frame is sent."""
+        """Yield MJPEG frames from a latest-frame pipeline.
+
+        Capture, AI, and browser streaming run independently so slow CPU
+        inference cannot freeze the client-facing live view.
+        """
         rtsp_url = camera_config.rtsp_url
         target_ai_fps = max(0.5, min(float(getattr(camera_config, "tracking_fps", 2.0) or 2.0), 8.0))
         display_fps = max(6.0, min(target_ai_fps * 4.0, 12.0))
         frame_delay = 1.0 / display_fps
-        stream_state = {"security_clip": None}
-        if self._is_dshow_source(rtsp_url):
+        stream_state = {
+            "security_clip": None,
+            "latest_overlays": [],
+            "latest_summary": {
+                "people": 0,
+                "objects": 0,
+                "known": 0,
+                "unknown": 0,
+                "updated_at": time.monotonic(),
+                "error": None,
+            },
+        }
+        stop_event = threading.Event()
+        frame_lock = threading.Lock()
+        capture_state = {
+            "latest_frame": None,
+            "latest_seq": 0,
+            "ai_seq": 0,
+            "stream_seq": 0,
+            "frames_received": 0,
+            "frames_dropped": 0,
+            "stopped": False,
+            "error": None,
+        }
+
+        def publish_frame(frame):
+            prepared = self._prepare_tracking_frame(frame, camera_config)
+            with frame_lock:
+                if capture_state["latest_seq"] > capture_state["ai_seq"]:
+                    capture_state["frames_dropped"] += 1
+                capture_state["latest_frame"] = prepared
+                capture_state["latest_seq"] += 1
+                capture_state["frames_received"] += 1
+
+        def capture_worker():
             try:
-                for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=max(1, int(display_fps))):
+                if self._is_dshow_source(rtsp_url):
+                    for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=max(1, int(display_fps))):
+                        if stop_event.is_set():
+                            break
+                        frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            publish_frame(frame)
+                    return
+
+                cap = self._open_video_capture(rtsp_url)
+                try:
+                    while not stop_event.is_set() and cap.isOpened():
+                        ok, frame = cap.read()
+                        if not ok or frame is None:
+                            break
+                        publish_frame(frame)
+                finally:
+                    cap.release()
+            except Exception as exc:
+                capture_state["error"] = str(exc)
+            finally:
+                capture_state["stopped"] = True
+
+        def ai_worker():
+            next_run_at = 0.0
+            while not stop_event.is_set():
+                now = time.monotonic()
+                if now < next_run_at:
+                    time.sleep(min(0.02, next_run_at - now))
+                    continue
+
+                with frame_lock:
+                    frame = capture_state["latest_frame"]
+                    seq = capture_state["latest_seq"]
+                    if frame is None or seq == capture_state["ai_seq"]:
+                        frame = None
+                    else:
+                        capture_state["ai_seq"] = seq
+
+                if frame is None:
+                    if capture_state["stopped"]:
+                        break
+                    time.sleep(0.02)
+                    continue
+
+                try:
+                    ai_frame = frame.copy()
+                    self._annotate_tracking_frame(
+                        ai_frame,
+                        model_path,
+                        face_service,
+                        recognition_config,
+                        camera_config,
+                        attendance_engine,
+                        store,
+                        stream_state,
+                    )
+                except Exception as exc:
+                    stream_state["latest_summary"] = {
+                        "people": 0,
+                        "objects": 0,
+                        "known": 0,
+                        "unknown": 0,
+                        "updated_at": time.monotonic(),
+                        "error": str(exc),
+                    }
+                next_run_at = time.monotonic() + (1.0 / target_ai_fps)
+
+        capture_thread = threading.Thread(target=capture_worker, name=f"capture-{camera_config.camera_id}", daemon=True)
+        ai_thread = threading.Thread(target=ai_worker, name=f"ai-{camera_config.camera_id}", daemon=True)
+        capture_thread.start()
+        ai_thread.start()
+
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not stop_event.is_set():
+                with frame_lock:
+                    if capture_state["latest_frame"] is not None:
+                        break
+                    stopped = capture_state["stopped"]
+                    error = capture_state["error"]
+                if stopped:
+                    if error:
+                        self._tracking_error = error
+                    return
+                time.sleep(0.03)
+
+            try:
+                while not stop_event.is_set():
                     started_at = time.monotonic()
-                    frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    with frame_lock:
+                        frame = capture_state["latest_frame"]
+                        if frame is not None:
+                            frame = frame.copy()
+                            capture_state["stream_seq"] = capture_state["latest_seq"]
+                        stopped = capture_state["stopped"]
+                        error = capture_state["error"]
                     if frame is None:
+                        if stopped:
+                            if error:
+                                self._tracking_error = error
+                            break
+                        time.sleep(0.03)
                         continue
-                    frame = self._prepare_tracking_frame(frame, camera_config)
-                    encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
+
+                    annotated = self._draw_tracking_demo_overlay(frame, camera_config, stream_state, attendance_engine, store)
                     self._record_security_clip_frame(stream_state, frame, store)
-                    if encoded:
+                    quality = max(35, min(int(getattr(camera_config, "tracking_quality", 65) or 65), 95))
+                    ok, encoded = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                    if ok and encoded is not None:
                         yield (
                             b"--frame\r\n"
                             b"Content-Type: image/jpeg\r\n\r\n"
-                            + encoded
+                            + encoded.tobytes()
                             + b"\r\n"
                         )
                     elapsed = time.monotonic() - started_at
                     if elapsed < frame_delay:
                         time.sleep(frame_delay - elapsed)
             finally:
-                self._finalize_security_clip(stream_state, store)
-            return
-
-        cap = self._open_video_capture(rtsp_url)
-        try:
-            while cap.isOpened():
-                started_at = time.monotonic()
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    break
-                frame = self._prepare_tracking_frame(frame, camera_config)
-                encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
-                self._record_security_clip_frame(stream_state, frame, store)
-                if encoded:
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n\r\n"
-                        + encoded
-                        + b"\r\n"
-                    )
-                elapsed = time.monotonic() - started_at
-                if elapsed < frame_delay:
-                    time.sleep(frame_delay - elapsed)
+                stop_event.set()
         finally:
-            cap.release()
+            stop_event.set()
             self._finalize_security_clip(stream_state, store)
+            capture_thread.join(timeout=1.0)
+            ai_thread.join(timeout=1.0)
