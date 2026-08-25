@@ -332,6 +332,10 @@ class CameraManager:
     def _open_video_capture(self, source: str):
         """Open RTSP/file sources normally, with Windows webcam backend fallbacks."""
         cap, _ = self._open_video_capture_with_diagnostics(source)
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
         return cap
 
     def _is_dshow_source(self, source: str) -> bool:
@@ -475,13 +479,13 @@ class CameraManager:
             "frames": [],
         }
 
-    def _record_security_clip_frame(self, stream_state: dict | None, frame):
+    def _record_security_clip_frame(self, stream_state: dict | None, frame, store=None):
         if stream_state is None or not stream_state.get("security_clip"):
             return
         clip = stream_state["security_clip"]
         clip["frames"].append(frame.copy())
         if time.monotonic() - clip["started_at"] >= clip["duration"]:
-            self._finalize_security_clip(stream_state)
+            self._finalize_security_clip(stream_state, store)
 
     def _finalize_security_clip(self, stream_state: dict | None, store=None):
         if stream_state is None or not stream_state.get("security_clip"):
@@ -490,6 +494,10 @@ class CameraManager:
         frames = clip.get("frames") or []
         if not frames:
             return
+        thread = threading.Thread(target=self._write_security_clip, args=(clip, frames, store), daemon=True)
+        thread.start()
+
+    def _write_security_clip(self, clip: dict, frames: list, store=None):
         try:
             root = Path("data/evidence") / clip["camera_id"]
             root.mkdir(parents=True, exist_ok=True)
@@ -505,6 +513,28 @@ class CameraManager:
                 store.update_security_alert_clip(clip["alert_id"], str(path))
         except Exception:
             return
+
+    def _prepare_tracking_frame(self, frame, camera_config=None):
+        """Downscale large camera frames before AI/streaming for CPU-friendly demos."""
+        max_width = max(480, min(int(getattr(camera_config, "tracking_imgsz", 384) or 384) * 2, 960))
+        h, w = frame.shape[:2]
+        if w <= max_width:
+            return frame
+        scale = max_width / float(w)
+        return cv2.resize(frame, (max_width, max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+
+    def _should_run_tracking_ai(self, stream_state: dict | None, camera_config=None) -> bool:
+        if stream_state is None:
+            return True
+        now = time.monotonic()
+        ai_fps = max(0.5, min(float(getattr(camera_config, "tracking_fps", 2.0) or 2.0), 8.0))
+        if not stream_state.get("latest_summary"):
+            stream_state["last_ai_started_at"] = now
+            return True
+        if now - stream_state.get("last_ai_started_at", 0.0) >= (1.0 / ai_fps):
+            stream_state["last_ai_started_at"] = now
+            return True
+        return False
 
     def _should_emit_alert(self, key: str, cooldown_seconds: float = 30.0) -> bool:
         now = time.monotonic()
@@ -906,7 +936,10 @@ class CameraManager:
             cv2.putText(frame, line[:58], (x0 + 12, y0 + 50 + idx * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2)
 
     def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None) -> Optional[bytes]:
-        annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
+        if self._should_run_tracking_ai(stream_state, camera_config):
+            annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
+        else:
+            annotated = self._draw_tracking_demo_overlay(frame, camera_config, stream_state or {}, attendance_engine, store)
         quality = max(35, min(int(getattr(camera_config, "tracking_quality", 65) or 65), 95))
         ok, encoded = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
         if not ok:
@@ -1218,18 +1251,20 @@ class CameraManager:
     def iter_tracking_mjpeg(self, camera_config: CameraConfig, model_path: str, face_service=None, recognition_config=None, attendance_engine=None, store=None):
         """Yield MJPEG frames with YOLO/ByteTrack annotations drawn before each frame is sent."""
         rtsp_url = camera_config.rtsp_url
-        target_fps = max(1.0, min(float(getattr(camera_config, "tracking_fps", 3.0) or 3.0), 12.0))
-        frame_delay = 1.0 / target_fps
+        target_ai_fps = max(0.5, min(float(getattr(camera_config, "tracking_fps", 2.0) or 2.0), 8.0))
+        display_fps = max(6.0, min(target_ai_fps * 4.0, 12.0))
+        frame_delay = 1.0 / display_fps
         stream_state = {"security_clip": None}
         if self._is_dshow_source(rtsp_url):
             try:
-                for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=max(1, int(target_fps))):
+                for snapshot in self._iter_dshow_mjpeg_frames(rtsp_url, fps=max(1, int(display_fps))):
                     started_at = time.monotonic()
                     frame = cv2.imdecode(np.frombuffer(snapshot, dtype=np.uint8), cv2.IMREAD_COLOR)
                     if frame is None:
                         continue
+                    frame = self._prepare_tracking_frame(frame, camera_config)
                     encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
-                    self._record_security_clip_frame(stream_state, frame)
+                    self._record_security_clip_frame(stream_state, frame, store)
                     if encoded:
                         yield (
                             b"--frame\r\n"
@@ -1251,8 +1286,9 @@ class CameraManager:
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     break
+                frame = self._prepare_tracking_frame(frame, camera_config)
                 encoded = self._encode_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
-                self._record_security_clip_frame(stream_state, frame)
+                self._record_security_clip_frame(stream_state, frame, store)
                 if encoded:
                     yield (
                         b"--frame\r\n"
