@@ -1272,6 +1272,7 @@ class CameraManager:
         }
         stop_event = threading.Event()
         frame_lock = threading.Lock()
+        result_lock = threading.Lock()
         capture_state = {
             "latest_frame": None,
             "latest_seq": 0,
@@ -1280,6 +1281,11 @@ class CameraManager:
             "frames_received": 0,
             "frames_dropped": 0,
             "stopped": False,
+            "error": None,
+        }
+        result_state = {
+            "annotated_frame": None,
+            "updated_at": 0.0,
             "error": None,
         }
 
@@ -1351,7 +1357,13 @@ class CameraManager:
                         store,
                         stream_state,
                     )
+                    with result_lock:
+                        result_state["annotated_frame"] = ai_frame.copy()
+                        result_state["updated_at"] = time.monotonic()
+                        result_state["error"] = None
                 except Exception as exc:
+                    with result_lock:
+                        result_state["error"] = str(exc)
                     stream_state["latest_summary"] = {
                         "people": 0,
                         "objects": 0,
@@ -1399,7 +1411,27 @@ class CameraManager:
                         time.sleep(0.03)
                         continue
 
-                    annotated = self._draw_tracking_demo_overlay(frame, camera_config, stream_state, attendance_engine, store)
+                    with result_lock:
+                        cached_annotated = result_state["annotated_frame"]
+                        cached_age = time.monotonic() - result_state["updated_at"] if result_state["updated_at"] else 999.0
+                        ai_error = result_state["error"]
+
+                    if stream_state.get("latest_overlays"):
+                        annotated = self._draw_tracking_demo_overlay(frame, camera_config, stream_state, attendance_engine, store)
+                    elif cached_annotated is not None and cached_age <= 3.0:
+                        annotated = cached_annotated.copy()
+                    else:
+                        annotated = self._draw_tracking_demo_overlay(frame, camera_config, stream_state, attendance_engine, store)
+                        if ai_error:
+                            cv2.putText(
+                                annotated,
+                                f"AI: {ai_error[:44]}",
+                                (20, max(56, min(annotated.shape[0] - 20, 62))),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.55,
+                                (0, 0, 255),
+                                2,
+                            )
                     self._record_security_clip_frame(stream_state, frame, store)
                     quality = max(35, min(int(getattr(camera_config, "tracking_quality", 65) or 65), 95))
                     ok, encoded = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
