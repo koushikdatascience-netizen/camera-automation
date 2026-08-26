@@ -1,104 +1,107 @@
-# Camera Automation Windows Packaging
+# SnapKey Vision AI Windows Client Installer
 
-This directory contains the build scripts and configuration for creating a production-ready Windows package.
+This folder builds a professional Windows installer for client testing.
 
-## Build Process
+The client should receive only:
 
-### Prerequisites
+```text
+SnapKeyVisionAISetup.exe
+```
 
-1. Python 3.9+ installed
-2. PyInstaller installed (`pip install pyinstaller`)
-3. All project dependencies installed (`pip install -r requirements.txt`)
+They should not need Git, source code, a Python install, or command-line clone steps.
 
-### Building the Application
+## Build Machine Requirements
 
-Run the build script from PowerShell:
+Install these only on your internal build PC:
+
+```text
+Python 3.11 64-bit
+Inno Setup 6
+```
+
+Then install Python dependencies once:
 
 ```powershell
-.\packaging\windows\build_windows.ps1
+cd "C:\path\to\camera-automation"
+py -3.11 -m venv .venv311
+.\.venv311\Scripts\python.exe -m pip install --upgrade pip
+.\.venv311\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-This will create a production build in the `dist/CameraAutomation/` directory.
+Inno Setup 6:
 
-### Build Options
+```text
+https://jrsoftware.org/isdl.php
+```
 
-- **BuildType**: `"onedir"` (default) or `"onefile"`
-- **OutputDir**: `"dist"` (default)
-- **CleanBuild**: `$true` (default) to clean previous builds
-- **IncludeDebugSymbols**: `$false` (default)
+## Build Final Installer
 
-Example with custom options:
+Run from the project root:
 
 ```powershell
-.\packaging\windows\build_windows.ps1 -BuildType "onefile" -CleanBuild $true
+.\packaging\windows\build_installer.ps1
 ```
 
-### Build Output
+Output:
 
-The build process creates:
-
-1. **Executable**: `dist/CameraAutomation/CameraAutomation.exe`
-2. **Start Script**: `START_CAMERA_AUTOMATION.bat`
-3. **Stop Script**: `STOP_CAMERA_AUTOMATION.bat`
-4. **Configuration Example**: `.env.example`
-
-### Running the Application
-
-1. **Development Mode**:
-   ```powershell
-   python -m camera_service.launcher
-   ```
-
-2. **Production Mode**:
-   ```powershell
-   .\START_CAMERA_AUTOMATION.bat
-   ```
-
-3. **Stop the Application**:
-   ```powershell
-   .\STOP_CAMERA_AUTOMATION.bat
-   ```
-
-### Deployment Structure
-
-The production deployment should have the following structure:
-
-```
-CameraAutomation/
-├── CameraAutomation.exe          # Main executable
-├── _internal/                    # PyInstaller runtime files
-├── camera_service/               # Application code
-├── data/                         # Application data
-├── models/                       # AI models
-├── logs/                         # Log files
-├── config.yaml                   # Configuration
-├── START_CAMERA_AUTOMATION.bat   # Start script
-└── STOP_CAMERA_AUTOMATION.bat    # Stop script
+```text
+dist\installer\SnapKeyVisionAISetup.exe
 ```
 
-### Data Directory
+That single EXE is what you send to the client.
 
-By default, the application uses `C:\ProgramData\CameraAutomation\` for persistent data storage including:
+## What The Installer Includes
 
-- Database files
-- Camera snapshots
-- Log files
-- Evidence files
+The installer packages:
 
-### Configuration
+```text
+SnapKeyVisionAI.exe
+Python runtime packed by PyInstaller
+Ultralytics/YOLO dependencies from the build environment
+OpenCV, FastAPI, Uvicorn, InsightFace, ONNX Runtime
+Web UI files
+yolo11n.pt model
+Start/stop shortcuts
+```
 
-Copy `.env.example` to `.env` and modify as needed for your environment.
+Persistent client data is stored outside the install folder:
 
-### Troubleshooting
+```text
+C:\ProgramData\SnapKeyVisionAI
+```
 
-1. **Missing dependencies**: Ensure all requirements are installed
-2. **Port conflicts**: Make sure port 8000 is available
-3. **Model files**: Ensure all AI model files are present in the `models/` directory
-4. **Permissions**: Ensure the application has write access to the data directory
+This keeps database, evidence, snapshots, clips, and config writable without exposing a source checkout.
 
-### Future Enhancements
+## Client Install/Test Flow
 
-- Inno Setup installer script for professional installation
-- Windows Service wrapper for background operation
-- Automatic model download and verification
-- Advanced logging and monitoring
+On the client machine:
+
+1. Run `SnapKeyVisionAISetup.exe`.
+2. Click Install.
+3. Launch **SnapKey Vision AI** from desktop/start menu.
+4. Browser opens:
+
+```text
+http://127.0.0.1:8091/setup
+```
+
+5. Add webcam/camera.
+6. Enable required features.
+7. Open Tracking and test bounding boxes/alerts.
+
+## Notes About Code Protection
+
+PyInstaller makes deployment professional, but it is not strong source-code protection. A technical user can still reverse engineer Python bytecode with enough effort.
+
+For stronger commercial protection later:
+
+```text
+Nuitka compiled build
+Code signing certificate
+License activation tied to machine code
+Server-side paid feature checks
+Model/config encryption
+Private cloud sync for paid deployments
+```
+
+For current client demos, this installer is the right next step because it removes Git/Python/source-code setup from the client workflow.

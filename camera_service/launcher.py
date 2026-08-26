@@ -53,10 +53,10 @@ def main() -> None:
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
     host = os.environ.get("HOST", "127.0.0.1")
-    port = int(os.environ.get("PORT", "8000"))
+    port = int(os.environ.get("PORT", "8091"))
     log_level = os.environ.get("LOG_LEVEL", "info").lower()
 
-    print(f"Starting Camera Automation on http://{host}:{port}")
+    print(f"Starting SnapKey Vision AI on http://{host}:{port}")
 
     if env_bool("AUTO_OPEN_BROWSER", True):
         browser_thread = threading.Thread(

@@ -1,15 +1,14 @@
 @echo off
 SETLOCAL
 
-REM Camera Automation Stop Script
-REM This script stops the Camera Automation application
+REM SnapKey Vision AI Stop Script
+REM This script stops the SnapKey Vision AI application
 
-echo Stopping Camera Automation...
+echo Stopping SnapKey Vision AI...
 
-taskkill /f /im CameraAutomation.exe >nul 2>&1
-taskkill /f /im python.exe >nul 2>&1
+taskkill /f /im SnapKeyVisionAI.exe >nul 2>&1
 
-echo Camera Automation stopped.
+echo SnapKey Vision AI stopped.
 pause
 
 ENDLOCAL

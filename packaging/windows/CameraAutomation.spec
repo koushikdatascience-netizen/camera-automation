@@ -1,4 +1,4 @@
-# CameraAutomation PyInstaller spec.
+# SnapKey Vision AI PyInstaller spec.
 # Keep this build in ONEDIR mode because AI/CV dependencies are large.
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -10,7 +10,9 @@ datas = [
     ("../../camera_service/web/setup.html", "camera_service/web"),
     ("../../camera_service/web/favicon.ico", "camera_service/web"),
     ("../../camera_service/web/static", "camera_service/web/static"),
+    ("../../assets/brand", "assets/brand"),
     ("../../config.example.yaml", "."),
+    ("../../yolo11n.pt", "."),
 ]
 binaries = []
 hiddenimports = [
@@ -87,7 +89,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="CameraAutomation",
+    name="SnapKeyVisionAI",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -103,5 +105,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    name="CameraAutomation",
+    name="SnapKeyVisionAI",
 )

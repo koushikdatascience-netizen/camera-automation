@@ -90,7 +90,7 @@ def test_api_endpoints():
         print("\n2. Testing /setup endpoint...")
         response = requests.get(f"{base_url}/setup")
         assert response.status_code == 200
-        assert "Camera Automation Setup" in response.text
+        assert "SnapKey Vision AI" in response.text
         print("[OK] Setup UI endpoint working")
 
         # Test 3: Camera CRUD endpoints
@@ -305,7 +305,7 @@ def test_packaging_files():
     with open("packaging/windows/build_windows.ps1", 'r') as f:
         build_script = f.read()
         assert 'PyInstaller' in build_script
-        assert 'CameraAutomation' in build_script
+        assert 'SnapKeyVisionAI' in build_script
         assert 'pyinstaller' in build_script
 
     print("[OK] Build script content validated!")
@@ -314,7 +314,7 @@ def test_packaging_files():
 
 def main():
     """Run all tests"""
-    print("[START] Starting Camera Automation Production Package Tests\n")
+    print("[START] Starting SnapKey Vision AI Production Package Tests\n")
 
     try:
         # Test 1: Packaging files

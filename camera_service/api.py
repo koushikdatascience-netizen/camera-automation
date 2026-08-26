@@ -33,7 +33,7 @@ license_manager=LicenseManager(config.edge)
 @asynccontextmanager
 async def lifespan(app:FastAPI):
     supervisor.start(); yield; supervisor.shutdown()
-app=FastAPI(title='Camera Automation Production P0',lifespan=lifespan)
+app=FastAPI(title='SnapKey Vision AI',lifespan=lifespan)
 
 def get_store(): return store
 

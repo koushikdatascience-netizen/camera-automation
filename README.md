@@ -1,6 +1,6 @@
-# Camera Automation
+# SnapKey Vision AI
 
-Production demo system for camera setup, live preview, YOLO object tracking, face enrollment, known-person recognition, attendance presence, break events, and unknown-person alerts.
+Professional edge AI system for camera setup, live preview, YOLO object tracking, jewellery security alerts, face enrollment, known-person recognition, attendance presence, break events, and unknown-person alerts.
 
 ## Quick Start
 

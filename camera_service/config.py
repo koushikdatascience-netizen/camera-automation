@@ -1,4 +1,6 @@
 from __future__ import annotations
+import os
+import sys
 from pathlib import Path
 from typing import Literal
 import yaml
@@ -75,9 +77,54 @@ class AppConfig(BaseModel):
     recognition: RecognitionConfig = Field(default_factory=RecognitionConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+def _runtime_base() -> Path:
+    configured = os.environ.get("CAMERA_AUTOMATION_HOME")
+    if configured:
+        return Path(configured)
+    if _is_frozen():
+        return Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "SnapKeyVisionAI"
+    return Path(".")
+
+def _bundle_base() -> Path:
+    if _is_frozen():
+        return Path(sys.executable).resolve().parent
+    return Path(".")
+
+def _resolve_under_base(value: str, base: Path) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    return str(base / path)
+
+def _resolve_loaded_config(config: AppConfig) -> AppConfig:
+    runtime_base = _runtime_base()
+    runtime_base.mkdir(parents=True, exist_ok=True)
+    config.database_path = _resolve_under_base(config.database_path, runtime_base)
+    config.evidence_dir = _resolve_under_base(config.evidence_dir, runtime_base)
+    Path(config.database_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.evidence_dir).mkdir(parents=True, exist_ok=True)
+
+    model_path = Path(config.yolo_model)
+    if not model_path.is_absolute():
+        bundled_model = _bundle_base() / model_path
+        if bundled_model.exists():
+            config.yolo_model = str(bundled_model)
+    return config
+
 def load_config(path: str = "config.yaml") -> AppConfig:
-    p=Path(path)
+    configured_path = os.environ.get("CAMERA_AUTOMATION_CONFIG")
+    if configured_path:
+        p = Path(configured_path)
+    elif _is_frozen():
+        runtime_config = _runtime_base() / "config.yaml"
+        bundled_config = _bundle_base() / path
+        p = runtime_config if runtime_config.exists() else bundled_config
+    else:
+        p=Path(path)
     if not p.exists():
-        return AppConfig()
+        return _resolve_loaded_config(AppConfig())
     with p.open("r",encoding="utf-8") as f:
-        return AppConfig.model_validate(yaml.safe_load(f) or {})
+        return _resolve_loaded_config(AppConfig.model_validate(yaml.safe_load(f) or {}))

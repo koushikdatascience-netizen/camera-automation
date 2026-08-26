@@ -1,4 +1,4 @@
-# Camera Automation Windows Build Script
+# SnapKey Vision AI Windows Build Script
 # Fixed version for proper PyInstaller build
 
 param (
@@ -9,7 +9,7 @@ param (
 )
 
 # Configuration
-$ProjectName = "CameraAutomation"
+$ProjectName = "SnapKeyVisionAI"
 $SpecFile = "packaging/windows/CameraAutomation.spec"
 # Ensure we're in the project root
 $ProjectRoot = $PSScriptRoot + "\..\.."
@@ -39,15 +39,18 @@ if (-not (Test-Path "$OutputDir")) {
 }
 
 # Check if PyInstaller is available
-try {
-    & $PythonPath -m pip show pyinstaller | Out-Null
-} catch {
+& $PythonPath -m pip show pyinstaller *> $null
+if ($LASTEXITCODE -ne 0) {
     Write-Host "PyInstaller not found. Installing..."
     & $PythonPath -m pip install pyinstaller
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "PyInstaller installation failed. Install it manually with: $PythonPath -m pip install pyinstaller"
+        exit $LASTEXITCODE
+    }
 }
 
 # Build the application using the spec file directly
-Write-Host "Building Camera Automation using PyInstaller spec file..."
+Write-Host "Building SnapKey Vision AI using PyInstaller spec file..."
 
 # Build command - use the spec file as the single source of truth
 $BuildArgs = @(
@@ -68,7 +71,7 @@ try {
     Write-Host "Build completed."
 
     # Verify the expected output exists
-    $ExpectedExePath = Join-Path $OutputDir "$ProjectName\CameraAutomation.exe"
+    $ExpectedExePath = Join-Path $OutputDir "$ProjectName\SnapKeyVisionAI.exe"
 
     if (Test-Path $ExpectedExePath) {
         $ExeInfo = Get-Item $ExpectedExePath
@@ -76,28 +79,32 @@ try {
         Write-Host "Build successful! Executable created at: $ExpectedExePath"
         Write-Host "EXE size: $($ExeSize.ToString('F2')) MB"
 
-        # Create start/stop scripts
+        $AppDistDir = Split-Path $ExpectedExePath -Parent
+
+        # Create start/stop scripts inside the installable app folder
         $StartScriptContent = @"
 @echo off
 SETLOCAL
 
-REM Camera Automation Start Script
-REM This script starts the Camera Automation application
+REM SnapKey Vision AI Start Script
+REM This script starts the SnapKey Vision AI application
 
 SET APP_DIR=%~dp0
-SET APP_NAME=CameraAutomation.exe
+SET APP_NAME=SnapKeyVisionAI.exe
+SET AUTO_OPEN_BROWSER=1
+SET PORT=8091
 
-echo Starting Camera Automation...
+echo Starting SnapKey Vision AI...
 echo Application Directory: %APP_DIR%
 
 cd /d "%APP_DIR%"
 
 if exist "%APP_NAME%" (
     start "" "%APP_NAME%"
-    echo Camera Automation started successfully.
+    echo SnapKey Vision AI started successfully.
     echo Opening browser to setup page...
     timeout /t 2 /nobreak >nul
-    start "" "http://127.0.0.1:8000/setup"
+    start "" "http://127.0.0.1:8091/setup"
 ) else (
     echo Error: %APP_NAME% not found in %APP_DIR%
     pause
@@ -110,38 +117,37 @@ ENDLOCAL
 @echo off
 SETLOCAL
 
-REM Camera Automation Stop Script
-REM This script stops the Camera Automation application
+REM SnapKey Vision AI Stop Script
+REM This script stops the SnapKey Vision AI application
 
-echo Stopping Camera Automation...
+echo Stopping SnapKey Vision AI...
 
-taskkill /f /im CameraAutomation.exe >nul 2>&1
-taskkill /f /im python.exe >nul 2>&1
+taskkill /f /im SnapKeyVisionAI.exe >nul 2>&1
 
-echo Camera Automation stopped.
+echo SnapKey Vision AI stopped.
 pause
 
 ENDLOCAL
 "@
 
         # Write start/stop scripts
-        $StartScriptContent | Out-File -FilePath "START_CAMERA_AUTOMATION.bat" -Encoding utf8
-        $StopScriptContent | Out-File -FilePath "STOP_CAMERA_AUTOMATION.bat" -Encoding utf8
+        $StartScriptContent | Out-File -FilePath (Join-Path $AppDistDir "START_SNAPKEY_VISION_AI.bat") -Encoding ascii
+        $StopScriptContent | Out-File -FilePath (Join-Path $AppDistDir "STOP_SNAPKEY_VISION_AI.bat") -Encoding ascii
 
-        Write-Host "Created START_CAMERA_AUTOMATION.bat and STOP_CAMERA_AUTOMATION.bat"
+        Write-Host "Created START_SNAPKEY_VISION_AI.bat and STOP_SNAPKEY_VISION_AI.bat in $AppDistDir"
 
         # Create .env.example file if it doesn't exist
         if (-not (Test-Path ".env.example")) {
             $EnvExampleContent = @"
-# Camera Automation Configuration
+# SnapKey Vision AI Configuration
 # Copy this file to .env and modify as needed
 
 # Server Configuration
 HOST=127.0.0.1
-PORT=8000
+PORT=8091
 
 # Data Directory (Windows)
-DATA_DIR=C:\ProgramData\CameraAutomation
+DATA_DIR=C:\ProgramData\SnapKeyVisionAI
 
 # Logging
 LOG_LEVEL=INFO
