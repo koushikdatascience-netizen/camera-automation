@@ -18,4 +18,4 @@ installer-wizard.bmp     Inno Setup large wizard image, usually 164x314 BMP
 installer-banner.bmp     Inno Setup top banner image, usually 493x58 BMP
 ```
 
-Until these files are provided, the build keeps using the current favicon as the temporary app icon.
+The installer and PyInstaller build are configured to use these files directly.

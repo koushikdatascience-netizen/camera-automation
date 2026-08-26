@@ -19,11 +19,9 @@ WizardStyle=modern
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin
-SetupIconFile=..\..\camera_service\web\favicon.ico
-; When final brand assets are provided, enable these:
-; SetupIconFile=..\..\assets\brand\app.ico
-; WizardImageFile=..\..\assets\brand\installer-wizard.bmp
-; WizardSmallImageFile=..\..\assets\brand\installer-banner.bmp
+SetupIconFile=..\..\assets\brand\app.ico
+WizardImageFile=..\..\assets\brand\installer-wizard.bmp
+WizardSmallImageFile=..\..\assets\brand\installer-banner.bmp
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]

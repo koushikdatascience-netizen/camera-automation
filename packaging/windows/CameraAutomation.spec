@@ -95,7 +95,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=True,
-    icon="../../camera_service/web/favicon.ico",
+    icon="../../assets/brand/app.ico",
 )
 
 coll = COLLECT(
