@@ -23,13 +23,17 @@ if (-not (Test-Path $ExpectedAppExe)) {
     throw "Expected application EXE not found: $ExpectedAppExe"
 }
 
-$IsccCandidates = @(
+$IsccCommand = @(
     "ISCC.exe",
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
     "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
-) | Where-Object { $_ -and (Get-Command $_ -ErrorAction SilentlyContinue) }
+) | ForEach-Object {
+    if ($_) {
+        Get-Command $_ -ErrorAction SilentlyContinue
+    }
+} | Select-Object -First 1
 
-if (-not $IsccCandidates -or $IsccCandidates.Count -eq 0) {
+if (-not $IsccCommand) {
     Write-Error @"
 Inno Setup compiler was not found.
 
@@ -42,7 +46,7 @@ Then run:
     exit 1
 }
 
-$Iscc = $IsccCandidates[0].Source
+$Iscc = $IsccCommand.Source
 Write-Host "Building installer with Inno Setup: $Iscc"
 & $Iscc $InstallerScript
 if ($LASTEXITCODE -ne 0) {
