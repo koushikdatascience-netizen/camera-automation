@@ -40,7 +40,7 @@ class CameraWorker:
             state=self.identity.observe(self.camera.camera_id,tid,ts,match['person_id'] if match else None,score,True)
             if state.state=='KNOWN':
                 self.attendance.on_identity(IdentitySeen(store_id=self.app.store_id,camera_id=self.camera.camera_id,track_id=tid,person_id=state.person_id,timestamp=ts,confidence=state.confidence,bbox=bbox))
-            elif state.state=='UNKNOWN' and self.camera.features.unknown_detection:
+            elif state.state=='UNKNOWN' and self.camera.features.unknown_enabled:
                 self._save_unknown(frame,roi,tid,state,ts)
         lost=self.last_tracks-current
         for tid in lost:

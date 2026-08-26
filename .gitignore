@@ -26,10 +26,16 @@ config.yaml
 *.sqlite3-wal
 
 data/
+data/models/object_security/
 logs/
 clips/
 snapshots/
 unknown/
+evidence/
+*.mp4
+*.avi
+*.mov
+*.mkv
 
 .idea/
 .vscode/

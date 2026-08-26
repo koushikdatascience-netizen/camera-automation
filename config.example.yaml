@@ -2,6 +2,39 @@ store_id: client-shop-01
 database_path: data/camera_automation.db
 evidence_dir: data/evidence
 yolo_model: yolo11n.pt
+features:
+  attendance: false
+  face_recognition: false
+  unknown_detection: false
+  unknown_person_detection: false
+  shoplifting: false
+  shoplifting_detection: false
+  object_security: true
+object_security:
+  enabled: true
+  object_classes:
+    - scissors
+  model_storage_dir: data/models/object_security
+  inference:
+    imgsz: 960
+    confidence: 0.30
+  roi:
+    enabled: false
+  tiling:
+    enabled: false
+    tile_size: 640
+    overlap: 0.20
+  confirmation:
+    enabled: true
+    window_frames: 5
+    required_hits: 3
+    minimum_confidence: 0.30
+  alert:
+    beep_enabled: true
+    beep_frequency: 880
+    beep_duration_ms: 400
+    cooldown_seconds: 15
+    save_snapshot: true
 edge:
   edge_id: edge-client-shop-01
   tenant_id: tenant-demo

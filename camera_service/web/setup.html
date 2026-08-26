@@ -382,6 +382,7 @@
                 <a href="#" data-section="cameras">Cameras</a>
                 <a href="#" data-section="personnel">Personnel</a>
                 <a href="#" data-section="attendance">Attendance</a>
+                <a href="#" data-section="objectSecurity">Object Security Test</a>
                 <a href="#" data-section="security">Security Alerts</a>
                 <a href="#" data-section="unknown">Unknown Persons</a>
             </nav>
@@ -521,6 +522,10 @@
                         <div class="checkbox-group">
                             <input type="checkbox" id="feature-shoplifting">
                             <label for="feature-shoplifting">Shoplifting</label>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="feature-object-security">
+                            <label for="feature-object-security">Object Security</label>
                         </div>
                     </div>
 
@@ -732,7 +737,131 @@
             </div>
         </div>
 
-        <!-- Unknown Persons Section -->
+        <!-- Object Security Test Section -->
+        <div id="object-security-section" class="main-content">
+            <div class="section-header">
+                <h2 class="section-title">Object Security Test</h2>
+            </div>
+
+            <div class="system-status">
+                <div class="status-item">
+                    <h3>Object</h3>
+                    <p>Scissors</p>
+                </div>
+                <div class="status-item">
+                    <h3>Active Model</h3>
+                    <p id="object-security-active-model">Loading...</p>
+                </div>
+                <div class="status-item">
+                    <h3>Status</h3>
+                    <p id="object-security-status">Loading...</p>
+                </div>
+                <div class="status-item">
+                    <h3>Candidates</h3>
+                    <p id="object-security-candidate-count">0</p>
+                </div>
+            </div>
+
+            <h3>Object Security Test Mode</h3>
+            <div class="form-row">
+                <div class="form-col checkbox-group"><input type="checkbox" id="os-toggle-face"><label for="os-toggle-face">Face Recognition</label></div>
+                <div class="form-col checkbox-group"><input type="checkbox" id="os-toggle-attendance"><label for="os-toggle-attendance">Attendance</label></div>
+                <div class="form-col checkbox-group"><input type="checkbox" id="os-toggle-unknown"><label for="os-toggle-unknown">Unknown Person</label></div>
+                <div class="form-col checkbox-group"><input type="checkbox" id="os-toggle-shoplifting"><label for="os-toggle-shoplifting">Shoplifting</label></div>
+                <div class="form-col checkbox-group"><input type="checkbox" id="os-toggle-object" checked><label for="os-toggle-object">Object Security</label></div>
+            </div>
+
+            <h3>Runtime Settings</h3>
+            <div class="form-row">
+                <div class="form-col">
+                    <label for="os-source-type">Source</label>
+                    <select id="os-source-type" class="form-control">
+                        <option value="camera">Configured Camera</option>
+                        <option value="direct">RTSP / Webcam / Video</option>
+                    </select>
+                </div>
+                <div class="form-col">
+                    <label for="os-camera-id">Configured Camera</label>
+                    <select id="os-camera-id" class="form-control"></select>
+                </div>
+                <div class="form-col">
+                    <label for="os-direct-source">Direct Source</label>
+                    <input type="text" id="os-direct-source" class="form-control" placeholder="0, dshow:USB Camera, rtsp://..., or video file">
+                </div>
+                <div class="form-col">
+                    <label for="os-model-mode">Model</label>
+                    <select id="os-model-mode" class="form-control">
+                        <option value="active">Active Production Model</option>
+                        <option value="candidate">Candidate Model Test</option>
+                    </select>
+                </div>
+                <div class="form-col">
+                    <label for="os-candidate-id">Candidate</label>
+                    <select id="os-candidate-id" class="form-control"></select>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-col">
+                    <label for="os-confidence">Confidence</label>
+                    <input type="number" id="os-confidence" class="form-control" value="0.30" min="0.05" max="0.95" step="0.05">
+                </div>
+                <div class="form-col">
+                    <label for="os-imgsz">Inference Resolution</label>
+                    <select id="os-imgsz" class="form-control">
+                        <option value="640">640</option>
+                        <option value="960" selected>960</option>
+                        <option value="1280">1280</option>
+                    </select>
+                </div>
+                <div class="form-col checkbox-group"><input type="checkbox" id="os-roi"><label for="os-roi">ROI enabled</label></div>
+                <div class="form-col checkbox-group"><input type="checkbox" id="os-tiling"><label for="os-tiling">Tiled inference</label></div>
+                <div class="form-col checkbox-group"><input type="checkbox" id="os-confirmation" checked><label for="os-confirmation">Temporal confirmation</label></div>
+                <div class="form-col checkbox-group"><input type="checkbox" id="os-beep" checked><label for="os-beep">PC beep</label></div>
+            </div>
+            <div class="form-group">
+                <button class="btn btn-primary" type="button" onclick="startObjectSecurityTest()">START TEST</button>
+                <button class="btn btn-secondary" type="button" onclick="stopObjectSecurityTest()">STOP TEST</button>
+            </div>
+            <div class="preview-container" id="object-security-preview-container" style="display: none;">
+                <img id="object-security-live" class="preview-image" alt="Object Security Live Test">
+            </div>
+
+            <h3>Upload Candidate Model</h3>
+            <form id="object-security-upload-form">
+                <div class="form-row">
+                    <div class="form-col"><input type="file" id="os-model-file" class="form-control" accept=".pt" required></div>
+                    <div class="form-col"><input type="text" id="os-model-name" class="form-control" placeholder="Model name"></div>
+                    <div class="form-col"><input type="text" id="os-model-version" class="form-control" placeholder="Version"></div>
+                    <div class="form-col"><input type="text" id="os-model-source" class="form-control" placeholder="Source, e.g. Kaggle"></div>
+                </div>
+                <div class="form-group">
+                    <textarea id="os-model-notes" class="form-control" rows="2" placeholder="Dataset notes"></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">UPLOAD MODEL</button>
+                <span id="object-security-upload-result"></span>
+            </form>
+
+            <h3>Candidate Models</h3>
+            <div class="form-group">
+                <button class="btn btn-secondary" type="button" onclick="rollbackObjectSecurityModel()">ROLLBACK TO PREVIOUS MODEL</button>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>Name</th><th>Version</th><th>Source</th><th>Uploaded</th><th>Actions</th></tr></thead>
+                    <tbody id="object-security-candidates-list"></tbody>
+                </table>
+            </div>
+
+            <h3>Object Security Events</h3>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>Time</th><th>Camera</th><th>Object</th><th>Confidence</th><th>Track ID</th><th>Model</th><th>Alert</th></tr></thead>
+                    <tbody id="object-security-events-list"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Security Alerts Section -->
         <div id="security-section" class="main-content">
             <div class="section-header">
                 <h2 class="section-title">Security Alerts</h2>
@@ -800,6 +929,7 @@
             cameras: document.getElementById('cameras-section'),
             personnel: document.getElementById('personnel-section'),
             attendance: document.getElementById('attendance-section'),
+            objectSecurity: document.getElementById('object-security-section'),
             security: document.getElementById('security-section'),
             unknown: document.getElementById('unknown-section')
         };
@@ -839,6 +969,9 @@
                     break;
                 case 'attendance':
                     loadAttendance();
+                    break;
+                case 'objectSecurity':
+                    loadObjectSecurity();
                     break;
                 case 'security':
                     loadSecurityAlerts();
@@ -1167,7 +1300,10 @@
                     attendance: document.getElementById('feature-attendance').checked,
                     face_recognition: document.getElementById('feature-face-recognition').checked,
                     unknown_detection: document.getElementById('feature-unknown-detection').checked,
-                    shoplifting: document.getElementById('feature-shoplifting').checked
+                    unknown_person_detection: document.getElementById('feature-unknown-detection').checked,
+                    shoplifting: document.getElementById('feature-shoplifting').checked,
+                    shoplifting_detection: document.getElementById('feature-shoplifting').checked,
+                    object_security: document.getElementById('feature-object-security').checked
                 }
             };
 
@@ -1256,6 +1392,7 @@
                 document.getElementById('feature-face-recognition').checked = !!(fullCamera.features && fullCamera.features.face_recognition);
                 document.getElementById('feature-unknown-detection').checked = !!(fullCamera.features && fullCamera.features.unknown_detection);
                 document.getElementById('feature-shoplifting').checked = !!(fullCamera.features && fullCamera.features.shoplifting);
+                document.getElementById('feature-object-security').checked = !!(fullCamera.features && fullCamera.features.object_security);
                 document.getElementById('test-result').innerHTML = '';
                 document.getElementById('preview-container').style.display = 'none';
                 document.getElementById('camera-form').style.display = 'block';
@@ -1678,6 +1815,178 @@
             } catch (error) {
                 console.error('Error loading attendance:', error);
             }
+        }
+
+        async function loadObjectSecurity() {
+            try {
+                const statusResponse = await fetch(`${API_BASE}/object-security/status`);
+                const status = await statusResponse.json();
+                document.getElementById('object-security-status').textContent = status.message || (status.ready ? 'Ready' : 'Not ready');
+                document.getElementById('object-security-status').className = status.ready ? 'status-ok' : 'status-warning';
+                const active = status.active_model;
+                document.getElementById('object-security-active-model').textContent = active ? `${active.metadata.version || active.id}` : 'No custom scissors model installed';
+                document.getElementById('object-security-candidate-count').textContent = status.candidate_count || 0;
+
+                const modelsResponse = await fetch(`${API_BASE}/object-security/models`);
+                const models = await modelsResponse.json();
+                const candidateSelect = document.getElementById('os-candidate-id');
+                candidateSelect.innerHTML = '';
+                (models.candidates || []).forEach(candidate => {
+                    const meta = candidate.metadata || {};
+                    const option = document.createElement('option');
+                    option.value = candidate.id;
+                    option.textContent = `${meta.version || candidate.id} ${meta.model_name ? '- ' + meta.model_name : ''}`;
+                    candidateSelect.appendChild(option);
+                });
+                const candidatesList = document.getElementById('object-security-candidates-list');
+                candidatesList.innerHTML = '';
+                (models.candidates || []).forEach(candidate => {
+                    const meta = candidate.metadata || {};
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${meta.model_name || candidate.id}</td>
+                        <td>${meta.version || '-'}</td>
+                        <td>${meta.source || '-'}</td>
+                        <td>${formatDateTime(meta.uploaded_at)}</td>
+                        <td>
+                            <button class="btn btn-secondary" onclick="activateObjectSecurityCandidate('${candidate.id}')">ACTIVATE</button>
+                            <button class="btn btn-danger" onclick="deleteObjectSecurityCandidate('${candidate.id}')">DELETE</button>
+                        </td>
+                    `;
+                    candidatesList.appendChild(row);
+                });
+
+                const eventsResponse = await fetch(`${API_BASE}/object-security/events`);
+                const events = await eventsResponse.json();
+                const eventsList = document.getElementById('object-security-events-list');
+                eventsList.innerHTML = '';
+                (events.items || []).forEach(event => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${formatDateTime(event.detected_at)}</td>
+                        <td>${event.camera_id}</td>
+                        <td>${event.object_class}</td>
+                        <td>${Number(event.confidence || 0).toFixed(2)}</td>
+                        <td>${event.track_id || '-'}</td>
+                        <td>${event.model_version || '-'}</td>
+                        <td>${event.alert_sent ? 'Sent' : 'No'}</td>
+                    `;
+                    eventsList.appendChild(row);
+                });
+
+                const camerasResponse = await fetch(`${API_BASE}/cameras`);
+                const cameras = await camerasResponse.json();
+                const cameraSelect = document.getElementById('os-camera-id');
+                cameraSelect.innerHTML = '';
+                (cameras.items || []).forEach(camera => {
+                    const option = document.createElement('option');
+                    option.value = camera.camera_id;
+                    option.textContent = `${camera.name} (${camera.camera_id})`;
+                    cameraSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading object security:', error);
+                document.getElementById('object-security-status').textContent = error.message;
+                document.getElementById('object-security-status').className = 'status-error';
+            }
+        }
+
+        document.getElementById('object-security-upload-form').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const file = document.getElementById('os-model-file').files[0];
+            if (!file) {
+                alert('Select a Kaggle-trained best.pt file first.');
+                return;
+            }
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('object_class', 'scissors');
+            formData.append('model_name', document.getElementById('os-model-name').value);
+            formData.append('version', document.getElementById('os-model-version').value);
+            formData.append('source', document.getElementById('os-model-source').value);
+            formData.append('dataset_notes', document.getElementById('os-model-notes').value);
+            document.getElementById('object-security-upload-result').textContent = ' Validating...';
+            const response = await fetch(`${API_BASE}/object-security/models/upload`, { method: 'POST', body: formData });
+            if (!response.ok) {
+                const error = await response.json();
+                document.getElementById('object-security-upload-result').textContent = ` ${error.detail || 'Upload failed'}`;
+                return;
+            }
+            document.getElementById('object-security-upload-result').textContent = ' Uploaded as candidate. Not activated.';
+            document.getElementById('object-security-upload-form').reset();
+            loadObjectSecurity();
+        });
+
+        async function activateObjectSecurityCandidate(candidateId) {
+            if (!confirm('Activate this candidate as the production scissors model?')) return;
+            const response = await fetch(`${API_BASE}/object-security/models/candidates/${encodeURIComponent(candidateId)}/activate`, { method: 'POST' });
+            if (!response.ok) {
+                const error = await response.json();
+                alert(error.detail || 'Activation failed');
+                return;
+            }
+            loadObjectSecurity();
+        }
+
+        async function rollbackObjectSecurityModel() {
+            const response = await fetch(`${API_BASE}/object-security/models/rollback`, { method: 'POST' });
+            if (!response.ok) {
+                const error = await response.json();
+                alert(error.detail || 'Rollback failed');
+                return;
+            }
+            loadObjectSecurity();
+        }
+
+        async function deleteObjectSecurityCandidate(candidateId) {
+            if (!confirm('Delete this candidate model?')) return;
+            const response = await fetch(`${API_BASE}/object-security/models/candidates/${encodeURIComponent(candidateId)}`, { method: 'DELETE' });
+            if (!response.ok) {
+                const error = await response.json();
+                alert(error.detail || 'Delete failed');
+                return;
+            }
+            loadObjectSecurity();
+        }
+
+        function startObjectSecurityTest() {
+            const params = new URLSearchParams();
+            params.set('object_class', 'scissors');
+            params.set('confidence', document.getElementById('os-confidence').value || '0.30');
+            params.set('imgsz', document.getElementById('os-imgsz').value || '960');
+            params.set('roi_enabled', document.getElementById('os-roi').checked ? 'true' : 'false');
+            params.set('tiled', document.getElementById('os-tiling').checked ? 'true' : 'false');
+            params.set('temporal', document.getElementById('os-confirmation').checked ? 'true' : 'false');
+            params.set('beep', document.getElementById('os-beep').checked ? 'true' : 'false');
+            if (document.getElementById('os-model-mode').value === 'candidate') {
+                const candidateId = document.getElementById('os-candidate-id').value;
+                if (candidateId) params.set('candidate_id', candidateId);
+            }
+            if (document.getElementById('os-source-type').value === 'camera') {
+                const cameraId = document.getElementById('os-camera-id').value;
+                if (!cameraId) {
+                    alert('Select a configured camera first.');
+                    return;
+                }
+                params.set('camera_id', cameraId);
+            } else {
+                const source = document.getElementById('os-direct-source').value.trim();
+                if (!source) {
+                    alert('Enter a direct source such as 0, dshow:USB Camera, RTSP URL, or video file.');
+                    return;
+                }
+                params.set('source', source);
+            }
+            const image = document.getElementById('object-security-live');
+            image.src = `${API_BASE}/object-security/test-stream?${params.toString()}&t=${Date.now()}`;
+            document.getElementById('object-security-preview-container').style.display = 'block';
+        }
+
+        function stopObjectSecurityTest() {
+            const image = document.getElementById('object-security-live');
+            image.removeAttribute('src');
+            document.getElementById('object-security-preview-container').style.display = 'none';
+            loadObjectSecurity();
         }
 
         async function loadSecurityAlerts() {

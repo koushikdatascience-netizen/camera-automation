@@ -10,7 +10,63 @@ class FeatureConfig(BaseModel):
     face_recognition: bool = False
     attendance: bool = False
     unknown_detection: bool = False
+    unknown_person_detection: bool = False
     shoplifting: bool = True
+    shoplifting_detection: bool = True
+    object_security: bool = False
+
+    @property
+    def unknown_enabled(self) -> bool:
+        return self.unknown_detection or self.unknown_person_detection
+
+    @property
+    def shoplifting_enabled(self) -> bool:
+        return self.shoplifting or self.shoplifting_detection
+
+
+class ObjectSecurityInferenceConfig(BaseModel):
+    imgsz: int = 960
+    confidence: float = 0.30
+
+
+class ObjectSecurityRoiConfig(BaseModel):
+    enabled: bool = False
+    x1: int = 0
+    y1: int = 0
+    x2: int = 0
+    y2: int = 0
+
+
+class ObjectSecurityTilingConfig(BaseModel):
+    enabled: bool = False
+    tile_size: int = 640
+    overlap: float = 0.20
+
+
+class ObjectSecurityConfirmationConfig(BaseModel):
+    enabled: bool = True
+    window_frames: int = 5
+    required_hits: int = 3
+    minimum_confidence: float = 0.30
+
+
+class ObjectSecurityAlertConfig(BaseModel):
+    beep_enabled: bool = True
+    beep_frequency: int = 880
+    beep_duration_ms: int = 400
+    cooldown_seconds: float = 15.0
+    save_snapshot: bool = True
+
+
+class ObjectSecurityConfig(BaseModel):
+    enabled: bool = False
+    object_classes: list[str] = Field(default_factory=lambda: ["scissors"])
+    model_storage_dir: str = "data/models/object_security"
+    inference: ObjectSecurityInferenceConfig = Field(default_factory=ObjectSecurityInferenceConfig)
+    roi: ObjectSecurityRoiConfig = Field(default_factory=ObjectSecurityRoiConfig)
+    tiling: ObjectSecurityTilingConfig = Field(default_factory=ObjectSecurityTilingConfig)
+    confirmation: ObjectSecurityConfirmationConfig = Field(default_factory=ObjectSecurityConfirmationConfig)
+    alert: ObjectSecurityAlertConfig = Field(default_factory=ObjectSecurityAlertConfig)
 
 class AttendanceLine(BaseModel):
     x1: float; y1: float; x2: float; y2: float
@@ -75,6 +131,8 @@ class AppConfig(BaseModel):
     alerts: AlertConfig = Field(default_factory=AlertConfig)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     recognition: RecognitionConfig = Field(default_factory=RecognitionConfig)
+    features: FeatureConfig = Field(default_factory=FeatureConfig)
+    object_security: ObjectSecurityConfig = Field(default_factory=ObjectSecurityConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 
 def _is_frozen() -> bool:
@@ -104,6 +162,7 @@ def _resolve_loaded_config(config: AppConfig) -> AppConfig:
     runtime_base.mkdir(parents=True, exist_ok=True)
     config.database_path = _resolve_under_base(config.database_path, runtime_base)
     config.evidence_dir = _resolve_under_base(config.evidence_dir, runtime_base)
+    config.object_security.model_storage_dir = _resolve_under_base(config.object_security.model_storage_dir, runtime_base)
     Path(config.database_path).parent.mkdir(parents=True, exist_ok=True)
     Path(config.evidence_dir).mkdir(parents=True, exist_ok=True)
 

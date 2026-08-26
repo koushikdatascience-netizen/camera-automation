@@ -35,6 +35,8 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_unknown_active ON unknown_incidents(store_id,camera_id,track_id,status);
             CREATE TABLE IF NOT EXISTS security_alerts(id TEXT PRIMARY KEY, store_id TEXT NOT NULL, camera_id TEXT NOT NULL, alert_type TEXT NOT NULL, object_label TEXT NOT NULL, confidence REAL NOT NULL, event_time TEXT NOT NULL, snapshot_path TEXT, clip_path TEXT, status TEXT NOT NULL DEFAULT 'OPEN', acknowledged_at TEXT, metadata_json TEXT);
             CREATE INDEX IF NOT EXISTS idx_security_alerts_status ON security_alerts(status,event_time);
+            CREATE TABLE IF NOT EXISTS object_security_events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, object_class TEXT NOT NULL, confidence REAL NOT NULL, track_id TEXT, detected_at TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, alert_sent INTEGER NOT NULL DEFAULT 0, snapshot_path TEXT, model_version TEXT, metadata_json TEXT);
+            CREATE INDEX IF NOT EXISTS idx_object_security_events_time ON object_security_events(detected_at);
             ''')
             self._ensure_column(c,'face_profiles','image_path','TEXT')
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
@@ -156,6 +158,16 @@ class SQLiteStore:
     def acknowledge_security_alert(self,aid):
         with self._lock,self._conn() as c: c.execute("UPDATE security_alerts SET status='ACKNOWLEDGED',acknowledged_at=? WHERE id=?",(self.now(),aid))
         return self.security_alert(aid)
+    def create_object_security_event(self,camera_id,object_class,confidence,detected_at,track_id=None,confirmed=False,alert_sent=False,snapshot_path=None,model_version=None,metadata=None):
+        eid=str(uuid.uuid4())
+        with self._lock,self._conn() as c:
+            c.execute("INSERT INTO object_security_events(id,camera_id,object_class,confidence,track_id,detected_at,confirmed,alert_sent,snapshot_path,model_version,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(eid,camera_id,object_class,float(confidence),track_id,detected_at.isoformat(),1 if confirmed else 0,1 if alert_sent else 0,snapshot_path,model_version,json.dumps(metadata or {})))
+        return self.object_security_event(eid)
+    def object_security_events(self):
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM object_security_events ORDER BY detected_at DESC")]
+    def object_security_event(self,eid):
+        with self._conn() as c:
+            r=c.execute("SELECT * FROM object_security_events WHERE id=?",(eid,)).fetchone(); return dict(r) if r else None
     def queued_events(self,limit=50):
         with self._conn() as c:
             rows=c.execute("SELECT * FROM edge_event_queue WHERE status='PENDING' ORDER BY created_at LIMIT ?",(limit,)).fetchall()

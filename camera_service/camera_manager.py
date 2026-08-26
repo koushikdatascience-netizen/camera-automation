@@ -36,7 +36,18 @@ class CameraFeatures(BaseModel):
     attendance: bool = False
     face_recognition: bool = False
     unknown_detection: bool = False
+    unknown_person_detection: bool = False
     shoplifting: bool = False
+    shoplifting_detection: bool = False
+    object_security: bool = False
+
+    @property
+    def unknown_enabled(self) -> bool:
+        return self.unknown_detection or self.unknown_person_detection
+
+    @property
+    def shoplifting_enabled(self) -> bool:
+        return self.shoplifting or self.shoplifting_detection
 
 class CameraConfig(BaseModel):
     camera_id: str
@@ -755,7 +766,7 @@ class CameraManager:
                 if (
                     label.lower() == "scissors"
                     and camera_config is not None
-                    and camera_config.features.shoplifting
+                    and camera_config.features.shoplifting_enabled
                     and store is not None
                     and self._should_emit_alert(f"security_object:{camera_id}:scissors", 20)
                 ):
@@ -829,7 +840,7 @@ class CameraManager:
                         2,
                     )
 
-            if camera_config is not None and camera_config.features.shoplifting:
+            if camera_config is not None and camera_config.features.shoplifting_enabled:
                 carry_item_names = {"backpack", "handbag", "suitcase", "bottle", "cell phone", "book", "umbrella"}
                 carried = {
                     name: count
