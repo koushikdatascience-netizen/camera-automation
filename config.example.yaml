@@ -1,7 +1,7 @@
 store_id: client-shop-01
 database_path: data/camera_automation.db
 evidence_dir: data/evidence
-yolo_model: yolo11n.pt
+yolo_model: yolo11m.pt
 features:
   attendance: false
   face_recognition: false
@@ -17,7 +17,7 @@ object_security:
   model_storage_dir: data/models/object_security
   inference:
     imgsz: 960
-    confidence: 0.30
+    confidence: 0.55
   roi:
     enabled: false
   tiling:
@@ -27,8 +27,8 @@ object_security:
   confirmation:
     enabled: true
     window_frames: 5
-    required_hits: 3
-    minimum_confidence: 0.30
+    required_hits: 2
+    minimum_confidence: 0.45
   alert:
     beep_enabled: true
     beep_frequency: 880
@@ -42,12 +42,15 @@ edge:
   activation_required: false
   activation_token: ""
   plan: demo
+  license_cache_path: data/license_cache.json
+  license_public_key: ""
 cloud_sync:
   enabled: false
   base_url: https://your-platform.example.com
   api_token: CHANGE_ME
   timeout_seconds: 10
   batch_size: 50
+  interval_seconds: 15
 alerts:
   whatsapp_enabled: false
   whatsapp_recipients:

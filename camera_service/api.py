@@ -13,6 +13,7 @@ from camera_service.camera_manager import CameraManager, CameraConfig, CameraSta
 from camera_service.alert_dispatcher import AlertDispatcher
 from camera_service.cloud_client import CloudSyncClient
 from camera_service.licensing import LicenseManager
+from camera_service.sync_worker import EdgeSyncWorker
 from camera_service.object_security.detector import ObjectSecurityDetector
 from camera_service.object_security.model_registry import ObjectSecurityModelRegistry
 from camera_service.object_security.alerts import ObjectSecurityAlerter
@@ -40,6 +41,29 @@ object_security_alerter=ObjectSecurityAlerter()
 cloud_client=CloudSyncClient(config.cloud_sync)
 alert_dispatcher=AlertDispatcher(config.alerts)
 license_manager=LicenseManager(config.edge)
+sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,license_manager)
+
+def _seed_packaged_object_security_model():
+    if not getattr(sys, "frozen", False):
+        return
+    if object_security_registry.active_model_path("scissors"):
+        return
+    bundle_base=Path(getattr(sys,"_MEIPASS",Path(sys.executable).resolve().parent))
+    model_path=bundle_base/"kaggle-model"/"scissors_yolo11m_960.pt"
+    if not model_path.exists():
+        return
+    try:
+        candidate=object_security_registry.create_candidate("scissors",model_path,{
+            "model_name":"Scissors YOLO11m 960",
+            "version":"kaggle-yolo11m-960-2026-08-27",
+            "source":"Packaged model",
+            "dataset_notes":"Bundled jewellery security scissors detector.",
+        })
+        object_security_registry.activate_candidate("scissors",candidate["id"])
+    except Exception as exc:
+        object_security_detector.last_error=f"Packaged scissors model seed failed: {exc}"
+
+_seed_packaged_object_security_model()
 
 def _camera_needs_face(camera) -> bool:
     features=getattr(camera,'features',None)
@@ -62,10 +86,49 @@ supervisor=CameraSupervisor(config,store,face_service,attendance_engine)
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
-    supervisor.start(); yield; supervisor.shutdown()
+    supervisor.start(); sync_worker.start()
+    try:
+        yield
+    finally:
+        sync_worker.shutdown(); supervisor.shutdown()
 app=FastAPI(title='SnapKey Vision AI',lifespan=lifespan)
 
 def get_store(): return store
+
+def _camera_feature_names(features) -> set[str]:
+    data = features.model_dump() if hasattr(features, "model_dump") else dict(features or {})
+    enabled = {name for name, value in data.items() if value}
+    if "unknown_person_detection" in enabled:
+        enabled.add("unknown_detection")
+    if "shoplifting_detection" in enabled:
+        enabled.add("shoplifting")
+    return enabled
+
+def _merged_camera_features(camera=None, updates: dict | None = None) -> set[str]:
+    if updates and "features" in updates:
+        return _camera_feature_names(updates.get("features") or {})
+    if camera is not None:
+        return _camera_feature_names(camera.features)
+    return set()
+
+def _enforce_camera_license(features: set[str], creating: bool = False) -> None:
+    status = license_manager.status()
+    if status.limited_mode:
+        raise HTTPException(402, {"message": status.reason, "license": status.model_dump()})
+    current_cameras = len(camera_manager.list_cameras())
+    if creating and current_cameras >= status.max_cameras:
+        raise HTTPException(402, {"message": f"Camera limit reached for plan {status.plan}.", "license": status.model_dump()})
+    denied = sorted(feature for feature in features if not status.allows_feature(feature))
+    if denied:
+        raise HTTPException(402, {"message": "Feature is not enabled for this license.", "features": denied, "license": status.model_dump()})
+
+def _enforce_runtime_license(required_features: set[str] | None = None) -> None:
+    status = license_manager.status()
+    if status.limited_mode:
+        raise HTTPException(402, {"message": status.reason, "license": status.model_dump()})
+    denied = sorted(feature for feature in (required_features or set()) if not status.allows_feature(feature))
+    if denied:
+        raise HTTPException(402, {"message": "Feature is not enabled for this license.", "features": denied, "license": status.model_dump()})
 
 def _validate_object_class(object_class: str) -> str:
     object_class=(object_class or "scissors").strip().lower()
@@ -96,6 +159,17 @@ def _placeholder_mjpeg(message: str):
     ok, encoded=cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
     if ok:
         yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"+encoded.tobytes()+b"\r\n"
+
+def _valid_object_security_box(frame_shape, bbox, confidence: float, min_confidence: float) -> bool:
+    if float(confidence) < float(min_confidence):
+        return False
+    h,w=frame_shape[:2]
+    x1,y1,x2,y2=[float(v) for v in bbox]
+    box_w=max(0.0,x2-x1); box_h=max(0.0,y2-y1)
+    if box_w < 12 or box_h < 12:
+        return False
+    area_ratio=(box_w*box_h)/max(1.0,float(w*h))
+    return 0.00035 <= area_ratio <= 0.35
 
 def _detections_from_results(results, object_class: str, offset=(0,0), min_conf: float = 0.30) -> list[dict]:
     detections=[]
@@ -134,6 +208,7 @@ def _object_security_mjpeg(camera_id: str | None, source: str | None, model_path
     last_fps_at=time.monotonic()
     source_fps=0.0
     model_version=(metadata or {}).get('version') or (metadata or {}).get('id') or 'candidate'
+    security_stream_state={}
     def handle_frame(frame):
         nonlocal frame_count,last_fps_at,source_fps
         started=time.monotonic()
@@ -164,12 +239,15 @@ def _object_security_mjpeg(camera_id: str | None, source: str | None, model_path
         alert_state='WAITING'
         for idx,det in enumerate(detections, start=1):
             x1,y1,x2,y2=[int(v) for v in det['bbox']]
+            if not _valid_object_security_box(frame.shape,(x1,y1,x2,y2),det['confidence'],conf):
+                continue
             track_id=det.get('track_id') or str(idx)
             active_tracks.add(track_id)
             state=confirmation.update(track_id,det['confidence']) if temporal else 'CONFIRMED'
             if state=='CONFIRMED':
                 alert_state='CONFIRMED'
                 key=f'{camera_id or source_text}:{object_class}:{track_id}'
+                object_security_alerter.alarm_beep(f"object-security:{key}",beep,1400,160,3.0)
                 if object_security_alerter.should_alert(key,config.object_security.alert.cooldown_seconds):
                     snapshot_path=None
                     if config.object_security.alert.save_snapshot:
@@ -177,10 +255,23 @@ def _object_security_mjpeg(camera_id: str | None, source: str | None, model_path
                         evidence_dir.mkdir(parents=True,exist_ok=True)
                         snapshot_path=str(evidence_dir/f'object_security_{int(time.time()*1000)}.jpg')
                         cv2.imwrite(snapshot_path,frame)
-                    beep_sent=object_security_alerter.beep(beep,config.object_security.alert.beep_frequency,config.object_security.alert.beep_duration_ms)
-                    store.create_object_security_event(camera_id or 'test_source',object_class,det['confidence'],datetime.now(timezone.utc),track_id=track_id,confirmed=True,alert_sent=beep_sent,snapshot_path=snapshot_path,model_version=model_version,metadata={'bbox':[x1,y1,x2,y2]})
+                    beep_sent=bool(beep)
+                    event_time=datetime.now(timezone.utc)
+                    store.create_object_security_event(camera_id or 'test_source',object_class,det['confidence'],event_time,track_id=track_id,confirmed=True,alert_sent=beep_sent,snapshot_path=snapshot_path,model_version=model_version,metadata={'bbox':[x1,y1,x2,y2]})
+                    alert=store.create_security_alert(
+                        config.store_id,
+                        camera_id or 'test_source',
+                        'SECURITY_OBJECT_ALERT',
+                        object_class,
+                        det['confidence'],
+                        event_time,
+                        snapshot_path=snapshot_path,
+                        metadata={'bbox':[x1,y1,x2,y2],'source':'object_security_stream','model_version':model_version,'track_id':track_id},
+                    )
+                    camera_manager._begin_security_clip(security_stream_state,alert['id'],camera_id or 'object_security')
             elif state=='VERIFYING':
                 alert_state='VERIFYING'
+                continue
             color=(0,0,255) if state=='CONFIRMED' else (0,180,255)
             label=f"{object_class} ID {track_id} {det['confidence']:.2f} {state}"
             cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
@@ -190,6 +281,7 @@ def _object_security_mjpeg(camera_id: str | None, source: str | None, model_path
         top=f"{object_class.upper()} | model {model_version} | src {source_fps:.1f}fps | latency {latency_ms:.0f}ms | {alert_state}"
         cv2.putText(frame,top,(18,32),cv2.FONT_HERSHEY_SIMPLEX,.64,(255,255,255),3)
         cv2.putText(frame,top,(18,32),cv2.FONT_HERSHEY_SIMPLEX,.64,(0,0,0),1)
+        camera_manager._record_security_clip_frame(security_stream_state,frame,store)
         return frame
     if camera_manager._is_dshow_source(source_text):
         for snapshot in camera_manager._iter_dshow_mjpeg_frames(source_text,fps=8):
@@ -210,6 +302,7 @@ def _object_security_mjpeg(camera_id: str | None, source: str | None, model_path
             elapsed=time.monotonic()-loop_start
             if elapsed<target_delay: time.sleep(target_delay-elapsed)
     finally:
+        camera_manager._finalize_security_clip(security_stream_state,store)
         cap.release()
 
 def _face_image_url(person_id: str, face_id: str) -> str:
@@ -263,6 +356,7 @@ def edge_status():
         'license': license_status.model_dump(),
         'cloud_sync_enabled': cloud_client.enabled(),
         'cloud_sync_allowed': cloud_client.enabled() and license_status.active,
+        'cloud_sync_worker': sync_worker.status(),
         'queue': store.event_queue_status(),
         'alert_recipients': alert_dispatcher.preview_recipients(),
         'evidence': config.evidence.model_dump(),
@@ -270,24 +364,8 @@ def edge_status():
 
 @app.post('/api/v1/edge/sync')
 def sync_edge_events():
-    license_status = license_manager.status()
-    if not cloud_client.enabled():
-        return {'synced': 0, 'failed': 0, 'enabled': False, 'message': 'Cloud sync is disabled'}
-    if not license_status.active:
-        return {'synced': 0, 'failed': 0, 'enabled': True, 'blocked': True, 'license': license_status.model_dump()}
-
-    synced = 0
-    failed = 0
-    for row in store.queued_events(config.cloud_sync.batch_size):
-        event = json.loads(row['payload_json'])
-        try:
-            cloud_client.post_event(config.edge, event)
-            store.mark_event_synced(row['id'])
-            synced += 1
-        except Exception as exc:
-            store.mark_event_failed(row['id'], str(exc))
-            failed += 1
-    return {'synced': synced, 'failed': failed, 'enabled': True}
+    _enforce_runtime_license({"cloud_sync"})
+    return sync_worker.run_once().model_dump()
 
 @app.get('/api/v1/license/status')
 def license_status():
@@ -296,6 +374,18 @@ def license_status():
 @app.get('/api/v1/license/machine-code')
 def license_machine_code():
     return {'machine_code': license_manager.machine_code()}
+
+class LicenseInstallRequest(BaseModel):
+    license: dict
+    signature: str
+
+@app.post('/api/v1/license/install')
+def install_license(request: LicenseInstallRequest):
+    try:
+        status = license_manager.install_signed_license(request.license, request.signature)
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+    return status.model_dump()
 
 @app.get('/api/v1/alerts/preview')
 def alert_preview():
@@ -362,6 +452,7 @@ class CameraCreate(BaseModel):
 
 @app.post('/api/v1/cameras')
 def create_camera(camera_data: CameraCreate):
+    _enforce_camera_license(_camera_feature_names(camera_data.features), creating=True)
     try:
         config = camera_manager.create_camera(camera_data.model_dump())
         return {
@@ -402,6 +493,10 @@ def get_camera(camera_id: str, include_secret: bool = False):
 
 @app.patch('/api/v1/cameras/{camera_id}')
 def update_camera(camera_id: str, updates: dict):
+    existing = camera_manager.get_camera(camera_id)
+    if not existing:
+        raise HTTPException(404, 'Camera not found')
+    _enforce_camera_license(_merged_camera_features(existing, updates), creating=False)
     camera = camera_manager.update_camera(camera_id, updates)
     if not camera:
         raise HTTPException(404, 'Camera not found')
@@ -447,6 +542,7 @@ def start_camera(camera_id: str):
     camera = camera_manager.get_camera(camera_id)
     if not camera:
         raise HTTPException(404, 'Camera not found')
+    _enforce_runtime_license(_camera_feature_names(camera.features))
     result = camera_manager.test_rtsp_connection(camera.rtsp_url)
     state = CameraState.ONLINE if result.get('success') else CameraState.DEGRADED
     camera_manager.update_camera_status(camera_id, CameraStatus(
@@ -503,9 +599,15 @@ def stream_camera_tracking(camera_id: str):
     camera = camera_manager.get_camera(camera_id)
     if not camera:
         raise HTTPException(404, 'Camera not found')
+    _enforce_runtime_license({"tracking"} | _camera_feature_names(camera.features))
     active_face_service = get_face_service() if _camera_needs_face(camera) else None
+    security_model_path = None
+    if camera.features.object_security or camera.features.shoplifting_enabled:
+        active_security_model = object_security_registry.active_model_path("scissors")
+        security_model_path = str(active_security_model) if active_security_model else None
+    security_confidence=max(0.55,float(config.object_security.inference.confidence or 0.55))
     return StreamingResponse(
-        camera_manager.iter_tracking_mjpeg(camera, config.yolo_model, active_face_service, config.recognition, attendance_engine, store),
+        camera_manager.iter_tracking_mjpeg(camera, config.yolo_model, active_face_service, config.recognition, attendance_engine, store, security_model_path, security_confidence),
         media_type='multipart/x-mixed-replace; boundary=frame',
     )
 
@@ -708,7 +810,7 @@ def object_security_test_stream(
     source:str|None=None,
     object_class:str='scissors',
     candidate_id:str|None=None,
-    confidence:float=0.30,
+    confidence:float=0.55,
     imgsz:int=960,
     roi_enabled:bool=False,
     tiled:bool=False,

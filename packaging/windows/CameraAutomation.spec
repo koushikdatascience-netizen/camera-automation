@@ -1,4 +1,4 @@
-# SnapKey Vision AI PyInstaller spec.
+﻿# SnapKey Vision AI PyInstaller spec.
 # Keep this build in ONEDIR mode because AI/CV dependencies are large.
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -12,7 +12,8 @@ datas = [
     ("../../camera_service/web/static", "camera_service/web/static"),
     ("../../assets/brand", "assets/brand"),
     ("../../config.example.yaml", "."),
-    ("../../yolo11n.pt", "."),
+    ("../../yolo11m.pt", "."),
+    ("../../kaggle-model/scissors_yolo11m_960.pt", "kaggle-model"),
 ]
 binaries = []
 hiddenimports = [

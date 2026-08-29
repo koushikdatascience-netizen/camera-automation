@@ -12,16 +12,25 @@ class CloudSyncClient:
     def enabled(self) -> bool:
         return bool(self.config.enabled and self.config.base_url and self.config.api_token)
 
+    def event_envelope(self, edge_config, event: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": "edge.event.v1",
+            "edge_id": edge_config.edge_id,
+            "tenant_id": edge_config.tenant_id,
+            "site_id": edge_config.site_id,
+            "event_id": event.get("event_id"),
+            "event_type": event.get("event_type"),
+            "event_time": event.get("event_time"),
+            "store_id": event.get("store_id"),
+            "camera_id": event.get("camera_id"),
+            "payload": event,
+        }
+
     def post_event(self, edge_config, event: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled():
             raise RuntimeError("cloud sync is disabled")
 
-        payload = {
-            "edge_id": edge_config.edge_id,
-            "tenant_id": edge_config.tenant_id,
-            "site_id": edge_config.site_id,
-            "event": event,
-        }
+        payload = self.event_envelope(edge_config, event)
         response = requests.post(
             self.config.base_url.rstrip("/") + "/edge/v1/events",
             json=payload,

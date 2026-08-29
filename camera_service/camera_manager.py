@@ -13,6 +13,7 @@ import subprocess
 from pydantic import BaseModel, Field
 from enum import Enum
 from camera_service.models import IdentitySeen
+from camera_service.object_security.alerts import ObjectSecurityAlerter
 
 class CameraRole(str, Enum):
     ENTRANCE_EXIT = "ENTRANCE_EXIT"
@@ -90,6 +91,7 @@ class CameraManager:
         self._track_identity_cache = {}
         self._full_frame_face_cache = {}
         self._tracking_stream_state = {}
+        self._security_alerter = ObjectSecurityAlerter()
         self._init_db()
 
     @contextmanager
@@ -559,7 +561,19 @@ class CameraManager:
         configured = float(getattr(recognition_config, "known_recheck_seconds", 2.0) or 2.0)
         return max(0.75, min(configured, 3.0))
 
-    def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None):
+    def _is_valid_security_detection(self, frame_shape, bbox, confidence: float, min_confidence: float) -> bool:
+        if float(confidence) < float(min_confidence):
+            return False
+        h, w = frame_shape[:2]
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        box_w = max(0.0, x2 - x1)
+        box_h = max(0.0, y2 - y1)
+        if box_w < 12 or box_h < 12:
+            return False
+        area_ratio = (box_w * box_h) / max(1.0, float(w * h))
+        return 0.00035 <= area_ratio <= 0.35
+
+    def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None, object_security_model_path: str | None = None, object_security_confidence: float = 0.55):
         try:
             overlays = []
             model = self._tracking_models.get(model_path)
@@ -768,23 +782,107 @@ class CameraManager:
                     and camera_config is not None
                     and camera_config.features.shoplifting_enabled
                     and store is not None
-                    and self._should_emit_alert(f"security_object:{camera_id}:scissors", 20)
                 ):
-                    snapshot_path = self._save_event_snapshot(frame, camera_id, "scissors_alert")
-                    alert = store.create_security_alert(
-                        getattr(attendance_engine, "store_id", "store-1"),
-                        camera_id,
-                        "SECURITY_OBJECT_ALERT",
-                        "scissors",
-                        float(conf),
-                        datetime.now(timezone.utc),
-                        snapshot_path=snapshot_path,
-                        metadata={"bbox": [float(x1), float(y1), float(x2), float(y2)], "source": "tracking_stream"},
-                    )
-                    self._begin_security_clip(stream_state, alert["id"], camera_id)
+                    self._security_alerter.alarm_beep(f"tracking:{camera_id}:scissors", True, 1400, 160, 3.0)
+                    if self._should_emit_alert(f"security_object:{camera_id}:scissors", 20):
+                        snapshot_path = self._save_event_snapshot(frame, camera_id, "scissors_alert")
+                        alert = store.create_security_alert(
+                            getattr(attendance_engine, "store_id", "store-1"),
+                            camera_id,
+                            "SECURITY_OBJECT_ALERT",
+                            "scissors",
+                            float(conf),
+                            datetime.now(timezone.utc),
+                            snapshot_path=snapshot_path,
+                            metadata={"bbox": [float(x1), float(y1), float(x2), float(y2)], "source": "tracking_stream"},
+                        )
+                        self._begin_security_clip(stream_state, alert["id"], camera_id)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 220), y1), color, -1)
                 cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+
+            if (
+                object_security_model_path
+                and camera_config is not None
+                and (camera_config.features.object_security or camera_config.features.shoplifting_enabled)
+                and Path(object_security_model_path).exists()
+            ):
+                try:
+                    valid_security_detections = []
+                    security_key = f"object-security:{object_security_model_path}"
+                    security_model = self._tracking_models.get(security_key)
+                    if security_model is None:
+                        from ultralytics import YOLO
+
+                        security_model = YOLO(object_security_model_path)
+                        self._tracking_models[security_key] = security_model
+                    security_imgsz = max(416, min(int(getattr(camera_config, "tracking_imgsz", 512) or 512), 640))
+                    security_results = security_model.predict(
+                        frame,
+                        conf=float(object_security_confidence),
+                        imgsz=security_imgsz,
+                        max_det=10,
+                        verbose=False,
+                    )
+                    if security_results:
+                        result = security_results[0]
+                        security_names = getattr(result, "names", {}) or {}
+                        security_boxes = result.boxes
+                        if security_boxes is not None:
+                            s_xyxy = security_boxes.xyxy.cpu().numpy() if security_boxes.xyxy is not None else []
+                            s_confs = security_boxes.conf.cpu().tolist() if security_boxes.conf is not None else []
+                            s_classes = security_boxes.cls.int().cpu().tolist() if security_boxes.cls is not None else []
+                            for sec_idx, (coords, sec_conf, sec_class_id) in enumerate(zip(s_xyxy, s_confs, s_classes), start=1):
+                                sec_label = str(security_names.get(sec_class_id, f"class_{sec_class_id}")).lower()
+                                if sec_label != "scissors":
+                                    continue
+                                x1, y1, x2, y2 = [int(v) for v in coords]
+                                if not self._is_valid_security_detection(frame.shape, (x1, y1, x2, y2), float(sec_conf), object_security_confidence):
+                                    continue
+                                valid_security_detections.append((x1, y1, x2, y2, float(sec_conf), sec_idx))
+
+                    security_hits = int(stream_state.get("security_hits", 0)) if stream_state is not None else 0
+                    if valid_security_detections:
+                        security_hits = min(security_hits + 1, 10)
+                    else:
+                        security_hits = 0
+                    if stream_state is not None:
+                        stream_state["security_hits"] = security_hits
+
+                    if security_hits >= 2:
+                        for x1, y1, x2, y2, sec_conf, sec_idx in valid_security_detections:
+                                text = f"scissors SEC-{sec_idx} {float(sec_conf):.2f}"
+                                color = (0, 0, 255)
+                                summary["objects"] += 1
+                                summary["class_counts"]["scissors"] = summary["class_counts"].get("scissors", 0) + 1
+                                overlays.append({
+                                    "bbox": (x1, y1, x2, y2),
+                                    "text": text,
+                                    "color": color,
+                                })
+                                if (
+                                    store is not None
+                                    and camera_id is not None
+                                ):
+                                    self._security_alerter.alarm_beep(f"tracking:{camera_id}:scissors", True, 1400, 160, 3.0)
+                                    if self._should_emit_alert(f"security_object:{camera_id}:scissors", 20):
+                                        snapshot_path = self._save_event_snapshot(frame, camera_id, "scissors_alert")
+                                        alert = store.create_security_alert(
+                                            getattr(attendance_engine, "store_id", "store-1"),
+                                            camera_id,
+                                            "SECURITY_OBJECT_ALERT",
+                                            "scissors",
+                                            float(sec_conf),
+                                            datetime.now(timezone.utc),
+                                            snapshot_path=snapshot_path,
+                                            metadata={"bbox": [float(x1), float(y1), float(x2), float(y2)], "source": "object_security_tracking"},
+                                        )
+                                        self._begin_security_clip(stream_state, alert["id"], camera_id)
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                                cv2.rectangle(frame, (x1, max(0, y1 - 24)), (min(frame.shape[1], x1 + 240), y1), color, -1)
+                                cv2.putText(frame, text, (x1 + 4, max(16, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+                except Exception as exc:
+                    summary["error"] = f"Object security: {str(exc)[:80]}"
 
             if camera_id is not None and attendance_engine is not None:
                 previous = self._stream_active_tracks.get(camera_id, set())
@@ -946,9 +1044,9 @@ class CameraManager:
         for idx, line in enumerate(lines[:5]):
             cv2.putText(frame, line[:58], (x0 + 12, y0 + 50 + idx * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2)
 
-    def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None) -> Optional[bytes]:
+    def _encode_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None, object_security_model_path: str | None = None, object_security_confidence: float = 0.55) -> Optional[bytes]:
         if self._should_run_tracking_ai(stream_state, camera_config):
-            annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state)
+            annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state, object_security_model_path, object_security_confidence)
         else:
             annotated = self._draw_tracking_demo_overlay(frame, camera_config, stream_state or {}, attendance_engine, store)
         quality = max(35, min(int(getattr(camera_config, "tracking_quality", 65) or 65), 95))
@@ -1259,7 +1357,7 @@ class CameraManager:
         finally:
             cap.release()
 
-    def iter_tracking_mjpeg(self, camera_config: CameraConfig, model_path: str, face_service=None, recognition_config=None, attendance_engine=None, store=None):
+    def iter_tracking_mjpeg(self, camera_config: CameraConfig, model_path: str, face_service=None, recognition_config=None, attendance_engine=None, store=None, object_security_model_path: str | None = None, object_security_confidence: float = 0.55):
         """Yield MJPEG frames from a latest-frame pipeline.
 
         Capture, AI, and browser streaming run independently so slow CPU
@@ -1367,6 +1465,8 @@ class CameraManager:
                         attendance_engine,
                         store,
                         stream_state,
+                        object_security_model_path,
+                        object_security_confidence,
                     )
                     with result_lock:
                         result_state["annotated_frame"] = ai_frame.copy()
@@ -1461,5 +1561,8 @@ class CameraManager:
         finally:
             stop_event.set()
             self._finalize_security_clip(stream_state, store)
-            capture_thread.join(timeout=1.0)
-            ai_thread.join(timeout=1.0)
+            current_thread = threading.current_thread()
+            if capture_thread is not current_thread:
+                capture_thread.join(timeout=1.0)
+            if ai_thread is not current_thread:
+                ai_thread.join(timeout=1.0)

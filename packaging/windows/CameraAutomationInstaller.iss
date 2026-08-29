@@ -33,7 +33,7 @@ Name: "{commonappdata}\SnapKeyVisionAI\data"; Permissions: users-modify
 Name: "{commonappdata}\SnapKeyVisionAI\data\evidence"; Permissions: users-modify
 
 [Files]
-Source: "..\..\dist\SnapKeyVisionAI\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\dist\SnapKeyVisionAI\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "_internal\torch-*.dist-info\licenses\*,_internal\*.dist-info\licenses\third_party\*,_internal\**\__pycache__\*,_internal\**\*.pyc"
 
 [Icons]
 Name: "{group}\SnapKey Vision AI"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"

@@ -126,9 +126,37 @@ POST /api/v1/edge/sync
 GET  /api/v1/alerts/preview
 GET  /api/v1/license/status
 GET  /api/v1/license/machine-code
+POST /api/v1/license/install
 ```
 
 Cloud sync is disabled by default so client demos keep working offline.
+
+Local portal MVP for development:
+
+```powershell
+.\.venv311\Scripts\uvicorn.exe cloud_portal.api:app --host 0.0.0.0 --port 9000
+```
+
+Then configure the edge:
+
+```yaml
+cloud_sync:
+  enabled: true
+  base_url: http://127.0.0.1:9000
+  api_token: CHANGE_ME
+```
+
+Set `SNAPKEY_EDGE_API_TOKEN` on the portal when you want the receiver to require the same bearer token.
+
+Development license issuing:
+
+```powershell
+.\.venv311\Scripts\python.exe tools\generate_license_keys.py
+$env:SNAPKEY_LICENSE_PRIVATE_KEY="PRIVATE_KEY_FROM_GENERATOR"
+.\.venv311\Scripts\uvicorn.exe cloud_portal.api:app --host 0.0.0.0 --port 9000
+```
+
+Production rule: keep the private key only on your server. Client machines should receive only the public key and the signed license document.
 
 ## Common Fixes
 

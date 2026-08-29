@@ -26,7 +26,7 @@ class FeatureConfig(BaseModel):
 
 class ObjectSecurityInferenceConfig(BaseModel):
     imgsz: int = 960
-    confidence: float = 0.30
+    confidence: float = 0.55
 
 
 class ObjectSecurityRoiConfig(BaseModel):
@@ -46,8 +46,8 @@ class ObjectSecurityTilingConfig(BaseModel):
 class ObjectSecurityConfirmationConfig(BaseModel):
     enabled: bool = True
     window_frames: int = 5
-    required_hits: int = 3
-    minimum_confidence: float = 0.30
+    required_hits: int = 2
+    minimum_confidence: float = 0.45
 
 
 class ObjectSecurityAlertConfig(BaseModel):
@@ -89,6 +89,8 @@ class EdgeConfig(BaseModel):
     activation_required: bool = False
     activation_token: str = ""
     plan: str = "demo"
+    license_cache_path: str = "data/license_cache.json"
+    license_public_key: str = ""
 
 class CloudSyncConfig(BaseModel):
     enabled: bool = False
@@ -96,6 +98,7 @@ class CloudSyncConfig(BaseModel):
     api_token: str = ""
     timeout_seconds: float = 10.0
     batch_size: int = 50
+    interval_seconds: float = 15.0
 
 class AlertConfig(BaseModel):
     whatsapp_enabled: bool = False
@@ -125,7 +128,7 @@ class AppConfig(BaseModel):
     store_id: str = "store-1"
     database_path: str = "data/camera_automation.db"
     evidence_dir: str = "data/evidence"
-    yolo_model: str = "yolo11n.pt"
+    yolo_model: str = "yolo11m.pt"
     edge: EdgeConfig = Field(default_factory=EdgeConfig)
     cloud_sync: CloudSyncConfig = Field(default_factory=CloudSyncConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
@@ -148,7 +151,7 @@ def _runtime_base() -> Path:
 
 def _bundle_base() -> Path:
     if _is_frozen():
-        return Path(sys.executable).resolve().parent
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
     return Path(".")
 
 def _resolve_under_base(value: str, base: Path) -> str:
@@ -163,14 +166,22 @@ def _resolve_loaded_config(config: AppConfig) -> AppConfig:
     config.database_path = _resolve_under_base(config.database_path, runtime_base)
     config.evidence_dir = _resolve_under_base(config.evidence_dir, runtime_base)
     config.object_security.model_storage_dir = _resolve_under_base(config.object_security.model_storage_dir, runtime_base)
+    config.edge.license_cache_path = _resolve_under_base(config.edge.license_cache_path, runtime_base)
     Path(config.database_path).parent.mkdir(parents=True, exist_ok=True)
     Path(config.evidence_dir).mkdir(parents=True, exist_ok=True)
 
     model_path = Path(config.yolo_model)
     if not model_path.is_absolute():
+        if _is_frozen() and model_path.name.lower() == "yolo11n.pt":
+            model_path = Path("yolo11m.pt")
+            config.yolo_model = str(model_path)
         bundled_model = _bundle_base() / model_path
         if bundled_model.exists():
             config.yolo_model = str(bundled_model)
+        elif _is_frozen():
+            bundled_fallback = _bundle_base() / "yolo11m.pt"
+            if bundled_fallback.exists():
+                config.yolo_model = str(bundled_fallback)
     return config
 
 def load_config(path: str = "config.yaml") -> AppConfig:
@@ -180,7 +191,10 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     elif _is_frozen():
         runtime_config = _runtime_base() / "config.yaml"
         bundled_config = _bundle_base() / path
+        bundled_example = _bundle_base() / "config.example.yaml"
         p = runtime_config if runtime_config.exists() else bundled_config
+        if not p.exists() and bundled_example.exists():
+            p = bundled_example
     else:
         p=Path(path)
     if not p.exists():

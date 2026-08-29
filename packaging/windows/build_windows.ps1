@@ -80,6 +80,20 @@ try {
         Write-Host "EXE size: $($ExeSize.ToString('F2')) MB"
 
         $AppDistDir = Split-Path $ExpectedExePath -Parent
+        $InternalDir = Join-Path $AppDistDir "_internal"
+        $RequiredFiles = @(
+            (Join-Path $InternalDir "yolo11m.pt"),
+            (Join-Path $InternalDir "kaggle-model\scissors_yolo11m_960.pt"),
+            (Join-Path $InternalDir "config.example.yaml")
+        )
+
+        foreach ($RequiredFile in $RequiredFiles) {
+            if (-not (Test-Path $RequiredFile)) {
+                Write-Error "Build verification failed. Required packaged file missing: $RequiredFile"
+                exit 1
+            }
+        }
+        Write-Host "Verified bundled yolo11m.pt, scissors model, and default config."
 
         # Create start/stop scripts inside the installable app folder
         $StartScriptContent = @"

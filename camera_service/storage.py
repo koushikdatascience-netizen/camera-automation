@@ -48,6 +48,9 @@ class SQLiteStore:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
     @staticmethod
     def now(): return datetime.now(timezone.utc).isoformat()
+    def _enqueue_edge_event(self,conn,event_id,event_type,payload):
+        payload={**payload,'schema_version':'local.event.v1'}
+        conn.execute("INSERT OR REPLACE INTO edge_event_queue(id,event_type,payload_json,status,attempts,last_error,created_at,synced_at) VALUES(?,?,?,'PENDING',0,NULL,?,NULL)",(event_id,event_type,json.dumps(payload),self.now()))
     def create_person(self, d):
         pid=str(uuid.uuid4()); now=self.now()
         with self._lock,self._conn() as c: c.execute("INSERT INTO personnel VALUES(?,?,?,?,?,?,?,?,?)",(pid,d.employee_code,d.full_name,d.role.value,d.phone,d.email,1,now,now))
@@ -90,17 +93,24 @@ class SQLiteStore:
             existing=self.open_session(person_id,store_id)
             if existing:
                 if confirmed and not existing.get('entry_confirmed'):
-                    with self._conn() as c: c.execute("UPDATE attendance_sessions SET arrival_time=?,arrival_camera=?,arrival_confidence=?,arrival_snapshot=?,entry_confirmed=1 WHERE id=?",(ts.isoformat(),camera,confidence,snapshot_path,existing['id']))
+                    with self._conn() as c:
+                        c.execute("UPDATE attendance_sessions SET arrival_time=?,arrival_camera=?,arrival_confidence=?,arrival_snapshot=?,entry_confirmed=1 WHERE id=?",(ts.isoformat(),camera,confidence,snapshot_path,existing['id']))
+                        self._enqueue_edge_event(c,existing['id'],'ATTENDANCE_ENTRY',{'event_id':existing['id'],'person_id':person_id,'store_id':store_id,'camera_id':camera,'event_type':'ATTENDANCE_ENTRY','event_time':ts.isoformat(),'metadata':{'attendance_session_id':existing['id'],'confidence':confidence,'snapshot_path':snapshot_path}})
                     return self.open_session(person_id,store_id),False
                 return existing,False
             sid=str(uuid.uuid4())
-            with self._conn() as c: c.execute("INSERT INTO attendance_sessions(id,person_id,store_id,arrival_time,arrival_camera,arrival_confidence,arrival_snapshot,status,entry_confirmed) VALUES(?,?,?,?,?,?,?, 'OPEN',?)",(sid,person_id,store_id,ts.isoformat(),camera,confidence,snapshot_path,1 if confirmed else 0))
+            with self._conn() as c:
+                c.execute("INSERT INTO attendance_sessions(id,person_id,store_id,arrival_time,arrival_camera,arrival_confidence,arrival_snapshot,status,entry_confirmed) VALUES(?,?,?,?,?,?,?, 'OPEN',?)",(sid,person_id,store_id,ts.isoformat(),camera,confidence,snapshot_path,1 if confirmed else 0))
+                if confirmed:
+                    self._enqueue_edge_event(c,sid,'ATTENDANCE_ENTRY',{'event_id':sid,'person_id':person_id,'store_id':store_id,'camera_id':camera,'event_type':'ATTENDANCE_ENTRY','event_time':ts.isoformat(),'metadata':{'attendance_session_id':sid,'confidence':confidence,'snapshot_path':snapshot_path}})
             return self.open_session(person_id,store_id),True
     def close_exit(self,person_id,store_id,ts,camera,confidence,snapshot_path=None):
         with self._lock:
             s=self.open_session(person_id,store_id)
             if not s: return None,False
-            with self._conn() as c: c.execute("UPDATE attendance_sessions SET exit_time=?,exit_camera=?,exit_confidence=?,exit_snapshot=?,status='CLOSED' WHERE id=?",(ts.isoformat(),camera,confidence,snapshot_path,s['id']))
+            with self._conn() as c:
+                c.execute("UPDATE attendance_sessions SET exit_time=?,exit_camera=?,exit_confidence=?,exit_snapshot=?,status='CLOSED' WHERE id=?",(ts.isoformat(),camera,confidence,snapshot_path,s['id']))
+                self._enqueue_edge_event(c,f"{s['id']}:exit",'ATTENDANCE_EXIT',{'event_id':f"{s['id']}:exit",'person_id':person_id,'store_id':store_id,'camera_id':camera,'event_type':'ATTENDANCE_EXIT','event_time':ts.isoformat(),'metadata':{'attendance_session_id':s['id'],'confidence':confidence,'snapshot_path':snapshot_path}})
             return self.get_attendance_id(s['id']),True
     def get_attendance_id(self,sid):
         with self._conn() as c: r=c.execute("SELECT * FROM attendance_sessions WHERE id=?",(sid,)).fetchone(); return dict(r) if r else None
@@ -114,7 +124,7 @@ class SQLiteStore:
         payload={'event_id':eid,'person_id':person_id,'store_id':store_id,'camera_id':camera_id,'event_type':event_type,'event_time':ts.isoformat(),'metadata':metadata or {}}
         with self._lock,self._conn() as c:
             c.execute("INSERT INTO person_events VALUES(?,?,?,?,?,?,?)",(eid,person_id,store_id,camera_id,event_type,ts.isoformat(),json.dumps(metadata or {})))
-            c.execute("INSERT INTO edge_event_queue(id,event_type,payload_json,created_at) VALUES(?,?,?,?)",(eid,event_type,json.dumps(payload),self.now()))
+            self._enqueue_edge_event(c,eid,event_type,payload)
         return eid
     def person_events(self,person_id=None):
         q='''SELECT e.*,p.employee_code,p.full_name,p.role FROM person_events e LEFT JOIN personnel p ON p.id=e.person_id'''
@@ -132,7 +142,7 @@ class SQLiteStore:
                     return row['id'],False
                 iid=str(uuid.uuid4()); c.execute("INSERT INTO unknown_incidents(id,store_id,camera_id,track_id,first_seen,confirmed_unknown_at,last_seen,recognition_attempts,best_similarity,best_face_snapshot,best_person_snapshot,clip_path,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')",(iid,store_id,camera_id,track_id,first_seen.isoformat(),confirmed.isoformat(),last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path))
                 payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path}}
-                c.execute("INSERT INTO edge_event_queue(id,event_type,payload_json,created_at) VALUES(?,?,?,?)",(iid,'UNKNOWN_INCIDENT',json.dumps(payload),self.now()))
+                self._enqueue_edge_event(c,iid,'UNKNOWN_INCIDENT',payload)
                 return iid,True
     def unknowns(self):
         with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM unknown_incidents ORDER BY confirmed_unknown_at DESC")]
@@ -143,10 +153,10 @@ class SQLiteStore:
         return self.unknown(iid)
     def create_security_alert(self,store_id,camera_id,alert_type,object_label,confidence,event_time,snapshot_path=None,clip_path=None,metadata=None):
         aid=str(uuid.uuid4())
-        payload={'event_id':aid,'store_id':store_id,'camera_id':camera_id,'event_type':alert_type,'event_time':event_time.isoformat(),'metadata':metadata or {}}
+        payload={'event_id':aid,'store_id':store_id,'camera_id':camera_id,'event_type':alert_type,'event_time':event_time.isoformat(),'metadata':{**(metadata or {}),'object_label':object_label,'confidence':confidence,'snapshot_path':snapshot_path,'clip_path':clip_path}}
         with self._lock,self._conn() as c:
             c.execute("INSERT INTO security_alerts(id,store_id,camera_id,alert_type,object_label,confidence,event_time,snapshot_path,clip_path,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)",(aid,store_id,camera_id,alert_type,object_label,confidence,event_time.isoformat(),snapshot_path,clip_path,json.dumps(metadata or {})))
-            c.execute("INSERT INTO edge_event_queue(id,event_type,payload_json,created_at) VALUES(?,?,?,?)",(aid,alert_type,json.dumps(payload),self.now()))
+            self._enqueue_edge_event(c,aid,alert_type,payload)
         return self.security_alert(aid)
     def security_alerts(self):
         with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM security_alerts ORDER BY event_time DESC")]
