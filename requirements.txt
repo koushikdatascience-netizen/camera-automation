@@ -11,6 +11,7 @@ pytest>=8.0
 cryptography>=43.0
 # Production CV (install on deployment machine):
 ultralytics>=8.3
+lap>=0.5.12
 insightface>=0.7.3
 onnxruntime>=1.18
 eval-type-backport>=0.4.0
