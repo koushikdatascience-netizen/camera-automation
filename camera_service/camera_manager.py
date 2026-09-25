@@ -15,7 +15,7 @@ from enum import Enum
 from camera_service.models import IdentitySeen
 from camera_service.object_security.alerts import ObjectSecurityAlerter
 from camera_service.domain import ResourceScope
-from camera_service.inference import BackendType, UltralyticsCPUBackend
+from camera_service.inference import UltralyticsCPUBackend
 
 class CameraRole(str, Enum):
     ENTRANCE_EXIT = "ENTRANCE_EXIT"
