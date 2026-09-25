@@ -55,6 +55,13 @@ class PortalStore:
     def now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    def resolve_edge_credential(self, token_hash: str):
+        return None
+
+    def provision_edge_credential(self, token_hash: str, tenant_id: str, company_code: str | None,
+                                  shop_id: str, site_id: str, edge_id: str) -> None:
+        raise RuntimeError("Scoped edge credentials require PostgreSQL")
+
     def ingest_event(self, envelope: dict[str, Any]) -> dict[str, Any]:
         tenant_id = str(envelope["tenant_id"])
         site_id = str(envelope["site_id"])
