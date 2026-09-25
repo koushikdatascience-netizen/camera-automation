@@ -51,8 +51,18 @@ class SQLiteStore:
     @staticmethod
     def now(): return datetime.now(timezone.utc).isoformat()
     def _enqueue_edge_event(self,conn,event_id,event_type,payload):
-        payload={**payload,'schema_version':'local.event.v1'}
+        payload=self._scope_event_payload({**payload,'schema_version':'local.event.v1'})
         conn.execute("INSERT OR IGNORE INTO edge_event_queue(id,event_type,payload_json,status,attempts,last_error,created_at,next_attempt_at,claimed_at,synced_at) VALUES(?,?,?,'PENDING',0,NULL,?,NULL,NULL,NULL)",(event_id,event_type,json.dumps(payload),self.now()))
+    def configure_event_scope(self, tenant_id, company_code, shop_id, edge_id):
+        self._event_scope={'tenant_id':str(tenant_id),'company_code':str(company_code) if company_code is not None else None,'shop_id':str(shop_id),'edge_id':str(edge_id)}
+
+    def _scope_event_payload(self,payload):
+        scope=getattr(self,'_event_scope',None)
+        if not scope:
+            return payload
+        camera_id=payload.get('camera_id')
+        return {**payload,'scope':{**scope,'camera_id':str(camera_id or 'system')}}
+
     def create_person(self, d):
         pid=str(uuid.uuid4()); now=self.now()
         with self._lock,self._conn() as c: c.execute("INSERT INTO personnel VALUES(?,?,?,?,?,?,?,?,?)",(pid,d.employee_code,d.full_name,d.role.value,d.phone,d.email,1,now,now))
