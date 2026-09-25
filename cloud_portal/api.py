@@ -10,10 +10,20 @@ from pydantic import BaseModel, Field
 
 from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
+from cloud_portal.postgres_storage import PostgresPortalStore
 from cloud_portal.inference_api import router as inference_router
 
 
-store = PortalStore(os.getenv("SNAPKEY_PORTAL_DB", "data/cloud_portal.db"))
+def build_portal_store():
+    database_url = os.getenv("SNAPKEY_DATABASE_URL", "").strip()
+    if database_url:
+        return PostgresPortalStore(database_url)
+    if os.getenv("SNAPKEY_ENV", "development").strip().lower() == "production":
+        raise RuntimeError("SNAPKEY_DATABASE_URL is required in production")
+    return PortalStore(os.getenv("SNAPKEY_PORTAL_DB", "data/cloud_portal.db"))
+
+
+store = build_portal_store()
 app = FastAPI(title="SnapKey Vision AI Portal")
 app.include_router(inference_router)
 
