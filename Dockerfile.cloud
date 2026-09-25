@@ -4,6 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
+ENV PYTHONPATH=/app
 
 COPY requirements-cloud.txt .
 RUN pip install --no-cache-dir -r requirements-cloud.txt
