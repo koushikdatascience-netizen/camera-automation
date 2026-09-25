@@ -10,10 +10,12 @@ from pydantic import BaseModel, Field
 
 from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
+from cloud_portal.inference_api import router as inference_router
 
 
 store = PortalStore(os.getenv("SNAPKEY_PORTAL_DB", "data/cloud_portal.db"))
 app = FastAPI(title="SnapKey Vision AI Portal")
+app.include_router(inference_router)
 
 
 class LicenseIssueRequest(BaseModel):
@@ -224,3 +226,12 @@ def issue_license(request: LicenseIssueRequest):
         "grace_until": grace.isoformat(),
     }
     return {"license": payload, "signature": sign_license_payload(payload, private_key)}
+
+
+@app.post("/edge/v1/heartbeat")
+def edge_heartbeat(payload: dict[str, Any], _=Depends(require_edge_token)):
+    required = ["tenant_id", "site_id", "edge_id", "status"]
+    missing = [key for key in required if payload.get(key) is None]
+    if missing:
+        raise HTTPException(400, {"missing": missing})
+    return store.record_heartbeat(payload)
