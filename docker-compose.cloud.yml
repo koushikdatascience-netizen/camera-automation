@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-snapkey_vision}
+      POSTGRES_USER: ${POSTGRES_USER:-snapkey}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - vision_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-snapkey} -d ${POSTGRES_DB:-snapkey_vision}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [vision]
+
+  portal:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SNAPKEY_ENV: production
+      SNAPKEY_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-snapkey}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-snapkey_vision}
+      SNAPKEY_EDGE_API_TOKEN: ${SNAPKEY_EDGE_API_TOKEN:?set SNAPKEY_EDGE_API_TOKEN}
+    command: uvicorn cloud_portal.api:app --host 0.0.0.0 --port 8000
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks: [vision]
+
+volumes:
+  vision_postgres_data:
+
+networks:
+  vision:
