@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements-cloud.txt
 
 COPY camera_service ./camera_service
 COPY cloud_portal ./cloud_portal
+COPY tools ./tools
 
 EXPOSE 8000
 
