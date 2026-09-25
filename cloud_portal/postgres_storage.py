@@ -68,6 +68,13 @@ class PostgresPortalStore:
                 {"token_hash":token_hash,"tenant":tenant_id,"company":company_code,"shop":shop_id,
                  "site":site_id,"edge":edge_id,"now":self.now()})
 
+    def revoke_edge_credentials(self, tenant_id: str, shop_id: str, edge_id: str) -> int:
+        with self._conn() as conn:
+            result = conn.execute(text("""UPDATE edge_credentials SET enabled=FALSE
+                WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge AND enabled=TRUE"""),
+                {"tenant":tenant_id,"shop":shop_id,"edge":edge_id})
+        return int(result.rowcount or 0)
+
     def ingest_event(self, envelope: dict[str, Any]) -> dict[str, Any]:
         tenant_id=str(envelope["tenant_id"]); site_id=str(envelope["site_id"]); edge_id=str(envelope["edge_id"]); event_id=str(envelope["event_id"]); now=self.now()
         with self._conn() as conn:
