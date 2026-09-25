@@ -17,6 +17,8 @@ class CloudSyncClient:
             "schema_version": "edge.event.v1",
             "edge_id": edge_config.edge_id,
             "tenant_id": edge_config.tenant_id,
+            "company_code": getattr(edge_config, "company_code", None),
+            "shop_id": getattr(edge_config, "shop_id", None) or edge_config.site_id,
             "site_id": edge_config.site_id,
             "event_id": event.get("event_id"),
             "event_type": event.get("event_type"),
@@ -47,6 +49,8 @@ class CloudSyncClient:
         payload = {
             "edge_id": edge_config.edge_id,
             "tenant_id": edge_config.tenant_id,
+            "company_code": getattr(edge_config, "company_code", None),
+            "shop_id": getattr(edge_config, "shop_id", None) or edge_config.site_id,
             "site_id": edge_config.site_id,
             "status": status,
         }
