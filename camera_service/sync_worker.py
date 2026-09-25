@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
 
@@ -79,7 +80,9 @@ class EdgeSyncWorker:
                     self.store.mark_event_synced(row["id"])
                     synced += 1
                 except Exception as exc:
-                    self.store.mark_event_failed(row["id"], str(exc))
+                    attempts = int(row.get("attempts", 0) or 0) + 1
+                    retry_after = min(300.0, max(2.0, 2.0 ** min(attempts, 8)))
+                    self.store.mark_event_failed(row["id"], str(exc), retry_after_seconds=retry_after)
                     failed += 1
 
             result = SyncRunResult(enabled=True, synced=synced, failed=failed)
