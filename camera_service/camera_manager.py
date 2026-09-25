@@ -581,7 +581,8 @@ class CameraManager:
             overlays = []
             imgsz = int(getattr(camera_config, "tracking_imgsz", 384) or 384)
             mode = getattr(camera_config, "tracking_mode", "detect") or "detect"
-            use_router = os.environ.get("SNAPKEY_INFERENCE_ROUTER_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+            router_setting = os.environ.get("SNAPKEY_INFERENCE_ROUTER_ENABLED", "1").strip().lower()
+            use_router = router_setting not in {"0", "false", "no", "off"}
 
             if use_router:
                 backend = self._inference_backends.get(model_path)
