@@ -15,7 +15,7 @@ from enum import Enum
 from camera_service.models import IdentitySeen
 from camera_service.object_security.alerts import ObjectSecurityAlerter
 from camera_service.domain import ResourceScope
-from camera_service.inference import UltralyticsCPUBackend
+from camera_service.inference import build_runtime_router, select_runtime_backend
 
 class CameraRole(str, Enum):
     ENTRANCE_EXIT = "ENTRANCE_EXIT"
@@ -88,6 +88,7 @@ class CameraManager:
         self._lock = threading.RLock()
         self._tracking_models = {}
         self._inference_backends = {}
+        self._runtime_routers = {}
         self._tracking_error = None
         self._stream_active_tracks = {}
         self._alert_last_sent = {}
@@ -587,8 +588,12 @@ class CameraManager:
             if use_router:
                 backend = self._inference_backends.get(model_path)
                 if backend is None:
-                    backend = UltralyticsCPUBackend(model_path)
+                    router, capability = build_runtime_router(model_path)
+                    backend = select_runtime_backend(router)
+                    self._runtime_routers[model_path] = router
                     self._inference_backends[model_path] = backend
+                    if stream_state is not None:
+                        stream_state["inference_capability"] = capability
                 camera_id_for_scope = getattr(camera_config, "camera_id", None) or "camera-unknown"
                 scope = ResourceScope(
                     tenant_id=os.environ.get("SNAPKEY_TENANT_ID", "legacy-tenant"),
