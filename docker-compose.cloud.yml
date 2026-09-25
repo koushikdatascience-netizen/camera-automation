@@ -16,7 +16,9 @@ services:
     networks: [vision]
 
   portal:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.cloud
     restart: unless-stopped
     depends_on:
       postgres:
