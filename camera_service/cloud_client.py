@@ -13,12 +13,22 @@ class CloudSyncClient:
         return bool(self.config.enabled and self.config.base_url and self.config.api_token)
 
     def event_envelope(self, edge_config, event: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "schema_version": "edge.event.v1",
-            "edge_id": edge_config.edge_id,
+        scope = event.get("scope") or {}
+        expected = {
             "tenant_id": edge_config.tenant_id,
             "company_code": getattr(edge_config, "company_code", None),
             "shop_id": getattr(edge_config, "shop_id", None) or edge_config.site_id,
+            "edge_id": edge_config.edge_id,
+        }
+        for key, value in expected.items():
+            if scope.get(key) is not None and str(scope.get(key)) != str(value):
+                raise RuntimeError(f"Queued event {key} does not match configured edge identity")
+        return {
+            "schema_version": "edge.event.v1",
+            "edge_id": expected["edge_id"],
+            "tenant_id": expected["tenant_id"],
+            "company_code": expected["company_code"],
+            "shop_id": expected["shop_id"],
             "site_id": edge_config.site_id,
             "event_id": event.get("event_id"),
             "event_type": event.get("event_type"),
