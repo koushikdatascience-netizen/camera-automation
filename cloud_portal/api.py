@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field
 from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
 from cloud_portal.postgres_storage import PostgresPortalStore
-from cloud_portal.inference_api import router as inference_router
 
 
 def build_portal_store():
@@ -25,7 +24,9 @@ def build_portal_store():
 
 store = build_portal_store()
 app = FastAPI(title="SnapKey Vision AI Portal")
-app.include_router(inference_router)
+if os.getenv("SNAPKEY_ENABLE_CLOUD_INFERENCE", "0").strip() == "1":
+    from cloud_portal.inference_api import router as inference_router
+    app.include_router(inference_router)
 
 
 class LicenseIssueRequest(BaseModel):
