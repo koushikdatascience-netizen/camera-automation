@@ -36,6 +36,8 @@ class PostgresPortalStore:
             """CREATE TABLE IF NOT EXISTS sites(id TEXT NOT NULL, tenant_id TEXT NOT NULL, name TEXT, created_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(id,tenant_id))""",
             """CREATE TABLE IF NOT EXISTS edge_machines(id TEXT NOT NULL, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, last_seen_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(id,tenant_id,site_id))""",
             """CREATE TABLE IF NOT EXISTS edge_heartbeats(tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, received_at TIMESTAMPTZ NOT NULL, status_json JSONB NOT NULL, PRIMARY KEY(tenant_id,site_id,edge_id))""",
+            """CREATE TABLE IF NOT EXISTS edge_credentials(token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL)""",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_credentials_identity ON edge_credentials(tenant_id,shop_id,site_id,edge_id)""",
             """CREATE TABLE IF NOT EXISTS edge_events(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TIMESTAMPTZ NOT NULL, received_at TIMESTAMPTZ NOT NULL, payload_json JSONB NOT NULL)""",
             """CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id,site_id,event_time DESC)""",
             """CREATE INDEX IF NOT EXISTS idx_edge_events_shop_time ON edge_events(tenant_id,shop_id,event_time DESC)""",
@@ -48,6 +50,23 @@ class PostgresPortalStore:
     @staticmethod
     def now():
         return datetime.now(timezone.utc)
+
+    def resolve_edge_credential(self, token_hash: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(text("""SELECT tenant_id,company_code,shop_id,site_id,edge_id
+                FROM edge_credentials WHERE token_hash=:token_hash AND enabled=TRUE"""),
+                {"token_hash": token_hash}).mappings().first()
+        return dict(row) if row else None
+
+    def provision_edge_credential(self, token_hash: str, tenant_id: str, company_code: str | None,
+                                  shop_id: str, site_id: str, edge_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO edge_credentials(token_hash,tenant_id,company_code,shop_id,site_id,edge_id,enabled,created_at)
+                VALUES(:token_hash,:tenant,:company,:shop,:site,:edge,TRUE,:now)
+                ON CONFLICT(token_hash) DO UPDATE SET tenant_id=EXCLUDED.tenant_id,company_code=EXCLUDED.company_code,
+                shop_id=EXCLUDED.shop_id,site_id=EXCLUDED.site_id,edge_id=EXCLUDED.edge_id,enabled=TRUE"""),
+                {"token_hash":token_hash,"tenant":tenant_id,"company":company_code,"shop":shop_id,
+                 "site":site_id,"edge":edge_id,"now":self.now()})
 
     def ingest_event(self, envelope: dict[str, Any]) -> dict[str, Any]:
         tenant_id=str(envelope["tenant_id"]); site_id=str(envelope["site_id"]); edge_id=str(envelope["edge_id"]); event_id=str(envelope["event_id"]); now=self.now()
