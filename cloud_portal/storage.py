@@ -62,6 +62,9 @@ class PortalStore:
                                   shop_id: str, site_id: str, edge_id: str) -> None:
         raise RuntimeError("Scoped edge credentials require PostgreSQL")
 
+    def revoke_edge_credentials(self, tenant_id: str, shop_id: str, edge_id: str) -> int:
+        return 0
+
     def ingest_event(self, envelope: dict[str, Any]) -> dict[str, Any]:
         tenant_id = str(envelope["tenant_id"])
         site_id = str(envelope["site_id"])
