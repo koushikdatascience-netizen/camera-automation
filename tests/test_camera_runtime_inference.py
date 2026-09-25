@@ -57,7 +57,7 @@ def test_camera_manager_can_use_normalized_runtime_backend(tmp_path, monkeypatch
     assert state["latest_summary"]["people"] == 1
 
 
-def test_camera_manager_router_is_opt_in(tmp_path, monkeypatch):
-    monkeypatch.delenv("SNAPKEY_INFERENCE_ROUTER_ENABLED", raising=False)
+def test_camera_manager_router_can_be_disabled_for_rollback(tmp_path, monkeypatch):
+    monkeypatch.setenv("SNAPKEY_INFERENCE_ROUTER_ENABLED", "0")
     manager = CameraManager(str(tmp_path / "camera.db"))
     assert manager._inference_backends == {}
