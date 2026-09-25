@@ -61,3 +61,11 @@ def test_scoped_token_resolves_to_principal(monkeypatch):
     p=api.require_edge_token("Bearer "+token)
     assert p.shop_id == "WBTEST"
     assert p.edge_id == "edge-1"
+
+
+def test_heartbeat_scope_guard_rejects_other_shop():
+    payload={"tenant_id":"tenant-1","company_code":"2","shop_id":"OTHER",
+             "site_id":"legacy-site","edge_id":"edge-1","status":{}}
+    with pytest.raises(HTTPException) as exc:
+        api._enforce_edge_scope(principal(), payload)
+    assert exc.value.status_code == 403
