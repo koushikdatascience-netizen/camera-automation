@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from dataclasses import dataclass
+import hashlib
+import hmac
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
@@ -41,12 +44,51 @@ class LicenseIssueRequest(BaseModel):
     grace_days: int = 7
 
 
-def require_edge_token(authorization: str | None = Header(default=None)) -> None:
-    expected = os.getenv("SNAPKEY_EDGE_API_TOKEN", "").strip()
-    if not expected:
+@dataclass(frozen=True)
+class EdgePrincipal:
+    tenant_id: str | None = None
+    company_code: str | None = None
+    shop_id: str | None = None
+    site_id: str | None = None
+    edge_id: str | None = None
+    legacy_global: bool = False
+
+
+def _production() -> bool:
+    return os.getenv("SNAPKEY_ENV", "development").strip().lower() == "production"
+
+
+def _token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def require_edge_token(authorization: str | None = Header(default=None)) -> EdgePrincipal:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing edge API token")
+    token = authorization[7:].strip()
+    principal = store.resolve_edge_credential(_token_digest(token))
+    if principal:
+        return EdgePrincipal(**principal)
+    legacy = os.getenv("SNAPKEY_EDGE_API_TOKEN", "").strip()
+    if legacy and hmac.compare_digest(token, legacy):
+        if _production() and os.getenv("SNAPKEY_ALLOW_LEGACY_GLOBAL_EDGE_TOKEN", "0").strip() != "1":
+            raise HTTPException(401, "Legacy global edge token is disabled in production")
+        return EdgePrincipal(legacy_global=True)
+    raise HTTPException(401, "Invalid edge API token")
+
+
+def _enforce_edge_scope(principal: EdgePrincipal, payload: dict[str, Any]) -> None:
+    if principal.legacy_global:
         return
-    if authorization != f"Bearer {expected}":
-        raise HTTPException(401, "Invalid edge API token")
+    for key, expected in {
+        "tenant_id": principal.tenant_id,
+        "company_code": principal.company_code,
+        "shop_id": principal.shop_id,
+        "site_id": principal.site_id,
+        "edge_id": principal.edge_id,
+    }.items():
+        if expected is not None and str(payload.get(key) or "") != str(expected):
+            raise HTTPException(403, f"Edge credential is not authorized for {key}")
 
 
 @app.get("/health")
@@ -196,13 +238,14 @@ def portal_home():
 
 
 @app.post("/edge/v1/events")
-def ingest_edge_event(envelope: dict[str, Any], _=Depends(require_edge_token)):
+def ingest_edge_event(envelope: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
     required = ["schema_version", "tenant_id", "site_id", "edge_id", "event_id", "event_type", "event_time", "payload"]
     missing = [key for key in required if not envelope.get(key)]
     if missing:
         raise HTTPException(400, {"missing": missing})
     if envelope["schema_version"] != "edge.event.v1":
         raise HTTPException(400, "Unsupported event schema")
+    _enforce_edge_scope(principal, envelope)
     return store.ingest_event(envelope)
 
 
@@ -240,9 +283,10 @@ def issue_license(request: LicenseIssueRequest):
 
 
 @app.post("/edge/v1/heartbeat")
-def edge_heartbeat(payload: dict[str, Any], _=Depends(require_edge_token)):
+def edge_heartbeat(payload: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
     required = ["tenant_id", "site_id", "edge_id", "status"]
     missing = [key for key in required if payload.get(key) is None]
     if missing:
         raise HTTPException(400, {"missing": missing})
+    _enforce_edge_scope(principal, payload)
     return store.record_heartbeat(payload)
