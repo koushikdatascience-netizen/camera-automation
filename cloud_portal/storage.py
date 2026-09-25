@@ -36,6 +36,7 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS tenants(id TEXT PRIMARY KEY, name TEXT, created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS sites(id TEXT NOT NULL, tenant_id TEXT NOT NULL, name TEXT, created_at TEXT NOT NULL, PRIMARY KEY(id, tenant_id));
                 CREATE TABLE IF NOT EXISTS edge_machines(id TEXT NOT NULL, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, last_seen_at TEXT NOT NULL, PRIMARY KEY(id, tenant_id, site_id));
+                CREATE TABLE IF NOT EXISTS edge_heartbeats(tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, received_at TEXT NOT NULL, status_json TEXT NOT NULL, PRIMARY KEY(tenant_id,site_id,edge_id));
                 CREATE TABLE IF NOT EXISTS edge_events(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, received_at TEXT NOT NULL, payload_json TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id, site_id, event_time);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_type ON edge_events(tenant_id, event_type, event_time);
@@ -99,3 +100,16 @@ class PortalStore:
                 "edges": edges,
                 "events": {row["event_type"]: row["count"] for row in events},
             }
+
+
+    def record_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        tenant_id = str(payload["tenant_id"])
+        site_id = str(payload["site_id"])
+        edge_id = str(payload["edge_id"])
+        now = self.now()
+        with self._lock, self._conn() as conn:
+            conn.execute("INSERT OR IGNORE INTO tenants(id,name,created_at) VALUES(?,?,?)", (tenant_id, tenant_id, now))
+            conn.execute("INSERT OR IGNORE INTO sites(id,tenant_id,name,created_at) VALUES(?,?,?,?)", (site_id, tenant_id, site_id, now))
+            conn.execute("INSERT OR REPLACE INTO edge_machines(id,tenant_id,site_id,last_seen_at) VALUES(?,?,?,?)", (edge_id, tenant_id, site_id, now))
+            conn.execute("INSERT OR REPLACE INTO edge_heartbeats(tenant_id,site_id,edge_id,received_at,status_json) VALUES(?,?,?,?,?)", (tenant_id, site_id, edge_id, now, json.dumps(payload.get("status") or {})))
+        return {"ok": True, "tenant_id": tenant_id, "site_id": site_id, "edge_id": edge_id, "received_at": now}
