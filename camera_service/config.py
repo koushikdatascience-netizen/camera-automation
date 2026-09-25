@@ -85,6 +85,8 @@ class RecognitionConfig(BaseModel):
 class EdgeConfig(BaseModel):
     edge_id: str = "local-edge-01"
     tenant_id: str = "demo-tenant"
+    company_code: str | None = None
+    shop_id: str = "demo-shop"
     site_id: str = "demo-site"
     activation_required: bool = False
     activation_token: str = ""
