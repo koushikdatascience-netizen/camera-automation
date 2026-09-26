@@ -56,6 +56,11 @@ class PostgresPortalStore:
                 command_type TEXT NOT NULL, request_json JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING',
                 result_json JSONB, created_at TIMESTAMPTZ NOT NULL, claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)""",
             """CREATE INDEX IF NOT EXISTS idx_edge_commands_pending ON edge_commands(tenant_id,shop_id,edge_id,status,created_at)""",
+            """CREATE TABLE IF NOT EXISTS portal_sessions(
+                session_id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, tenant_id TEXT NOT NULL, company_code TEXT,
+                shop_id TEXT NOT NULL, user_id TEXT, display_name TEXT, role TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL)""",
+            """CREATE INDEX IF NOT EXISTS idx_portal_sessions_token ON portal_sessions(token_hash,expires_at)""",
         ]
         with self._conn() as conn:
             for statement in statements:
@@ -229,4 +234,19 @@ class PostgresPortalStore:
         for key in ("created_at","claimed_at","completed_at"):
             if hasattr(data.get(key),"isoformat"): data[key]=data[key].isoformat()
         data["result"]=data.pop("result_json")
+        return data
+
+
+    def create_portal_session(self, session: dict[str, Any]) -> None:
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO portal_sessions(session_id,token_hash,tenant_id,company_code,shop_id,user_id,display_name,role,created_at,expires_at)
+                VALUES(:session_id,:token_hash,:tenant_id,:company_code,:shop_id,:user_id,:display_name,:role,:created_at,:expires_at)"""),session)
+
+    def portal_session_by_hash(self, token_hash: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("SELECT * FROM portal_sessions WHERE token_hash=:token_hash"),{"token_hash":token_hash}).mappings().first()
+        if not row: return None
+        data=dict(row)
+        for key in ("created_at","expires_at"):
+            if hasattr(data.get(key),"isoformat"): data[key]=data[key].isoformat()
         return data
