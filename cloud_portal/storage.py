@@ -38,6 +38,7 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS edge_machines(id TEXT NOT NULL, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, last_seen_at TEXT NOT NULL, PRIMARY KEY(id, tenant_id, site_id));
                 CREATE TABLE IF NOT EXISTS edge_heartbeats(tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, received_at TEXT NOT NULL, status_json TEXT NOT NULL, PRIMARY KEY(tenant_id,site_id,edge_id));
                 CREATE TABLE IF NOT EXISTS edge_events(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, received_at TEXT NOT NULL, payload_json TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS camera_configs(tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, camera_id TEXT NOT NULL, name TEXT NOT NULL, source_type TEXT NOT NULL, source TEXT NOT NULL, camera_role TEXT NOT NULL, camera_zone TEXT, crowd_threshold INTEGER NOT NULL DEFAULT 10, enabled INTEGER NOT NULL DEFAULT 1, features_json TEXT NOT NULL, settings_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(tenant_id,shop_id,edge_id,camera_id));
                 CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id, site_id, event_time);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_type ON edge_events(tenant_id, event_type, event_time);
                 """
@@ -133,3 +134,57 @@ class PortalStore:
             conn.execute("INSERT OR REPLACE INTO edge_machines(id,tenant_id,site_id,last_seen_at) VALUES(?,?,?,?)", (edge_id, tenant_id, site_id, now))
             conn.execute("INSERT OR REPLACE INTO edge_heartbeats(tenant_id,site_id,edge_id,received_at,status_json) VALUES(?,?,?,?,?)", (tenant_id, site_id, edge_id, now, json.dumps(payload.get("status") or {})))
         return {"ok": True, "tenant_id": tenant_id, "site_id": site_id, "edge_id": edge_id, "received_at": now}
+
+
+    def upsert_camera(self, camera: dict[str, Any]) -> dict[str, Any]:
+        now = self.now()
+        values = (
+            camera["tenant_id"], camera.get("company_code"), camera["shop_id"], camera["site_id"],
+            camera["edge_id"], camera["camera_id"], camera["name"], camera.get("source_type", "rtsp"),
+            camera["source"], camera.get("camera_role", "GENERAL"), camera.get("camera_zone"),
+            int(camera.get("crowd_threshold", 10)), 1 if camera.get("enabled", True) else 0,
+            json.dumps(camera.get("features") or {}), json.dumps(camera.get("settings") or {}), now, now,
+        )
+        with self._lock, self._conn() as conn:
+            conn.execute("""INSERT INTO camera_configs(
+                tenant_id,company_code,shop_id,site_id,edge_id,camera_id,name,source_type,source,camera_role,
+                camera_zone,crowd_threshold,enabled,features_json,settings_json,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(tenant_id,shop_id,edge_id,camera_id) DO UPDATE SET
+                company_code=excluded.company_code,site_id=excluded.site_id,name=excluded.name,
+                source_type=excluded.source_type,source=excluded.source,camera_role=excluded.camera_role,
+                camera_zone=excluded.camera_zone,crowd_threshold=excluded.crowd_threshold,enabled=excluded.enabled,
+                features_json=excluded.features_json,settings_json=excluded.settings_json,updated_at=excluded.updated_at""", values)
+        return self.get_camera(camera["tenant_id"], camera["shop_id"], camera["edge_id"], camera["camera_id"])
+
+    def get_camera(self, tenant_id: str, shop_id: str, edge_id: str, camera_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute("""SELECT * FROM camera_configs WHERE tenant_id=? AND shop_id=? AND edge_id=? AND camera_id=?""",
+                               (tenant_id, shop_id, edge_id, camera_id)).fetchone()
+        return self._camera_row(row) if row else None
+
+    def list_cameras(self, tenant_id: str, shop_id: str | None = None, edge_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM camera_configs WHERE tenant_id=?"
+        args: list[Any] = [tenant_id]
+        if shop_id:
+            query += " AND shop_id=?"; args.append(shop_id)
+        if edge_id:
+            query += " AND edge_id=?"; args.append(edge_id)
+        query += " ORDER BY name,camera_id"
+        with self._conn() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [self._camera_row(row) for row in rows]
+
+    def delete_camera(self, tenant_id: str, shop_id: str, edge_id: str, camera_id: str) -> bool:
+        with self._lock, self._conn() as conn:
+            result = conn.execute("""DELETE FROM camera_configs WHERE tenant_id=? AND shop_id=? AND edge_id=? AND camera_id=?""",
+                                  (tenant_id, shop_id, edge_id, camera_id))
+        return bool(result.rowcount)
+
+    @staticmethod
+    def _camera_row(row) -> dict[str, Any]:
+        data = dict(row)
+        data["enabled"] = bool(data["enabled"])
+        data["features"] = json.loads(data.pop("features_json") or "{}")
+        data["settings"] = json.loads(data.pop("settings_json") or "{}")
+        return data
