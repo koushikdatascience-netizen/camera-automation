@@ -71,3 +71,20 @@ def test_cloud_camera_registry_rejects_path_scope_mismatch(tmp_path, monkeypatch
  client=TestClient(api.app)
  camera={'tenant_id':'tenant-b','shop_id':'SHOP1','site_id':'site-1','edge_id':'edge-1','camera_id':'CAM-001','name':'Main Entrance','source':'rtsp://camera.local/stream'}
  assert client.put('/portal/v1/tenants/tenant-a/cameras/CAM-001',json=camera).status_code==400
+
+
+def test_portal_edge_command_roundtrip_is_scope_bound(tmp_path, monkeypatch):
+ monkeypatch.setenv('SNAPKEY_PORTAL_DB', str(tmp_path/'commands.db'))
+ monkeypatch.delenv('SNAPKEY_DATABASE_URL', raising=False)
+ monkeypatch.setenv('SNAPKEY_ENV','development')
+ import importlib
+ import cloud_portal.api as api
+ importlib.reload(api)
+ command=api.store.create_edge_command({'tenant_id':'tenant-a','shop_id':'SHOP1','edge_id':'edge-1','command_type':'CAMERA_TEST','request':{'source':'rtsp://camera/live'}})
+ claimed=api.store.claim_edge_commands('tenant-a','SHOP1','edge-1')
+ assert len(claimed)==1 and claimed[0]['id']==command['id']
+ assert api.store.claim_edge_commands('tenant-a','SHOP2','edge-1')==[]
+ assert api.store.complete_edge_command(command['id'],'tenant-a','SHOP1','edge-1','SUCCEEDED',{'ok':True,'connected':True})
+ result=api.store.get_edge_command(command['id'],'tenant-a')
+ assert result['status']=='SUCCEEDED' and result['result']['connected'] is True
+ assert api.store.get_edge_command(command['id'],'tenant-b') is None
