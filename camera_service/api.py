@@ -10,6 +10,7 @@ from camera_service.face_service import FaceService
 from camera_service.attendance_engine import AttendanceEngine
 from camera_service.camera.supervisor import CameraSupervisor
 from camera_service.camera_manager import CameraManager, CameraConfig, CameraStatus, CameraState
+from camera_service.camera.onvif import probe_onvif, select_profile, OnvifUnavailable
 from camera_service.alert_dispatcher import AlertDispatcher
 from camera_service.cloud_client import CloudSyncClient
 from camera_service.licensing import LicenseManager
@@ -449,6 +450,27 @@ class CameraCreate(BaseModel):
     tracking_quality: int = 65
     tracking_mode: str = "detect"
     features: dict = {}
+
+class OnvifProbeRequest(BaseModel):
+    host: str
+    port: int = 80
+    username: str = ""
+    password: str = ""
+    purpose: str = "ai"
+
+
+@app.post('/api/v1/cameras/onvif/probe')
+def probe_camera_onvif(request: OnvifProbeRequest):
+    """Probe ONVIF on the edge LAN and recommend a stream profile."""
+    try:
+        result = probe_onvif(request.host.strip(), request.port, request.username, request.password)
+        result["recommended_profile"] = select_profile(result.get("profiles") or [], request.purpose)
+        return result
+    except OnvifUnavailable as exc:
+        raise HTTPException(501, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"ONVIF camera probe failed: {exc}")
+
 
 @app.post('/api/v1/cameras')
 def create_camera(camera_data: CameraCreate):
