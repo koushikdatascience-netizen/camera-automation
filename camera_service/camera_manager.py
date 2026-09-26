@@ -224,6 +224,48 @@ class CameraManager:
 
         return config
 
+    def apply_cloud_camera(self, camera_data: Dict[str, Any]) -> CameraConfig:
+        """Idempotently apply a cloud camera assignment to the local edge database."""
+        camera_id = str(camera_data.get("camera_id", "")).strip()
+        if not camera_id:
+            raise ValueError("camera_id is required")
+        source = str(camera_data.get("source") or camera_data.get("rtsp_url") or "").strip()
+        if not source:
+            raise ValueError(f"camera {camera_id} has no source")
+        settings = camera_data.get("settings") or {}
+        features = camera_data.get("features") or {}
+        supported_features = {
+            "attendance", "face_recognition", "unknown_detection", "unknown_person_detection",
+            "shoplifting", "shoplifting_detection", "object_security",
+        }
+        local_features = {key: bool(value) for key, value in features.items() if key in supported_features}
+        payload = {
+            "camera_id": camera_id,
+            "name": camera_data.get("name") or camera_id,
+            "source_type": camera_data.get("source_type") or "rtsp",
+            "rtsp_url": source,
+            "enabled": bool(camera_data.get("enabled", True)),
+            "camera_role": camera_data.get("camera_role") or CameraRole.GENERAL.value,
+            "camera_zone": self._normalize_cloud_zone(camera_data.get("camera_zone")),
+            "crowd_threshold": camera_data.get("crowd_threshold", 10),
+            "tracking_fps": settings.get("tracking_fps", 3.0),
+            "tracking_imgsz": settings.get("max_frame_width", settings.get("tracking_imgsz", 384)),
+            "tracking_quality": settings.get("tracking_quality", 65),
+            "tracking_mode": settings.get("tracking_mode", "detect"),
+            "features": local_features,
+        }
+        existing = self.get_camera(camera_id)
+        if existing:
+            return self.update_camera(camera_id, payload)
+        return self.create_camera(payload)
+
+    @staticmethod
+    def _normalize_cloud_zone(value: Any) -> str:
+        zone = str(value or "").strip().lower()
+        if zone in {"outside", "outdoor", "external", "exterior"}:
+            return CameraZone.OUTSIDE.value
+        return CameraZone.INSIDE.value
+
     def get_camera(self, camera_id: str) -> Optional[CameraConfig]:
         """Get camera configuration by ID"""
         with self._conn() as c:
