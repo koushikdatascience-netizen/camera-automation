@@ -86,7 +86,7 @@
             <div class="card-icon">⚡</div>
           </div>
 
-          <div class="status-value">
+          <div class="status-value" id="application-status">
             <span class="status-dot"></span>
             Online
           </div>
@@ -105,7 +105,7 @@
             <div class="card-icon">▣</div>
           </div>
 
-          <div class="status-value">
+          <div class="status-value" id="database-status">
             <span class="status-dot"></span>
             Connected
           </div>
@@ -124,9 +124,7 @@
             <div class="card-icon">📷</div>
           </div>
 
-          <div class="status-value">
-            1
-          </div>
+          <div class="status-value" id="configured-cameras">—</div>
 
           <div class="status-description">
             Camera configured
@@ -142,9 +140,7 @@
             <div class="card-icon">●</div>
           </div>
 
-          <div class="status-value">
-            0
-          </div>
+          <div class="status-value" id="online-cameras">—</div>
 
           <div class="status-description">
             No cameras currently online
@@ -160,9 +156,7 @@
             <div class="card-icon">👥</div>
           </div>
 
-          <div class="status-value">
-            0
-          </div>
+          <div class="status-value" id="active-personnel">—</div>
 
           <div class="status-description">
             No personnel currently active
@@ -178,9 +172,7 @@
             <div class="card-icon">⚠</div>
           </div>
 
-          <div class="status-value">
-            7
-          </div>
+          <div class="status-value" id="unknown-incidents">—</div>
 
           <div class="status-description">
             Incidents detected today
@@ -208,5 +200,6 @@
 
   </main>
 
+  <script src="/static/js/main.js"></script>
 </body>
 </html>
