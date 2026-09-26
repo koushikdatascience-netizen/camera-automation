@@ -204,13 +204,23 @@ class PortalCameraConfig(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
+
+def _portal_scope(tenant_id: str, principal: PortalPrincipal) -> None:
+    if principal.tenant_id != tenant_id:
+        raise HTTPException(403,"Portal session is not authorized for this tenant")
+
+
 @app.get("/portal/v1/tenants/{tenant_id}/cameras")
-def portal_cameras(tenant_id: str, shop_id: str | None = None, edge_id: str | None = None):
-    return {"items": store.list_cameras(tenant_id, shop_id=shop_id, edge_id=edge_id)}
+def portal_cameras(tenant_id: str, shop_id: str | None = None, edge_id: str | None = None, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if shop_id and shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
+    return {"items": store.list_cameras(tenant_id, shop_id=principal.shop_id, edge_id=edge_id)}
 
 
 @app.put("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
-def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConfig):
+def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConfig, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if request.shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
     if request.tenant_id != tenant_id or request.camera_id != camera_id:
         raise HTTPException(400, "Camera scope does not match request path")
     if request.source_type not in {"rtsp", "file", "webcam"}:
@@ -221,7 +231,9 @@ def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConf
 
 
 @app.delete("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
-def delete_portal_camera(tenant_id: str, camera_id: str, shop_id: str, edge_id: str):
+def delete_portal_camera(tenant_id: str, camera_id: str, shop_id: str, edge_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
     if not store.delete_camera(tenant_id, shop_id, edge_id, camera_id):
         raise HTTPException(404, "Camera not found")
     return {"deleted": True}
@@ -236,7 +248,9 @@ class EdgeCommandRequest(BaseModel):
 
 
 @app.post("/portal/v1/tenants/{tenant_id}/edge-commands")
-def create_portal_edge_command(tenant_id: str, request: EdgeCommandRequest):
+def create_portal_edge_command(tenant_id: str, request: EdgeCommandRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if request.shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
     if request.tenant_id != tenant_id:
         raise HTTPException(400, "Command tenant does not match request path")
     if request.command_type not in {"ONVIF_PROBE", "CAMERA_TEST"}:
@@ -245,7 +259,8 @@ def create_portal_edge_command(tenant_id: str, request: EdgeCommandRequest):
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/edge-commands/{command_id}")
-def portal_edge_command(tenant_id: str, command_id: str):
+def portal_edge_command(tenant_id: str, command_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
     command=store.get_edge_command(command_id, tenant_id)
     if not command: raise HTTPException(404, "Edge command not found")
     return command
