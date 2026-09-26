@@ -51,6 +51,11 @@ class PostgresPortalStore:
                 settings_json JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY(tenant_id,shop_id,edge_id,camera_id))""",
             """CREATE INDEX IF NOT EXISTS idx_camera_configs_scope ON camera_configs(tenant_id,shop_id,edge_id)""",
+            """CREATE TABLE IF NOT EXISTS edge_commands(
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, edge_id TEXT NOT NULL,
+                command_type TEXT NOT NULL, request_json JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING',
+                result_json JSONB, created_at TIMESTAMPTZ NOT NULL, claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)""",
+            """CREATE INDEX IF NOT EXISTS idx_edge_commands_pending ON edge_commands(tenant_id,shop_id,edge_id,status,created_at)""",
         ]
         with self._conn() as conn:
             for statement in statements:
@@ -184,4 +189,44 @@ class PostgresPortalStore:
         for key in ("features_json", "settings_json"):
             value = data.pop(key)
             data["features" if key == "features_json" else "settings"] = value if isinstance(value, dict) else json.loads(value or "{}")
+        return data
+
+
+    def create_edge_command(self, command: dict[str, Any]) -> dict[str, Any]:
+        import uuid
+        command_id = str(uuid.uuid4()); now = self.now()
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO edge_commands(id,tenant_id,shop_id,edge_id,command_type,request_json,status,created_at)
+                VALUES(:id,:tenant,:shop,:edge,:type,CAST(:request AS JSONB),'PENDING',:now)"""),
+                {"id":command_id,"tenant":command["tenant_id"],"shop":command["shop_id"],"edge":command["edge_id"],
+                 "type":command["command_type"],"request":json.dumps(command.get("request") or {}),"now":now})
+        return {"id":command_id,"status":"PENDING"}
+
+    def claim_edge_commands(self, tenant_id: str, shop_id: str, edge_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""UPDATE edge_commands SET status='CLAIMED',claimed_at=:now
+                WHERE id IN (SELECT id FROM edge_commands WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge
+                AND status='PENDING' ORDER BY created_at LIMIT :limit FOR UPDATE SKIP LOCKED)
+                RETURNING id,command_type,request_json"""),
+                {"now":self.now(),"tenant":tenant_id,"shop":shop_id,"edge":edge_id,"limit":max(1,min(20,int(limit)))}).mappings().all()
+        return [{"id":r["id"],"command_type":r["command_type"],"request":r["request_json"]} for r in rows]
+
+    def complete_edge_command(self, command_id: str, tenant_id: str, shop_id: str, edge_id: str,
+                              status: str, result: dict[str, Any]) -> bool:
+        with self._conn() as conn:
+            out=conn.execute(text("""UPDATE edge_commands SET status=:status,result_json=CAST(:result AS JSONB),completed_at=:now
+                WHERE id=:id AND tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge AND status='CLAIMED'"""),
+                {"status":status,"result":json.dumps(result),"now":self.now(),"id":command_id,
+                 "tenant":tenant_id,"shop":shop_id,"edge":edge_id})
+        return bool(out.rowcount)
+
+    def get_edge_command(self, command_id: str, tenant_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT id,tenant_id,shop_id,edge_id,command_type,status,result_json,created_at,claimed_at,completed_at
+                FROM edge_commands WHERE id=:id AND tenant_id=:tenant"""),{"id":command_id,"tenant":tenant_id}).mappings().first()
+        if not row: return None
+        data=dict(row)
+        for key in ("created_at","claimed_at","completed_at"):
+            if hasattr(data.get(key),"isoformat"): data[key]=data[key].isoformat()
+        data["result"]=data.pop("result_json")
         return data
