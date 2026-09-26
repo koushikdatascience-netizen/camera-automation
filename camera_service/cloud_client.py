@@ -85,3 +85,17 @@ class CloudSyncClient:
         )
         response.raise_for_status()
         return response.json() if response.content else {"items": []}
+
+
+    def edge_commands(self) -> list[dict[str, Any]]:
+        if not self.enabled(): raise RuntimeError("cloud sync is disabled")
+        response=requests.get(self.config.base_url.rstrip("/")+"/edge/v1/commands",
+            headers={"Authorization":f"Bearer {self.config.api_token}"},timeout=self.config.timeout_seconds)
+        response.raise_for_status()
+        return (response.json() or {}).get("items") or []
+
+    def complete_edge_command(self, command_id: str, result: dict[str, Any]) -> None:
+        if not self.enabled(): raise RuntimeError("cloud sync is disabled")
+        response=requests.post(self.config.base_url.rstrip("/")+f"/edge/v1/commands/{command_id}/result",
+            json=result,headers={"Authorization":f"Bearer {self.config.api_token}"},timeout=self.config.timeout_seconds)
+        response.raise_for_status()
