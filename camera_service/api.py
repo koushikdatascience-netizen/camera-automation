@@ -41,7 +41,7 @@ object_security_alerter=ObjectSecurityAlerter()
 cloud_client=CloudSyncClient(config.cloud_sync)
 alert_dispatcher=AlertDispatcher(config.alerts)
 license_manager=LicenseManager(config.edge)
-sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,license_manager)
+sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,license_manager,camera_manager=camera_manager)
 
 def _seed_packaged_object_security_model():
     if not getattr(sys, "frozen", False):
