@@ -39,6 +39,7 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS edge_heartbeats(tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, received_at TEXT NOT NULL, status_json TEXT NOT NULL, PRIMARY KEY(tenant_id,site_id,edge_id));
                 CREATE TABLE IF NOT EXISTS edge_events(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, received_at TEXT NOT NULL, payload_json TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS camera_configs(tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, camera_id TEXT NOT NULL, name TEXT NOT NULL, source_type TEXT NOT NULL, source TEXT NOT NULL, camera_role TEXT NOT NULL, camera_zone TEXT, crowd_threshold INTEGER NOT NULL DEFAULT 10, enabled INTEGER NOT NULL DEFAULT 1, features_json TEXT NOT NULL, settings_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(tenant_id,shop_id,edge_id,camera_id));
+                CREATE TABLE IF NOT EXISTS edge_commands(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,edge_id TEXT NOT NULL,command_type TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL, result_json TEXT,created_at TEXT NOT NULL,claimed_at TEXT,completed_at TEXT);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id, site_id, event_time);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_type ON edge_events(tenant_id, event_type, event_time);
                 """
@@ -187,4 +188,37 @@ class PortalStore:
         data["enabled"] = bool(data["enabled"])
         data["features"] = json.loads(data.pop("features_json") or "{}")
         data["settings"] = json.loads(data.pop("settings_json") or "{}")
+        return data
+
+
+    def create_edge_command(self, command: dict[str, Any]) -> dict[str, Any]:
+        import uuid
+        command_id=str(uuid.uuid4()); now=self.now()
+        with self._lock,self._conn() as conn:
+            conn.execute("INSERT INTO edge_commands(id,tenant_id,shop_id,edge_id,command_type,request_json,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (command_id,command["tenant_id"],command["shop_id"],command["edge_id"],command["command_type"],json.dumps(command.get("request") or {}),"PENDING",now))
+        return {"id":command_id,"status":"PENDING"}
+
+    def claim_edge_commands(self, tenant_id: str, shop_id: str, edge_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        with self._lock,self._conn() as conn:
+            rows=conn.execute("""SELECT * FROM edge_commands WHERE tenant_id=? AND shop_id=? AND edge_id=? AND status='PENDING'
+                ORDER BY created_at LIMIT ?""",(tenant_id,shop_id,edge_id,max(1,min(20,int(limit))))).fetchall()
+            result=[]
+            for row in rows:
+                conn.execute("UPDATE edge_commands SET status='CLAIMED',claimed_at=? WHERE id=? AND status='PENDING'",(self.now(),row["id"]))
+                result.append({"id":row["id"],"command_type":row["command_type"],"request":json.loads(row["request_json"])})
+            return result
+
+    def complete_edge_command(self, command_id: str, tenant_id: str, shop_id: str, edge_id: str, status: str, result: dict[str, Any]) -> bool:
+        with self._lock,self._conn() as conn:
+            out=conn.execute("""UPDATE edge_commands SET status=?,result_json=?,completed_at=? WHERE id=? AND tenant_id=? AND shop_id=? AND edge_id=? AND status='CLAIMED'""",
+                (status,json.dumps(result),self.now(),command_id,tenant_id,shop_id,edge_id))
+        return bool(out.rowcount)
+
+    def get_edge_command(self, command_id: str, tenant_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute("SELECT * FROM edge_commands WHERE id=? AND tenant_id=?",(command_id,tenant_id)).fetchone()
+        if not row: return None
+        data=dict(row); data["result"]=json.loads(data.pop("result_json")) if data.get("result_json") else None
+        data.pop("request_json",None)
         return data
