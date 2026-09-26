@@ -6,8 +6,10 @@ from typing import Any
 from dataclasses import dataclass
 import hashlib
 import hmac
+import secrets
+from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -91,6 +93,75 @@ def _enforce_edge_scope(principal: EdgePrincipal, payload: dict[str, Any]) -> No
     }.items():
         if expected is not None and str(payload.get(key) or "") != str(expected):
             raise HTTPException(403, f"Edge credential is not authorized for {key}")
+
+
+@dataclass(frozen=True)
+class PortalPrincipal:
+    session_id: str
+    tenant_id: str
+    company_code: str | None
+    shop_id: str
+    user_id: str | None
+    display_name: str | None
+    role: str
+
+
+class CrmPortalSessionRequest(BaseModel):
+    tenantId: str | None = None
+    companyCode: str | None = None
+    shopCode: str
+    userId: str | None = None
+    displayName: str | None = None
+    role: str = "USER"
+
+
+def _crm_integration_key_valid(value: str | None) -> bool:
+    expected=os.getenv("SNAPKEY_CRM_INTEGRATION_KEY","").strip()
+    return bool(expected and value and secrets.compare_digest(value.strip(),expected))
+
+
+@app.post("/crm/session")
+def create_crm_portal_session(payload: CrmPortalSessionRequest, request: Request):
+    supplied=request.headers.get("X-CRM-Integration-Key","")
+    if not _crm_integration_key_valid(supplied):
+        raise HTTPException(401,"Invalid CRM integration key")
+    shop=payload.shopCode.strip()
+    if not shop: raise HTTPException(400,"shopCode is required")
+    tenant=(payload.tenantId or payload.companyCode or "").strip()
+    if not tenant: raise HTTPException(400,"tenantId or companyCode is required")
+    session_id=secrets.token_urlsafe(18)
+    token=secrets.token_urlsafe(32)
+    now=datetime.now(timezone.utc)
+    ttl=max(5,min(240,int(os.getenv("SNAPKEY_PORTAL_SESSION_TTL_MINUTES","60"))))
+    expires=now+timedelta(minutes=ttl)
+    store.create_portal_session({
+        "session_id":session_id,"token_hash":_token_digest(token),"tenant_id":tenant,
+        "company_code":(payload.companyCode or "").strip() or None,"shop_id":shop,
+        "user_id":(payload.userId or "").strip() or None,"display_name":(payload.displayName or "").strip() or None,
+        "role":(payload.role or "USER").strip().upper(),"created_at":now.isoformat(),"expires_at":expires.isoformat(),
+    })
+    base=os.getenv("SNAPKEY_PUBLIC_BASE_URL","").rstrip("/")
+    launch=(base or "")+"/portal?sessionId="+quote(session_id)+"#session="+quote(token)
+    return {"sessionId":session_id,"expiresAt":expires.isoformat(),"launchUrl":launch}
+
+
+def require_portal_session(authorization: str | None = Header(default=None)) -> PortalPrincipal:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401,"Missing portal session")
+    token=authorization[7:].strip()
+    session=store.portal_session_by_hash(_token_digest(token))
+    if not session: raise HTTPException(401,"Invalid portal session")
+    if datetime.fromisoformat(str(session["expires_at"])) < datetime.now(timezone.utc):
+        raise HTTPException(401,"Portal session expired")
+    return PortalPrincipal(session_id=session["session_id"],tenant_id=session["tenant_id"],
+        company_code=session.get("company_code"),shop_id=session["shop_id"],user_id=session.get("user_id"),
+        display_name=session.get("display_name"),role=session["role"])
+
+
+@app.get("/session/status")
+def portal_session_status(principal: PortalPrincipal = Depends(require_portal_session)):
+    return {"sessionId":principal.session_id,"tenantId":principal.tenant_id,"companyCode":principal.company_code,
+        "shopCode":principal.shop_id,"userId":principal.user_id,"displayName":principal.display_name,"role":principal.role}
 
 
 @app.get("/health")
