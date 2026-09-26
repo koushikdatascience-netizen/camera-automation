@@ -1,6 +1,6 @@
 from __future__ import annotations
 from contextlib import contextmanager
-import json, sqlite3, threading, uuid
+import json, os, sqlite3, threading, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 from enum import Enum
 from camera_service.models import IdentitySeen
 from camera_service.object_security.alerts import ObjectSecurityAlerter
+from camera_service.domain import ResourceScope
+from camera_service.inference import build_runtime_router, select_runtime_backend
 
 class CameraRole(str, Enum):
     ENTRANCE_EXIT = "ENTRANCE_EXIT"
@@ -85,6 +87,8 @@ class CameraManager:
         self.db_path = db_path
         self._lock = threading.RLock()
         self._tracking_models = {}
+        self._inference_backends = {}
+        self._runtime_routers = {}
         self._tracking_error = None
         self._stream_active_tracks = {}
         self._alert_last_sent = {}
@@ -219,6 +223,48 @@ class CameraManager:
             c.execute("INSERT OR REPLACE INTO camera_status(camera_id,state,online) VALUES(?,?,0)",(config.camera_id,CameraState.STOPPED.value))
 
         return config
+
+    def apply_cloud_camera(self, camera_data: Dict[str, Any]) -> CameraConfig:
+        """Idempotently apply a cloud camera assignment to the local edge database."""
+        camera_id = str(camera_data.get("camera_id", "")).strip()
+        if not camera_id:
+            raise ValueError("camera_id is required")
+        source = str(camera_data.get("source") or camera_data.get("rtsp_url") or "").strip()
+        if not source:
+            raise ValueError(f"camera {camera_id} has no source")
+        settings = camera_data.get("settings") or {}
+        features = camera_data.get("features") or {}
+        supported_features = {
+            "attendance", "face_recognition", "unknown_detection", "unknown_person_detection",
+            "shoplifting", "shoplifting_detection", "object_security",
+        }
+        local_features = {key: bool(value) for key, value in features.items() if key in supported_features}
+        payload = {
+            "camera_id": camera_id,
+            "name": camera_data.get("name") or camera_id,
+            "source_type": camera_data.get("source_type") or "rtsp",
+            "rtsp_url": source,
+            "enabled": bool(camera_data.get("enabled", True)),
+            "camera_role": camera_data.get("camera_role") or CameraRole.GENERAL.value,
+            "camera_zone": self._normalize_cloud_zone(camera_data.get("camera_zone")),
+            "crowd_threshold": camera_data.get("crowd_threshold", 10),
+            "tracking_fps": settings.get("tracking_fps", 3.0),
+            "tracking_imgsz": settings.get("max_frame_width", settings.get("tracking_imgsz", 384)),
+            "tracking_quality": settings.get("tracking_quality", 65),
+            "tracking_mode": settings.get("tracking_mode", "detect"),
+            "features": local_features,
+        }
+        existing = self.get_camera(camera_id)
+        if existing:
+            return self.update_camera(camera_id, payload)
+        return self.create_camera(payload)
+
+    @staticmethod
+    def _normalize_cloud_zone(value: Any) -> str:
+        zone = str(value or "").strip().lower()
+        if zone in {"outside", "outdoor", "external", "exterior"}:
+            return CameraZone.OUTSIDE.value
+        return CameraZone.INSIDE.value
 
     def get_camera(self, camera_id: str) -> Optional[CameraConfig]:
         """Get camera configuration by ID"""
@@ -576,27 +622,86 @@ class CameraManager:
     def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None, object_security_model_path: str | None = None, object_security_confidence: float = 0.55):
         try:
             overlays = []
-            model = self._tracking_models.get(model_path)
-            if model is None:
-                from ultralytics import YOLO
+            imgsz = int(getattr(camera_config, "tracking_imgsz", 384) or 384)
+            mode = getattr(camera_config, "tracking_mode", "detect") or "detect"
+            router_setting = os.environ.get("SNAPKEY_INFERENCE_ROUTER_ENABLED", "1").strip().lower()
+            use_router = router_setting not in {"0", "false", "no", "off"}
 
-                model = YOLO(model_path)
-                self._tracking_models[model_path] = model
+            if use_router:
+                backend = self._inference_backends.get(model_path)
+                if backend is None:
+                    router, capability = build_runtime_router(model_path)
+                    backend = select_runtime_backend(router)
+                    self._runtime_routers[model_path] = router
+                    self._inference_backends[model_path] = backend
+                    if stream_state is not None:
+                        stream_state["inference_capability"] = capability
+                camera_id_for_scope = getattr(camera_config, "camera_id", None) or "camera-unknown"
+                scope = ResourceScope(
+                    tenant_id=os.environ.get("SNAPKEY_TENANT_ID", "legacy-tenant"),
+                    company_code=os.environ.get("SNAPKEY_COMPANY_CODE") or None,
+                    shop_id=os.environ.get("SNAPKEY_SHOP_ID", "legacy-shop"),
+                    edge_id=os.environ.get("SNAPKEY_EDGE_ID", "legacy-edge"),
+                    camera_id=camera_id_for_scope,
+                )
+                normalized = backend.infer(
+                    frame,
+                    scope=scope,
+                    frame_id=f"{camera_id_for_scope}-{time.time_ns()}",
+                    tracking=(mode == "track"),
+                    imgsz=imgsz,
+                    conf=0.20,
+                    max_det=40,
+                )
+                names = {}
+                class_ids = {}
+                xyxy, confs, classes, track_ids = [], [], [], []
+                for detection in normalized.detections:
+                    class_id = int(detection.attributes.get("class_id", -1))
+                    names[class_id] = detection.class_name
+                    class_ids[detection.class_name] = class_id
+                    xyxy.append(detection.bbox_xyxy)
+                    confs.append(detection.confidence)
+                    classes.append(class_id)
+                    track_ids.append(detection.track_id)
+                if mode != "track":
+                    track_ids = list(range(1, len(xyxy) + 1))
+                elif any(track_id is None for track_id in track_ids):
+                    track_ids = [
+                        track_id if track_id is not None else index
+                        for index, track_id in enumerate(track_ids, start=1)
+                    ]
+                if stream_state is not None:
+                    stream_state["inference_backend"] = normalized.backend_type.value
+                    stream_state["inference_latency_ms"] = normalized.inference_latency_ms
+            else:
+                model = self._tracking_models.get(model_path)
+                if model is None:
+                    from ultralytics import YOLO
 
-            try:
-                imgsz = int(getattr(camera_config, "tracking_imgsz", 384) or 384)
-                mode = getattr(camera_config, "tracking_mode", "detect") or "detect"
-                if mode == "track":
-                    results = model.track(
-                        frame,
-                        persist=True,
-                        tracker="bytetrack.yaml",
-                        conf=0.20,
-                        imgsz=imgsz,
-                        max_det=40,
-                        verbose=False,
-                    )
-                else:
+                    model = YOLO(model_path)
+                    self._tracking_models[model_path] = model
+
+                try:
+                    if mode == "track":
+                        results = model.track(
+                            frame,
+                            persist=True,
+                            tracker="bytetrack.yaml",
+                            conf=0.20,
+                            imgsz=imgsz,
+                            max_det=40,
+                            verbose=False,
+                        )
+                    else:
+                        results = model.predict(
+                            frame,
+                            conf=0.20,
+                            imgsz=imgsz,
+                            max_det=40,
+                            verbose=False,
+                        )
+                except Exception:
                     results = model.predict(
                         frame,
                         conf=0.20,
@@ -604,47 +709,39 @@ class CameraManager:
                         max_det=40,
                         verbose=False,
                     )
-            except Exception:
-                results = model.predict(
-                    frame,
-                    conf=0.20,
-                    imgsz=int(getattr(camera_config, "tracking_imgsz", 384) or 384),
-                    max_det=40,
-                    verbose=False,
-                )
-            if not results:
-                if stream_state is not None:
-                    stream_state["latest_overlays"] = []
-                    stream_state["latest_summary"] = {
-                        "people": 0,
-                        "objects": 0,
-                        "known": 0,
-                        "unknown": 0,
-                        "updated_at": time.monotonic(),
-                        "error": None,
-                    }
-                return frame
+                if not results:
+                    if stream_state is not None:
+                        stream_state["latest_overlays"] = []
+                        stream_state["latest_summary"] = {
+                            "people": 0,
+                            "objects": 0,
+                            "known": 0,
+                            "unknown": 0,
+                            "updated_at": time.monotonic(),
+                            "error": None,
+                        }
+                    return frame
 
-            result = results[0]
-            names = getattr(result, "names", {}) or {}
-            boxes = result.boxes
-            if boxes is None:
-                if stream_state is not None:
-                    stream_state["latest_overlays"] = []
-                    stream_state["latest_summary"] = {
-                        "people": 0,
-                        "objects": 0,
-                        "known": 0,
-                        "unknown": 0,
-                        "updated_at": time.monotonic(),
-                        "error": None,
-                    }
-                return frame
+                result = results[0]
+                names = getattr(result, "names", {}) or {}
+                boxes = result.boxes
+                if boxes is None:
+                    if stream_state is not None:
+                        stream_state["latest_overlays"] = []
+                        stream_state["latest_summary"] = {
+                            "people": 0,
+                            "objects": 0,
+                            "known": 0,
+                            "unknown": 0,
+                            "updated_at": time.monotonic(),
+                            "error": None,
+                        }
+                    return frame
 
-            xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else []
-            confs = boxes.conf.cpu().tolist() if boxes.conf is not None else []
-            classes = boxes.cls.int().cpu().tolist() if boxes.cls is not None else []
-            track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else list(range(1, len(xyxy) + 1))
+                xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else []
+                confs = boxes.conf.cpu().tolist() if boxes.conf is not None else []
+                classes = boxes.cls.int().cpu().tolist() if boxes.cls is not None else []
+                track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else list(range(1, len(xyxy) + 1))
             active_known_tracks = set()
             now = time.monotonic()
             camera_id = camera_config.camera_id if camera_config is not None else None

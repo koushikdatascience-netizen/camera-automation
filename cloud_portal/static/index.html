@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>SnapKey Eye | System Status</title>
+
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+
+  <aside class="sidebar">
+
+    <div class="logo">
+      <img src="/static/assets/snapkey.png" alt="SnapKey Eye">
+
+      <div class="logo-text">
+        <strong>SnapKey Eye</strong>
+        <span>Admin Dashboard</span>
+      </div>
+    </div>
+
+    <nav class="nav-menu">
+
+      <a href="/portal" class="nav-item active">
+        ⚡ <span>System Status</span>
+      </a>
+
+      <a href="/portal/cameras.html" class="nav-item">
+        📷 <span>Cameras</span>
+      </a>
+
+      <a href="/portal/personnel.html" class="nav-item">
+        👥 <span>Personnel</span>
+      </a>
+
+      <a href="/portal/attendance.html" class="nav-item">
+        📋 <span>Attendance</span>
+      </a>
+
+    </nav>
+
+  </aside>
+
+
+  <main class="main">
+
+    <header class="header">
+
+      <div class="header-date">
+        Thursday, September 24, 2026
+      </div>
+
+      <div class="profile">
+
+        <div class="avatar">
+          SS
+        </div>
+
+        <div class="profile-info">
+          <strong>Saumya Singh</strong>
+          <span>Administrator</span>
+        </div>
+
+      </div>
+
+    </header>
+
+
+    <section class="content">
+
+      <div class="page-title">
+        <h1>System Status</h1>
+        <p>Monitor your surveillance system in real time.</p>
+      </div>
+
+
+      <div class="status-grid">
+
+        <div class="status-card">
+
+          <div class="card-top">
+            <h3>Application Status</h3>
+            <div class="card-icon">⚡</div>
+          </div>
+
+          <div class="status-value" id="application-status">
+            <span class="status-dot"></span>
+            Online
+          </div>
+
+          <div class="status-description">
+            All services operational
+          </div>
+
+        </div>
+
+
+        <div class="status-card">
+
+          <div class="card-top">
+            <h3>Database Status</h3>
+            <div class="card-icon">▣</div>
+          </div>
+
+          <div class="status-value" id="database-status">
+            <span class="status-dot"></span>
+            Connected
+          </div>
+
+          <div class="status-description">
+            Database connection healthy
+          </div>
+
+        </div>
+
+
+        <div class="status-card">
+
+          <div class="card-top">
+            <h3>Configured Cameras</h3>
+            <div class="card-icon">📷</div>
+          </div>
+
+          <div class="status-value" id="configured-cameras">—</div>
+
+          <div class="status-description">
+            Camera configured
+          </div>
+
+        </div>
+
+
+        <div class="status-card">
+
+          <div class="card-top">
+            <h3>Online Cameras</h3>
+            <div class="card-icon">●</div>
+          </div>
+
+          <div class="status-value" id="online-cameras">—</div>
+
+          <div class="status-description">
+            No cameras currently online
+          </div>
+
+        </div>
+
+
+        <div class="status-card">
+
+          <div class="card-top">
+            <h3>Active Personnel</h3>
+            <div class="card-icon">👥</div>
+          </div>
+
+          <div class="status-value" id="active-personnel">—</div>
+
+          <div class="status-description">
+            No personnel currently active
+          </div>
+
+        </div>
+
+
+        <div class="status-card">
+
+          <div class="card-top">
+            <h3>Unknown Incidents Today</h3>
+            <div class="card-icon">⚠</div>
+          </div>
+
+          <div class="status-value" id="unknown-incidents">—</div>
+
+          <div class="status-description">
+            Incidents detected today
+          </div>
+
+        </div>
+
+      </div>
+
+
+      <div class="health-banner">
+
+        <div>
+          <h2>Intelligent Monitoring. Safer Spaces.</h2>
+          <p>SnapKey Eye is actively monitoring your environment.</p>
+        </div>
+
+        <div class="health-badge">
+          ● System Healthy
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <script src="/static/js/main.js"></script>
+</body>
+</html>

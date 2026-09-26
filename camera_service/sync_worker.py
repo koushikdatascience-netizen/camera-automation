@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
+from camera_service.camera.onvif import probe_onvif, select_profile
 
 
 @dataclass
@@ -27,12 +29,13 @@ class SyncRunResult:
 class EdgeSyncWorker:
     """Best-effort local queue drain for cloud portal/mobile visibility."""
 
-    def __init__(self, store, cloud_client, edge_config, sync_config, license_manager):
+    def __init__(self, store, cloud_client, edge_config, sync_config, license_manager, camera_manager=None):
         self.store = store
         self.cloud_client = cloud_client
         self.edge_config = edge_config
         self.sync_config = sync_config
         self.license_manager = license_manager
+        self.camera_manager = camera_manager
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -72,6 +75,34 @@ class EdgeSyncWorker:
 
             synced = 0
             failed = 0
+            command_sync = {"fetched": 0, "completed": 0, "failed": 0}
+            try:
+                commands = self.cloud_client.edge_commands()
+                command_sync["fetched"] = len(commands)
+                for command in commands:
+                    try:
+                        result = self._execute_command(command)
+                        self.cloud_client.complete_edge_command(command["id"], {"ok": True, **result})
+                        command_sync["completed"] += 1
+                    except Exception as exc:
+                        self.cloud_client.complete_edge_command(command["id"], {"ok": False, "error": str(exc)})
+                        command_sync["failed"] += 1
+            except Exception as exc:
+                command_sync["error"] = str(exc)
+            camera_sync = {"fetched": 0, "applied": 0, "failed": 0}
+            if self.camera_manager is not None:
+                try:
+                    assignment = self.cloud_client.camera_config()
+                    items = assignment.get("items") or []
+                    camera_sync["fetched"] = len(items)
+                    for camera in items:
+                        try:
+                            self.camera_manager.apply_cloud_camera(camera)
+                            camera_sync["applied"] += 1
+                        except Exception:
+                            camera_sync["failed"] += 1
+                except Exception as exc:
+                    camera_sync["error"] = str(exc)
             for row in self.store.queued_events(getattr(self.sync_config, "batch_size", 50)):
                 try:
                     event = json.loads(row["payload_json"])
@@ -79,12 +110,29 @@ class EdgeSyncWorker:
                     self.store.mark_event_synced(row["id"])
                     synced += 1
                 except Exception as exc:
-                    self.store.mark_event_failed(row["id"], str(exc))
+                    attempts = int(row.get("attempts", 0) or 0) + 1
+                    retry_after = min(300.0, max(2.0, 2.0 ** min(attempts, 8)))
+                    self.store.mark_event_failed(row["id"], str(exc), retry_after_seconds=retry_after)
                     failed += 1
 
             result = SyncRunResult(enabled=True, synced=synced, failed=failed)
-            self._remember(result)
+            self._remember(result, {"camera_sync": camera_sync, "command_sync": command_sync})
             return result
+
+    def _execute_command(self, command: dict[str, Any]) -> dict[str, Any]:
+        command_type=str(command.get("command_type") or "")
+        request=command.get("request") or {}
+        if command_type=="ONVIF_PROBE":
+            result=probe_onvif(str(request.get("host") or ""),int(request.get("port") or 80),
+                               str(request.get("username") or ""),str(request.get("password") or ""))
+            result["recommended_profile"]=select_profile(result.get("profiles") or [],str(request.get("purpose") or "ai"))
+            return result
+        if command_type=="CAMERA_TEST":
+            if self.camera_manager is None: raise RuntimeError("camera manager is unavailable")
+            source=str(request.get("source") or "")
+            result=self.camera_manager.test_rtsp_connection(source)
+            return result if isinstance(result,dict) else {"connected":bool(result)}
+        raise RuntimeError(f"Unsupported edge command: {command_type}")
 
     def status(self) -> dict[str, Any]:
         return {

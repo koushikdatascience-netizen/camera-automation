@@ -3,17 +3,37 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from dataclasses import dataclass
+import hashlib
+import hmac
+import secrets
+from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from pydantic import BaseModel, Field
 
 from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
+from cloud_portal.postgres_storage import PostgresPortalStore
 
 
-store = PortalStore(os.getenv("SNAPKEY_PORTAL_DB", "data/cloud_portal.db"))
+def build_portal_store():
+    database_url = os.getenv("SNAPKEY_DATABASE_URL", "").strip()
+    if database_url:
+        return PostgresPortalStore(database_url)
+    if os.getenv("SNAPKEY_ENV", "development").strip().lower() == "production":
+        raise RuntimeError("SNAPKEY_DATABASE_URL is required in production")
+    return PortalStore(os.getenv("SNAPKEY_PORTAL_DB", "data/cloud_portal.db"))
+
+
+store = build_portal_store()
 app = FastAPI(title="SnapKey Vision AI Portal")
+if os.getenv("SNAPKEY_ENABLE_CLOUD_INFERENCE", "0").strip() == "1":
+    from cloud_portal.inference_api import router as inference_router
+    app.include_router(inference_router)
 
 
 class LicenseIssueRequest(BaseModel):
@@ -28,12 +48,120 @@ class LicenseIssueRequest(BaseModel):
     grace_days: int = 7
 
 
-def require_edge_token(authorization: str | None = Header(default=None)) -> None:
-    expected = os.getenv("SNAPKEY_EDGE_API_TOKEN", "").strip()
-    if not expected:
+@dataclass(frozen=True)
+class EdgePrincipal:
+    tenant_id: str | None = None
+    company_code: str | None = None
+    shop_id: str | None = None
+    site_id: str | None = None
+    edge_id: str | None = None
+    legacy_global: bool = False
+
+
+def _production() -> bool:
+    return os.getenv("SNAPKEY_ENV", "development").strip().lower() == "production"
+
+
+def _token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def require_edge_token(authorization: str | None = Header(default=None)) -> EdgePrincipal:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing edge API token")
+    token = authorization[7:].strip()
+    principal = store.resolve_edge_credential(_token_digest(token))
+    if principal:
+        return EdgePrincipal(**principal)
+    legacy = os.getenv("SNAPKEY_EDGE_API_TOKEN", "").strip()
+    if legacy and hmac.compare_digest(token, legacy):
+        if _production() and os.getenv("SNAPKEY_ALLOW_LEGACY_GLOBAL_EDGE_TOKEN", "0").strip() != "1":
+            raise HTTPException(401, "Legacy global edge token is disabled in production")
+        return EdgePrincipal(legacy_global=True)
+    raise HTTPException(401, "Invalid edge API token")
+
+
+def _enforce_edge_scope(principal: EdgePrincipal, payload: dict[str, Any]) -> None:
+    if principal.legacy_global:
         return
-    if authorization != f"Bearer {expected}":
-        raise HTTPException(401, "Invalid edge API token")
+    for key, expected in {
+        "tenant_id": principal.tenant_id,
+        "company_code": principal.company_code,
+        "shop_id": principal.shop_id,
+        "site_id": principal.site_id,
+        "edge_id": principal.edge_id,
+    }.items():
+        if expected is not None and str(payload.get(key) or "") != str(expected):
+            raise HTTPException(403, f"Edge credential is not authorized for {key}")
+
+
+@dataclass(frozen=True)
+class PortalPrincipal:
+    session_id: str
+    tenant_id: str
+    company_code: str | None
+    shop_id: str
+    user_id: str | None
+    display_name: str | None
+    role: str
+
+
+class CrmPortalSessionRequest(BaseModel):
+    tenantId: str | None = None
+    companyCode: str | None = None
+    shopCode: str
+    userId: str | None = None
+    displayName: str | None = None
+    role: str = "USER"
+
+
+def _crm_integration_key_valid(value: str | None) -> bool:
+    expected=os.getenv("SNAPKEY_CRM_INTEGRATION_KEY","").strip()
+    return bool(expected and value and secrets.compare_digest(value.strip(),expected))
+
+
+@app.post("/crm/session")
+def create_crm_portal_session(payload: CrmPortalSessionRequest, request: Request):
+    supplied=request.headers.get("X-CRM-Integration-Key","")
+    if not _crm_integration_key_valid(supplied):
+        raise HTTPException(401,"Invalid CRM integration key")
+    shop=payload.shopCode.strip()
+    if not shop: raise HTTPException(400,"shopCode is required")
+    tenant=(payload.tenantId or payload.companyCode or "").strip()
+    if not tenant: raise HTTPException(400,"tenantId or companyCode is required")
+    session_id=secrets.token_urlsafe(18)
+    token=secrets.token_urlsafe(32)
+    now=datetime.now(timezone.utc)
+    ttl=max(5,min(240,int(os.getenv("SNAPKEY_PORTAL_SESSION_TTL_MINUTES","60"))))
+    expires=now+timedelta(minutes=ttl)
+    store.create_portal_session({
+        "session_id":session_id,"token_hash":_token_digest(token),"tenant_id":tenant,
+        "company_code":(payload.companyCode or "").strip() or None,"shop_id":shop,
+        "user_id":(payload.userId or "").strip() or None,"display_name":(payload.displayName or "").strip() or None,
+        "role":(payload.role or "USER").strip().upper(),"created_at":now.isoformat(),"expires_at":expires.isoformat(),
+    })
+    base=os.getenv("SNAPKEY_PUBLIC_BASE_URL","").rstrip("/")
+    launch=(base or "")+"/portal?sessionId="+quote(session_id)+"#session="+quote(token)
+    return {"sessionId":session_id,"expiresAt":expires.isoformat(),"launchUrl":launch}
+
+
+def require_portal_session(authorization: str | None = Header(default=None)) -> PortalPrincipal:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401,"Missing portal session")
+    token=authorization[7:].strip()
+    session=store.portal_session_by_hash(_token_digest(token))
+    if not session: raise HTTPException(401,"Invalid portal session")
+    if datetime.fromisoformat(str(session["expires_at"])) < datetime.now(timezone.utc):
+        raise HTTPException(401,"Portal session expired")
+    return PortalPrincipal(session_id=session["session_id"],tenant_id=session["tenant_id"],
+        company_code=session.get("company_code"),shop_id=session["shop_id"],user_id=session.get("user_id"),
+        display_name=session.get("display_name"),role=session["role"])
+
+
+@app.get("/session/status")
+def portal_session_status(principal: PortalPrincipal = Depends(require_portal_session)):
+    return {"sessionId":principal.session_id,"tenantId":principal.tenant_id,"companyCode":principal.company_code,
+        "shopCode":principal.shop_id,"userId":principal.user_id,"displayName":principal.display_name,"role":principal.role}
 
 
 @app.get("/health")
@@ -41,155 +169,143 @@ def health():
     return {"status": "ok", "service": "snapkey-portal"}
 
 
-@app.get("/", response_class=HTMLResponse)
-@app.get("/portal", response_class=HTMLResponse)
+PORTAL_STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=PORTAL_STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/portal", include_in_schema=False)
 def portal_home():
-    return HTMLResponse(
-        """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SnapKey Vision AI Portal</title>
-  <style>
-    :root {
-      --ink: #14213d;
-      --muted: #64748b;
-      --line: #e2e8f0;
-      --surface: #ffffff;
-      --soft: #f6f9fc;
-      --brand: #0f6fff;
-      --brand-dark: #0b3d91;
-      --cyan: #00bcd4;
-      --success: #16a34a;
-      --warning: #d97706;
-      --danger: #dc2626;
-      --shadow: 0 18px 45px rgba(15, 35, 70, 0.08);
+    return FileResponse(PORTAL_STATIC_DIR / "index.html")
+
+
+@app.get("/portal/{page_name}", include_in_schema=False)
+def portal_page(page_name: str):
+    allowed = {"index.html", "cameras.html", "personnel.html", "attendance.html"}
+    if page_name not in allowed:
+        raise HTTPException(404, "Portal page not found")
+    return FileResponse(PORTAL_STATIC_DIR / page_name)
+
+class PortalCameraConfig(BaseModel):
+    tenant_id: str
+    company_code: str | None = None
+    shop_id: str
+    site_id: str
+    edge_id: str
+    camera_id: str
+    name: str
+    source_type: str = "rtsp"
+    source: str
+    camera_role: str = "GENERAL"
+    camera_zone: str | None = None
+    crowd_threshold: int = 10
+    enabled: bool = True
+    features: dict[str, bool] = Field(default_factory=dict)
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+
+def _portal_scope(tenant_id: str, principal: PortalPrincipal) -> None:
+    if principal.tenant_id != tenant_id:
+        raise HTTPException(403,"Portal session is not authorized for this tenant")
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/cameras")
+def portal_cameras(tenant_id: str, shop_id: str | None = None, edge_id: str | None = None, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if shop_id and shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
+    return {"items": store.list_cameras(tenant_id, shop_id=principal.shop_id, edge_id=edge_id)}
+
+
+@app.put("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
+def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConfig, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if request.shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
+    if request.tenant_id != tenant_id or request.camera_id != camera_id:
+        raise HTTPException(400, "Camera scope does not match request path")
+    if request.source_type not in {"rtsp", "file", "webcam"}:
+        raise HTTPException(400, "Unsupported camera source type")
+    if not request.source.strip():
+        raise HTTPException(400, "Camera source is required")
+    return {"camera": store.upsert_camera(request.model_dump())}
+
+
+@app.delete("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
+def delete_portal_camera(tenant_id: str, camera_id: str, shop_id: str, edge_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
+    if not store.delete_camera(tenant_id, shop_id, edge_id, camera_id):
+        raise HTTPException(404, "Camera not found")
+    return {"deleted": True}
+
+
+class EdgeCommandRequest(BaseModel):
+    tenant_id: str
+    shop_id: str
+    edge_id: str
+    command_type: str
+    request: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/portal/v1/tenants/{tenant_id}/edge-commands")
+def create_portal_edge_command(tenant_id: str, request: EdgeCommandRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if request.shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
+    if request.tenant_id != tenant_id:
+        raise HTTPException(400, "Command tenant does not match request path")
+    if request.command_type not in {"ONVIF_PROBE", "CAMERA_TEST"}:
+        raise HTTPException(400, "Unsupported edge command")
+    return store.create_edge_command(request.model_dump())
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/edge-commands/{command_id}")
+def portal_edge_command(tenant_id: str, command_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    command=store.get_edge_command(command_id, tenant_id)
+    if not command: raise HTTPException(404, "Edge command not found")
+    return command
+
+
+@app.get("/edge/v1/commands")
+def edge_commands(principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global:
+        raise HTTPException(403, "Scoped edge credential is required for commands")
+    return {"items":store.claim_edge_commands(principal.tenant_id,principal.shop_id,principal.edge_id)}
+
+
+@app.post("/edge/v1/commands/{command_id}/result")
+def edge_command_result(command_id: str, result: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global:
+        raise HTTPException(403, "Scoped edge credential is required for commands")
+    status="SUCCEEDED" if result.get("ok",False) else "FAILED"
+    if not store.complete_edge_command(command_id,principal.tenant_id,principal.shop_id,principal.edge_id,status,result):
+        raise HTTPException(404, "Claimed edge command not found")
+    return {"ok":True}
+
+
+@app.get("/edge/v1/config/cameras")
+def edge_camera_config(principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global:
+        raise HTTPException(403, "Scoped edge credential is required for camera configuration")
+    return {
+        "tenant_id": principal.tenant_id,
+        "company_code": principal.company_code,
+        "shop_id": principal.shop_id,
+        "site_id": principal.site_id,
+        "edge_id": principal.edge_id,
+        "items": store.list_cameras(principal.tenant_id, shop_id=principal.shop_id, edge_id=principal.edge_id),
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: Inter, "Segoe UI", Tahoma, sans-serif; }
-    body { min-height: 100vh; background: linear-gradient(180deg, #f7fbff 0%, #eef5fb 100%); color: var(--ink); }
-    header { background: rgba(255,255,255,.93); border-bottom: 1px solid var(--line); position: sticky; top: 0; backdrop-filter: blur(14px); z-index: 2; }
-    .shell { max-width: 1280px; margin: 0 auto; padding: 22px; }
-    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
-    .brand { display: flex; align-items: center; gap: 12px; }
-    .mark { width: 44px; height: 44px; border-radius: 8px; display: grid; place-items: center; color: white; font-weight: 800; background: linear-gradient(135deg, var(--brand), var(--cyan)); box-shadow: 0 12px 24px rgba(15,111,255,.22); }
-    h1 { font-size: 22px; letter-spacing: 0; }
-    .subtitle, .muted { color: var(--muted); font-size: 13px; }
-    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    input, select { height: 40px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 0 12px; background: white; min-width: 190px; }
-    button { height: 40px; border: 0; border-radius: 8px; padding: 0 15px; font-weight: 800; color: white; background: linear-gradient(135deg, var(--brand), #0aa9d6); cursor: pointer; }
-    main { max-width: 1280px; margin: 0 auto; padding: 24px 22px; }
-    .hero { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 18px; align-items: stretch; margin-bottom: 18px; }
-    .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 20px; }
-    .hero h2 { font-size: 30px; line-height: 1.15; margin-bottom: 10px; }
-    .badge { display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; padding: 7px 10px; background: #eaf3ff; color: var(--brand-dark); font-size: 12px; font-weight: 800; margin-bottom: 12px; }
-    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 14px; margin-bottom: 18px; }
-    .metric { background: linear-gradient(180deg,#fff,#f8fbff); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
-    .metric span { color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
-    .metric strong { display: block; font-size: 26px; margin-top: 7px; }
-    .grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 18px; }
-    table { width: 100%; border-collapse: collapse; min-width: 780px; }
-    th, td { border-bottom: 1px solid #edf2f7; padding: 13px 14px; text-align: left; font-size: 13px; vertical-align: top; }
-    th { color: #475569; background: #f8fafc; font-size: 11px; text-transform: uppercase; }
-    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; margin-top: 14px; }
-    .status { color: var(--success); font-weight: 800; }
-    .event-type { color: var(--brand-dark); font-weight: 800; }
-    .list { display: grid; gap: 12px; margin-top: 14px; }
-    .list div { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fbfdff; }
-    @media (max-width: 900px) { .hero, .grid, .metrics { grid-template-columns: 1fr; } .topbar { align-items: flex-start; flex-direction: column; } }
-  </style>
-</head>
-<body>
-  <header>
-    <div class="shell topbar">
-      <div class="brand">
-        <div class="mark">SK</div>
-        <div>
-          <h1>SnapKey Vision AI</h1>
-          <div class="subtitle">Cloud command center</div>
-        </div>
-      </div>
-      <div class="toolbar">
-        <input id="tenant" value="tenant-demo" placeholder="Tenant ID">
-        <input id="site" value="" placeholder="Site ID optional">
-        <button onclick="loadPortal()">Refresh</button>
-      </div>
-    </div>
-  </header>
-  <main>
-    <section class="hero">
-      <div class="panel">
-        <div class="badge">AI-Powered Platform</div>
-        <h2>Multi-tenant visibility for every local edge site.</h2>
-        <p class="muted">Track attendance, unknown incidents, crowd events, and object-security alerts while video intelligence remains on the client machine.</p>
-      </div>
-      <div class="panel">
-        <div class="badge">Edge Status</div>
-        <p class="muted">Portal API</p>
-        <h2 id="portal-status" class="status">Ready</h2>
-      </div>
-    </section>
-    <section class="metrics">
-      <div class="metric"><span>Sites</span><strong id="metric-sites">0</strong></div>
-      <div class="metric"><span>Edges</span><strong id="metric-edges">0</strong></div>
-      <div class="metric"><span>Alerts</span><strong id="metric-alerts">0</strong></div>
-      <div class="metric"><span>Attendance</span><strong id="metric-attendance">0</strong></div>
-    </section>
-    <section class="grid">
-      <div class="panel">
-        <h2>Latest Events</h2>
-        <p class="muted">Tenant-filtered events received from local client machines.</p>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Time</th><th>Type</th><th>Site</th><th>Camera</th><th>Details</th></tr></thead>
-            <tbody id="events"><tr><td colspan="5">No events loaded.</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="panel">
-        <h2>Event Mix</h2>
-        <p class="muted">Live breakdown for the selected tenant.</p>
-        <div id="event-mix" class="list"></div>
-      </div>
-    </section>
-  </main>
-  <script>
-    async function loadPortal() {
-      const tenant = document.getElementById('tenant').value.trim() || 'tenant-demo';
-      const site = document.getElementById('site').value.trim();
-      const summary = await fetch(`/portal/v1/tenants/${encodeURIComponent(tenant)}/summary`).then(r => r.json());
-      const params = new URLSearchParams({ limit: '50' });
-      if (site) params.set('site_id', site);
-      const events = await fetch(`/portal/v1/tenants/${encodeURIComponent(tenant)}/events?${params}`).then(r => r.json());
-      const counts = summary.events || {};
-      document.getElementById('metric-sites').textContent = summary.sites || 0;
-      document.getElementById('metric-edges').textContent = summary.edges || 0;
-      document.getElementById('metric-alerts').textContent = Object.entries(counts).filter(([k]) => k.includes('ALERT') || k.includes('INCIDENT')).reduce((a, [,v]) => a + v, 0);
-      document.getElementById('metric-attendance').textContent = (counts.ATTENDANCE_ENTRY || 0) + (counts.ATTENDANCE_EXIT || 0);
-      document.getElementById('event-mix').innerHTML = Object.keys(counts).length ? Object.entries(counts).map(([k,v]) => `<div><strong>${k}</strong><br><span class="muted">${v} event(s)</span></div>`).join('') : '<div>No events yet</div>';
-      document.getElementById('events').innerHTML = (events.items || []).length ? events.items.map(item => {
-        const metadata = item.payload && item.payload.payload && item.payload.payload.metadata ? item.payload.payload.metadata : {};
-        const detail = metadata.object_label || metadata.person_count || metadata.snapshot_path || metadata.track_id || '';
-        return `<tr><td>${item.event_time || '-'}</td><td class="event-type">${item.event_type}</td><td>${item.site_id}</td><td>${item.camera_id || '-'}</td><td>${detail}</td></tr>`;
-      }).join('') : '<tr><td colspan="5">No events found for this tenant.</td></tr>';
-    }
-    loadPortal().catch(() => { document.getElementById('portal-status').textContent = 'Check API'; });
-  </script>
-</body>
-</html>
-        """
-    )
 
 
 @app.post("/edge/v1/events")
-def ingest_edge_event(envelope: dict[str, Any], _=Depends(require_edge_token)):
+def ingest_edge_event(envelope: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
     required = ["schema_version", "tenant_id", "site_id", "edge_id", "event_id", "event_type", "event_time", "payload"]
     missing = [key for key in required if not envelope.get(key)]
     if missing:
         raise HTTPException(400, {"missing": missing})
     if envelope["schema_version"] != "edge.event.v1":
         raise HTTPException(400, "Unsupported event schema")
+    _enforce_edge_scope(principal, envelope)
     return store.ingest_event(envelope)
 
 
@@ -224,3 +340,13 @@ def issue_license(request: LicenseIssueRequest):
         "grace_until": grace.isoformat(),
     }
     return {"license": payload, "signature": sign_license_payload(payload, private_key)}
+
+
+@app.post("/edge/v1/heartbeat")
+def edge_heartbeat(payload: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
+    required = ["tenant_id", "site_id", "edge_id", "status"]
+    missing = [key for key in required if payload.get(key) is None]
+    if missing:
+        raise HTTPException(400, {"missing": missing})
+    _enforce_edge_scope(principal, payload)
+    return store.record_heartbeat(payload)

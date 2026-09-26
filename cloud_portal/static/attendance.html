@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>SnapKey Eye | Attendance</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+
+<!-- SIDEBAR -->
+<aside class="sidebar">
+
+  <div class="logo">
+    <img src="/static/assets/snapkey.png" alt="SnapKey Eye">
+
+    <div class="logo-text">
+      <strong>SnapKey Eye</strong>
+      <span>Admin Dashboard</span>
+    </div>
+  </div>
+
+  <nav class="nav-menu">
+
+    <a href="/portal" class="nav-item">
+      ⚡ <span>System Status</span>
+    </a>
+
+    <a href="/portal/cameras.html" class="nav-item">
+      📷 <span>Cameras</span>
+    </a>
+
+    <a href="/portal/personnel.html" class="nav-item">
+      👥 <span>Personnel</span>
+    </a>
+
+    <a href="/portal/attendance.html" class="nav-item active">
+      📋 <span>Attendance</span>
+    </a>
+
+  </nav>
+
+</aside>
+
+
+<!-- MAIN -->
+<main class="main">
+
+  <!-- HEADER -->
+  <header class="header">
+
+    <div class="header-date">
+      Thursday, September 24, 2026
+    </div>
+
+    <div class="profile">
+
+      <div class="avatar">SS</div>
+
+      <div class="profile-info">
+        <strong>Saumya Singh</strong>
+        <span>Administrator</span>
+      </div>
+
+    </div>
+
+  </header>
+
+
+  <section class="content attendance-content">
+
+    <!-- PAGE TITLE -->
+
+    <div class="page-title attendance-heading">
+
+      <div>
+        <h1>Attendance Management</h1>
+
+        <p>
+          Monitor attendance, presence and personnel activity.
+        </p>
+      </div>
+
+      <button class="btn btn-primary">
+        Export Report
+      </button>
+
+    </div>
+
+
+    <!-- FILTERS -->
+
+    <div class="attendance-card filter-card">
+
+      <div class="attendance-card-header">
+
+        <div>
+          <h2>Filters</h2>
+          <p>Refine attendance records by date, person or status.</p>
+        </div>
+
+      </div>
+
+
+      <div class="attendance-filters">
+
+        <div class="form-group">
+
+          <label>From Date</label>
+
+          <input
+            type="date"
+            value="2026-09-24"
+          >
+
+        </div>
+
+
+        <div class="form-group">
+
+          <label>To Date</label>
+
+          <input
+            type="date"
+            value="2026-09-24"
+          >
+
+        </div>
+
+
+        <div class="form-group">
+
+          <label>Personnel</label>
+
+          <select>
+            <option>All Personnel</option>
+            <option>John Doe</option>
+            <option>Priya Sharma</option>
+          </select>
+
+        </div>
+
+
+        <div class="form-group">
+
+          <label>Status</label>
+
+          <select>
+            <option>All Status</option>
+            <option>Present</option>
+            <option>Absent</option>
+            <option>Late</option>
+          </select>
+
+        </div>
+
+
+        <div class="filter-actions">
+
+          <button class="btn btn-light">
+            Clear
+          </button>
+
+          <button class="btn btn-primary">
+            Apply Filters
+          </button>
+
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <!-- ATTENDANCE RECORDS -->
+
+    <div class="attendance-card">
+
+      <div class="attendance-card-header">
+
+        <div>
+          <h2>Attendance Records</h2>
+          <p>Daily check-in and check-out records.</p>
+        </div>
+
+        <span class="table-count">
+          2 Records
+        </span>
+
+      </div>
+
+
+      <div class="table-wrapper">
+
+        <table class="attendance-table">
+
+          <thead>
+
+            <tr>
+              <th>Person</th>
+              <th>Employee Code</th>
+              <th>Role</th>
+              <th>Date</th>
+              <th>Check In</th>
+              <th>Check Out</th>
+              <th>Total Hours</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+
+          </thead>
+
+
+          <tbody>
+
+            <tr>
+
+              <td>
+                <div class="person-cell">
+
+                  <div class="table-avatar">
+                    JD
+                  </div>
+
+                  <strong>John Doe</strong>
+
+                </div>
+              </td>
+
+              <td>EMP-001</td>
+
+              <td>Employee</td>
+
+              <td>24 Sep 2026</td>
+
+              <td>09:02 AM</td>
+
+              <td>06:04 PM</td>
+
+              <td>9h 02m</td>
+
+              <td>
+                <span class="status-badge present">
+                  Present
+                </span>
+              </td>
+
+              <td>
+                <button class="table-action">
+                  View
+                </button>
+              </td>
+
+            </tr>
+
+
+            <tr>
+
+              <td>
+
+                <div class="person-cell">
+
+                  <div class="table-avatar">
+                    PS
+                  </div>
+
+                  <strong>Priya Sharma</strong>
+
+                </div>
+
+              </td>
+
+              <td>EMP-002</td>
+
+              <td>Manager</td>
+
+              <td>24 Sep 2026</td>
+
+              <td>09:18 AM</td>
+
+              <td>—</td>
+
+              <td>—</td>
+
+              <td>
+                <span class="status-badge active">
+                  Active
+                </span>
+              </td>
+
+              <td>
+                <button class="table-action">
+                  View
+                </button>
+              </td>
+
+            </tr>
+
+          </tbody>
+
+        </table>
+
+      </div>
+
+
+      <!-- PAGINATION -->
+
+      <div class="table-footer">
+
+        <span>
+          Showing 1–2 of 2 records
+        </span>
+
+        <div class="pagination">
+
+          <button disabled>‹</button>
+
+          <button class="page-active">
+            1
+          </button>
+
+          <button disabled>›</button>
+
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <!-- CURRENT PRESENCE -->
+
+    <div class="attendance-card">
+
+      <div class="attendance-card-header">
+
+        <div>
+          <h2>Current Presence</h2>
+
+          <p>
+            Personnel currently detected within monitored areas.
+          </p>
+        </div>
+
+        <span class="live-badge">
+          ● Live
+        </span>
+
+      </div>
+
+
+      <div class="table-wrapper">
+
+        <table class="attendance-table">
+
+          <thead>
+
+            <tr>
+              <th>Person</th>
+              <th>Employee Code</th>
+              <th>Role</th>
+              <th>First Seen</th>
+              <th>Last Seen</th>
+              <th>Camera</th>
+              <th>Zone</th>
+              <th>Duration</th>
+              <th>Status</th>
+            </tr>
+
+          </thead>
+
+
+          <tbody>
+
+            <tr>
+
+              <td>
+
+                <div class="person-cell">
+
+                  <div class="table-avatar">
+                    PS
+                  </div>
+
+                  <strong>Priya Sharma</strong>
+
+                </div>
+
+              </td>
+
+              <td>EMP-002</td>
+
+              <td>Manager</td>
+
+              <td>09:18 AM</td>
+
+              <td>02:08 PM</td>
+
+              <td>Main Entrance</td>
+
+              <td>Office Floor</td>
+
+              <td>4h 50m</td>
+
+              <td>
+                <span class="status-badge active">
+                  ● Active
+                </span>
+              </td>
+
+            </tr>
+
+          </tbody>
+
+        </table>
+
+      </div>
+
+    </div>
+
+
+    <!-- PERSON EVENTS -->
+
+    <div class="attendance-card">
+
+      <div class="attendance-card-header">
+
+        <div>
+
+          <h2>Break / Person Events</h2>
+
+          <p>
+            Detection events and personnel movement history.
+          </p>
+
+        </div>
+
+        <span class="table-count">
+          Recent Events
+        </span>
+
+      </div>
+
+
+      <div class="table-wrapper">
+
+        <table class="attendance-table">
+
+          <thead>
+
+            <tr>
+              <th>Time</th>
+              <th>Person</th>
+              <th>Event</th>
+              <th>Camera</th>
+              <th>Zone</th>
+              <th>Snapshot</th>
+              <th>Confidence</th>
+              <th>Actions</th>
+            </tr>
+
+          </thead>
+
+
+          <tbody>
+
+            <tr>
+
+              <td>
+                01:42 PM
+              </td>
+
+              <td>
+
+                <div class="person-cell">
+
+                  <div class="table-avatar">
+                    JD
+                  </div>
+
+                  <strong>John Doe</strong>
+
+                </div>
+
+              </td>
+
+              <td>
+                <span class="event-badge exit">
+                  Exit
+                </span>
+              </td>
+
+              <td>
+                Lobby Camera
+              </td>
+
+              <td>
+                Lobby
+              </td>
+
+              <td>
+
+                <button class="snapshot-btn">
+                  View Image
+                </button>
+
+              </td>
+
+              <td>
+
+                <div class="confidence">
+
+                  <div class="confidence-bar">
+                    <span style="width:96%;"></span>
+                  </div>
+
+                  <small>96%</small>
+
+                </div>
+
+              </td>
+
+              <td>
+                <button class="table-action">
+                  Details
+                </button>
+              </td>
+
+            </tr>
+
+
+            <tr>
+
+              <td>
+                12:18 PM
+              </td>
+
+              <td>
+
+                <div class="person-cell">
+
+                  <div class="table-avatar">
+                    PS
+                  </div>
+
+                  <strong>Priya Sharma</strong>
+
+                </div>
+
+              </td>
+
+              <td>
+                <span class="event-badge entry">
+                  Entry
+                </span>
+              </td>
+
+              <td>
+                Main Entrance
+              </td>
+
+              <td>
+                Entrance
+              </td>
+
+              <td>
+                <button class="snapshot-btn">
+                  View Image
+                </button>
+              </td>
+
+              <td>
+
+                <div class="confidence">
+
+                  <div class="confidence-bar">
+                    <span style="width:98%;"></span>
+                  </div>
+
+                  <small>98%</small>
+
+                </div>
+
+              </td>
+
+              <td>
+                <button class="table-action">
+                  Details
+                </button>
+              </td>
+
+            </tr>
+
+          </tbody>
+
+        </table>
+
+      </div>
+
+    </div>
+
+  </section>
+
+</main>
+
+</body>
+</html>

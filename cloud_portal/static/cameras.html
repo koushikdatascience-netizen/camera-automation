@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>SnapKey Eye | Cameras</title>
+
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+
+<!-- SIDEBAR -->
+<aside class="sidebar">
+
+  <div class="logo">
+    <img src="/static/assets/snapkey.png" alt="SnapKey Eye">
+
+    <div class="logo-text">
+      <strong>SnapKey Eye</strong>
+      <span>Admin Dashboard</span>
+    </div>
+  </div>
+
+  <nav class="nav-menu">
+
+    <a href="/portal" class="nav-item">
+      ⚡ <span>System Status</span>
+    </a>
+
+    <a href="/portal/cameras.html" class="nav-item active">
+      📷 <span>Cameras</span>
+    </a>
+
+    <a href="/portal/personnel.html" class="nav-item">
+      👥 <span>Personnel</span>
+    </a>
+
+    <a href="/portal/attendance.html" class="nav-item">
+      📋 <span>Attendance</span>
+    </a>
+
+  </nav>
+
+</aside>
+
+
+<!-- MAIN -->
+<main class="main">
+
+  <!-- HEADER -->
+  <header class="header">
+
+    <div class="header-date">
+      Thursday, September 24, 2026
+    </div>
+
+    <div class="profile">
+
+      <div class="avatar">
+        SS
+      </div>
+
+      <div class="profile-info">
+        <strong>Saumya Singh</strong>
+        <span>Administrator</span>
+      </div>
+
+    </div>
+
+  </header>
+
+
+  <!-- CONTENT -->
+  <section class="content camera-content">
+
+    <div class="page-title camera-page-heading">
+
+      <div>
+        <h1>Cameras</h1>
+        <p>Configure and manage your surveillance cameras.</p>
+      </div>
+
+      <button class="add-camera-btn">
+        + Add Camera
+      </button>
+
+    </div>
+
+
+    <!-- CAMERA CONFIGURATION -->
+    <div class="camera-panel">
+      <div id="configured-camera-section" style="margin-bottom:24px">
+        <div class="panel-heading">
+          <div><h2>Configured Cameras</h2><p>Cameras assigned to this shop and edge device.</p></div>
+        </div>
+        <div id="configured-camera-list"><p>Loading cameras...</p></div>
+      </div>
+
+      <div class="panel-heading">
+        <div>
+          <h2>Camera Configuration</h2>
+          <p>Set up camera details, detection features and tracking preferences.</p>
+        </div>
+
+        <span class="configuration-badge">
+          New Configuration
+        </span>
+      </div>
+
+
+      <!-- BASIC INFORMATION -->
+
+      <div class="form-section">
+
+        <h3>Basic Information</h3>
+
+        <div class="form-grid">
+
+          <div class="form-group">
+            <label for="camera-name">
+              Camera Name
+              <span>*</span>
+            </label>
+
+            <input
+              id="camera-name"
+              type="text"
+              placeholder="e.g. Main Entrance Camera"
+            >
+          </div>
+
+
+          <div class="form-group">
+            <label for="camera-id">
+              Camera ID
+              <span>*</span>
+            </label>
+
+            <input
+              id="camera-id"
+              type="text"
+              placeholder="e.g. CAM-001"
+            >
+          </div>
+
+
+          <div class="form-group">
+            <label for="source-type">Source Type <span>*</span></label>
+            <select id="source-type">
+              <option value="rtsp">IP Camera / RTSP</option>
+              <option value="onvif">ONVIF Camera</option>
+              <option value="webcam">USB / Webcam</option>
+              <option value="file">Video File</option>
+              <option value="dshow">Windows DirectShow</option>
+            </select>
+          </div>
+
+          <div class="form-group" id="onvif-host-group" style="display:none">
+            <label for="onvif-host">Camera IP / Host</label>
+            <input id="onvif-host" type="text" placeholder="e.g. 192.168.1.64">
+          </div>
+          <div class="form-group" id="onvif-port-group" style="display:none">
+            <label for="onvif-port">ONVIF Port</label>
+            <input id="onvif-port" type="number" value="80" min="1" max="65535">
+          </div>
+          <div class="form-group" id="onvif-user-group" style="display:none">
+            <label for="onvif-username">Username</label>
+            <input id="onvif-username" type="text" autocomplete="username">
+          </div>
+          <div class="form-group" id="onvif-password-group" style="display:none">
+            <label for="onvif-password">Password</label>
+            <input id="onvif-password" type="password" autocomplete="current-password">
+          </div>
+          <div class="form-group form-full" id="onvif-actions" style="display:none">
+            <button type="button" class="btn btn-outline" id="discover-camera-btn">Discover ONVIF Camera</button>
+            <small>Discovery runs securely on the assigned edge PC inside the camera network.</small>
+          </div>
+          <div class="form-group form-full" id="profile-group" style="display:none">
+            <label for="onvif-profile">Discovered Stream</label>
+            <select id="onvif-profile"></select>
+          </div>
+
+          <div class="form-group form-full">
+            <label for="camera-source">
+              Camera Source
+              <span>*</span>
+            </label>
+
+            <input
+              id="camera-source"
+              type="text"
+              placeholder="RTSP URL, video file path or webcam index"
+            >
+
+            <small>
+              Enter an RTSP URL, local video file path, or webcam index such as 0.
+            </small>
+          </div>
+
+
+          <div class="form-group">
+            <label for="camera-role">
+              Camera Role
+              <span>*</span>
+            </label>
+
+            <select id="camera-role">
+              <option value="">Select role</option>
+              <option>Entry</option>
+              <option>Exit</option>
+              <option>General</option>
+            </select>
+          </div>
+
+
+          <div class="form-group">
+            <label for="camera-zone">
+              Camera Zone
+              <span>*</span>
+            </label>
+
+            <input
+              id="camera-zone"
+              type="text"
+              placeholder="e.g. Main Gate"
+            >
+          </div>
+
+
+          <div class="form-group">
+            <label for="crowd-threshold">
+              Crowd Alert Threshold
+              <span>*</span>
+            </label>
+
+            <input
+              id="crowd-threshold"
+              type="number"
+              value="10"
+              min="1"
+            >
+
+            <small>
+              Alert when the number of people exceeds this value.
+            </small>
+          </div>
+
+        </div>
+
+      </div>
+
+
+      <!-- FEATURES -->
+
+      <div class="form-section">
+
+        <h3>Features</h3>
+
+        <p class="section-description">
+          Select the detection and monitoring capabilities for this camera.
+        </p>
+
+
+        <div class="feature-grid">
+
+          <label class="feature-card">
+
+            <input type="checkbox" checked>
+
+            <span class="feature-icon">◎</span>
+
+            <span class="feature-text">
+              <strong>Person Detection</strong>
+              <small>Detect people visible in the camera feed.</small>
+            </span>
+
+          </label>
+
+
+          <label class="feature-card">
+
+            <input type="checkbox" checked>
+
+            <span class="feature-icon">▣</span>
+
+            <span class="feature-text">
+              <strong>Face Recognition</strong>
+              <small>Identify registered personnel using facial recognition.</small>
+            </span>
+
+          </label>
+
+
+          <label class="feature-card">
+
+            <input type="checkbox" checked>
+
+            <span class="feature-icon">⌖</span>
+
+            <span class="feature-text">
+              <strong>Person Tracking</strong>
+              <small>Track detected people across video frames.</small>
+            </span>
+
+          </label>
+
+
+          <label class="feature-card">
+
+            <input type="checkbox" checked>
+
+            <span class="feature-icon">⚠</span>
+
+            <span class="feature-text">
+              <strong>Crowd Monitoring</strong>
+              <small>Monitor crowd levels using the configured threshold.</small>
+            </span>
+
+          </label>
+
+
+          <label class="feature-card">
+
+            <input type="checkbox">
+
+            <span class="feature-icon">◇</span>
+
+            <span class="feature-text">
+              <strong>Object Detection</strong>
+              <small>Detect configured objects within the camera feed.</small>
+            </span>
+
+          </label>
+
+        </div>
+
+      </div>
+
+
+      <!-- TRACKING PERFORMANCE -->
+
+      <div class="form-section">
+
+        <h3>Tracking Performance</h3>
+
+        <p class="section-description">
+          Fine-tune how often tracking and detection are processed.
+        </p>
+
+
+        <div class="performance-grid">
+
+          <div class="form-group">
+            <label for="frame-skip">
+              Tracking Frame Skip
+            </label>
+
+            <input
+              id="frame-skip"
+              type="number"
+              value="2"
+            >
+
+            <small>
+              Process every Nth frame for tracking.
+            </small>
+          </div>
+
+
+          <div class="form-group">
+            <label for="detection-interval">
+              Detection Interval
+            </label>
+
+            <input
+              id="detection-interval"
+              type="number"
+              value="10"
+            >
+
+            <small>
+              Run full detection every N frames.
+            </small>
+          </div>
+
+
+          <div class="form-group">
+            <label for="max-width">
+              Maximum Frame Width
+            </label>
+
+            <input
+              id="max-width"
+              type="number"
+              value="960"
+            >
+
+            <small>
+              Resize frames to this maximum width.
+            </small>
+          </div>
+
+
+          <div class="form-group">
+            <label for="face-skip">
+              Face Recognition Skip
+            </label>
+
+            <input
+              id="face-skip"
+              type="number"
+              value="2"
+            >
+
+            <small>
+              Perform face recognition every Nth frame.
+            </small>
+          </div>
+
+        </div>
+
+      </div>
+
+
+      <!-- ACTIONS -->
+
+      <div class="camera-actions">
+
+        <button class="btn btn-outline" id="test-camera-btn">
+          Test Connection
+        </button>
+
+        <div class="right-actions">
+
+          <button class="btn btn-light" id="cancel-camera-btn">
+            Cancel
+          </button>
+
+          <button class="btn btn-primary" id="save-camera-btn">
+            Save Camera
+          </button>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  </section>
+
+</main>
+
+  <script src="/static/js/main.js"></script>
+</body>
+</html>
