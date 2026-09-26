@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>SnapKey Eye | Personnel</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+
+<!-- SIDEBAR -->
+<aside class="sidebar">
+
+  <div class="logo">
+    <img src="assets/snapkey.png" alt="SnapKey Eye">
+
+    <div class="logo-text">
+      <strong>SnapKey Eye</strong>
+      <span>Admin Dashboard</span>
+    </div>
+  </div>
+
+  <nav class="nav-menu">
+
+    <a href="index.html" class="nav-item">
+      ⚡ <span>System Status</span>
+    </a>
+
+    <a href="cameras.html" class="nav-item">
+      📷 <span>Cameras</span>
+    </a>
+
+    <a href="personnel.html" class="nav-item active">
+      👥 <span>Personnel</span>
+    </a>
+
+    <a href="attendance.html" class="nav-item">
+      📋 <span>Attendance</span>
+    </a>
+
+  </nav>
+
+</aside>
+
+
+<!-- MAIN -->
+<main class="main">
+
+  <!-- HEADER -->
+  <header class="header">
+
+    <div class="header-date">
+      Thursday, September 24, 2026
+    </div>
+
+    <div class="profile">
+
+      <div class="avatar">SS</div>
+
+      <div class="profile-info">
+        <strong>Saumya Singh</strong>
+        <span>Administrator</span>
+      </div>
+
+    </div>
+
+  </header>
+
+
+  <!-- CONTENT -->
+  <section class="content personnel-content">
+
+    <!-- TITLE -->
+
+    <div class="page-title personnel-page-heading">
+
+      <div>
+        <h1>Personnel Management</h1>
+        <p>Add and manage personnel profiles for recognition and attendance.</p>
+      </div>
+
+      <button class="btn btn-primary">
+        + Add Person
+      </button>
+
+    </div>
+
+
+    <!-- ADD PERSON CARD -->
+
+    <div class="personnel-card">
+
+      <div class="panel-heading">
+
+        <div>
+          <h2>Add Person</h2>
+          <p>Create a new personnel profile for your monitoring system.</p>
+        </div>
+
+        <span class="configuration-badge">
+          New Profile
+        </span>
+
+      </div>
+
+
+      <div class="personnel-form">
+
+        <!-- NAME -->
+
+        <div class="form-group">
+
+          <label for="person-name">
+            Name
+            <span>*</span>
+          </label>
+
+          <input
+            id="person-name"
+            type="text"
+            placeholder="Enter full name"
+          >
+
+        </div>
+
+
+        <!-- EMPLOYEE CODE -->
+
+        <div class="form-group">
+
+          <label for="employee-code">
+            Employee Code
+            <span>*</span>
+          </label>
+
+          <input
+            id="employee-code"
+            type="text"
+            placeholder="e.g. EMP-001"
+          >
+
+        </div>
+
+
+        <!-- ROLE -->
+
+        <div class="form-group">
+
+          <label for="person-role">
+            Role
+            <span>*</span>
+          </label>
+
+          <select id="person-role">
+
+            <option value="">Select role</option>
+            <option>Employee</option>
+            <option>Manager</option>
+            <option>Security</option>
+            <option>Administrator</option>
+            <option>Visitor</option>
+
+          </select>
+
+        </div>
+
+
+        <!-- FACE IMAGE -->
+
+        <div class="form-group">
+
+          <label>
+            Face Image
+            <span>*</span>
+          </label>
+
+          <label class="upload-box">
+
+            <input
+              id="face-image"
+              type="file"
+              accept="image/*"
+            >
+
+            <span class="upload-icon">↑</span>
+
+            <span class="upload-text">
+              <strong>Upload face image</strong>
+              <small>PNG or JPG • Clear front-facing image recommended</small>
+            </span>
+
+            <span class="browse-btn">
+              Browse
+            </span>
+
+          </label>
+
+        </div>
+
+
+        <!-- BUTTON -->
+
+        <div class="personnel-form-action">
+
+          <button class="btn btn-primary add-person-button">
+            + Add Person
+          </button>
+
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <!-- PERSONNEL LIST -->
+
+    <div class="personnel-card personnel-list-card">
+
+      <div class="personnel-list-header">
+
+        <div>
+          <h2>Personnel List</h2>
+          <p>View and manage registered personnel.</p>
+        </div>
+
+        <div class="personnel-count">
+          0 Personnel
+        </div>
+
+      </div>
+
+
+      <!-- TABLE -->
+
+      <div class="table-wrapper">
+
+        <table class="personnel-table">
+
+          <thead>
+            <tr>
+              <th>Photo</th>
+              <th>Name</th>
+              <th>Employee Code</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Added</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+
+          <tbody>
+
+            <!-- Empty state -->
+
+            <tr class="empty-row">
+
+              <td colspan="7">
+
+                <div class="empty-personnel">
+
+                  <div class="empty-personnel-icon">
+                    👥
+                  </div>
+
+                  <h3>No personnel added yet</h3>
+
+                  <p>
+                    Add your first person using the form above.
+                  </p>
+
+                </div>
+
+              </td>
+
+            </tr>
+
+          </tbody>
+
+        </table>
+
+      </div>
+
+    </div>
+
+  </section>
+
+</main>
+
+</body>
+</html>
