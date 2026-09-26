@@ -115,6 +115,47 @@ def portal_page(page_name: str):
         raise HTTPException(404, "Portal page not found")
     return FileResponse(PORTAL_STATIC_DIR / page_name)
 
+class PortalCameraConfig(BaseModel):
+    tenant_id: str
+    company_code: str | None = None
+    shop_id: str
+    site_id: str
+    edge_id: str
+    camera_id: str
+    name: str
+    source_type: str = "rtsp"
+    source: str
+    camera_role: str = "GENERAL"
+    camera_zone: str | None = None
+    crowd_threshold: int = 10
+    enabled: bool = True
+    features: dict[str, bool] = Field(default_factory=dict)
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/cameras")
+def portal_cameras(tenant_id: str, shop_id: str | None = None, edge_id: str | None = None):
+    return {"items": store.list_cameras(tenant_id, shop_id=shop_id, edge_id=edge_id)}
+
+
+@app.put("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
+def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConfig):
+    if request.tenant_id != tenant_id or request.camera_id != camera_id:
+        raise HTTPException(400, "Camera scope does not match request path")
+    if request.source_type not in {"rtsp", "file", "webcam"}:
+        raise HTTPException(400, "Unsupported camera source type")
+    if not request.source.strip():
+        raise HTTPException(400, "Camera source is required")
+    return {"camera": store.upsert_camera(request.model_dump())}
+
+
+@app.delete("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
+def delete_portal_camera(tenant_id: str, camera_id: str, shop_id: str, edge_id: str):
+    if not store.delete_camera(tenant_id, shop_id, edge_id, camera_id):
+        raise HTTPException(404, "Camera not found")
+    return {"deleted": True}
+
+
 @app.post("/edge/v1/events")
 def ingest_edge_event(envelope: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
     required = ["schema_version", "tenant_id", "site_id", "edge_id", "event_id", "event_type", "event_time", "payload"]
