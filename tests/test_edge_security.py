@@ -69,3 +69,20 @@ def test_heartbeat_scope_guard_rejects_other_shop():
     with pytest.raises(HTTPException) as exc:
         api._enforce_edge_scope(principal(), payload)
     assert exc.value.status_code == 403
+
+
+def test_edge_camera_config_is_bound_to_credential_scope(monkeypatch):
+    calls = {}
+    def list_cameras(tenant_id, shop_id=None, edge_id=None):
+        calls.update(tenant_id=tenant_id, shop_id=shop_id, edge_id=edge_id)
+        return [{"camera_id":"CAM-1","shop_id":"WBTEST","edge_id":"edge-1"}]
+    monkeypatch.setattr(api.store, "list_cameras", list_cameras)
+    result = api.edge_camera_config(principal())
+    assert calls == {"tenant_id":"tenant-1","shop_id":"WBTEST","edge_id":"edge-1"}
+    assert result["items"][0]["camera_id"] == "CAM-1"
+
+
+def test_edge_camera_config_rejects_legacy_global_credential():
+    with pytest.raises(HTTPException) as exc:
+        api.edge_camera_config(api.EdgePrincipal(legacy_global=True))
+    assert exc.value.status_code == 403
