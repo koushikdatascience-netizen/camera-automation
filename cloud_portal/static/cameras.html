@@ -91,6 +91,12 @@
 
     <!-- CAMERA CONFIGURATION -->
     <div class="camera-panel">
+      <div id="configured-camera-section" style="margin-bottom:24px">
+        <div class="panel-heading">
+          <div><h2>Configured Cameras</h2><p>Cameras assigned to this shop and edge device.</p></div>
+        </div>
+        <div id="configured-camera-list"><p>Loading cameras...</p></div>
+      </div>
 
       <div class="panel-heading">
         <div>
@@ -139,6 +145,42 @@
             >
           </div>
 
+
+          <div class="form-group">
+            <label for="source-type">Source Type <span>*</span></label>
+            <select id="source-type">
+              <option value="rtsp">IP Camera / RTSP</option>
+              <option value="onvif">ONVIF Camera</option>
+              <option value="webcam">USB / Webcam</option>
+              <option value="file">Video File</option>
+              <option value="dshow">Windows DirectShow</option>
+            </select>
+          </div>
+
+          <div class="form-group" id="onvif-host-group" style="display:none">
+            <label for="onvif-host">Camera IP / Host</label>
+            <input id="onvif-host" type="text" placeholder="e.g. 192.168.1.64">
+          </div>
+          <div class="form-group" id="onvif-port-group" style="display:none">
+            <label for="onvif-port">ONVIF Port</label>
+            <input id="onvif-port" type="number" value="80" min="1" max="65535">
+          </div>
+          <div class="form-group" id="onvif-user-group" style="display:none">
+            <label for="onvif-username">Username</label>
+            <input id="onvif-username" type="text" autocomplete="username">
+          </div>
+          <div class="form-group" id="onvif-password-group" style="display:none">
+            <label for="onvif-password">Password</label>
+            <input id="onvif-password" type="password" autocomplete="current-password">
+          </div>
+          <div class="form-group form-full" id="onvif-actions" style="display:none">
+            <button type="button" class="btn btn-outline" id="discover-camera-btn">Discover ONVIF Camera</button>
+            <small>Discovery runs securely on the assigned edge PC inside the camera network.</small>
+          </div>
+          <div class="form-group form-full" id="profile-group" style="display:none">
+            <label for="onvif-profile">Discovered Stream</label>
+            <select id="onvif-profile"></select>
+          </div>
 
           <div class="form-group form-full">
             <label for="camera-source">
