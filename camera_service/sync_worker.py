@@ -130,8 +130,8 @@ class EdgeSyncWorker:
         if command_type=="CAMERA_TEST":
             if self.camera_manager is None: raise RuntimeError("camera manager is unavailable")
             source=str(request.get("source") or "")
-            ok,message=self.camera_manager.test_connection(source)
-            return {"connected":bool(ok),"message":message}
+            result=self.camera_manager.test_rtsp_connection(source)
+            return result if isinstance(result,dict) else {"connected":bool(result)}
         raise RuntimeError(f"Unsupported edge command: {command_type}")
 
     def status(self) -> dict[str, Any]:
