@@ -1,6 +1,28 @@
 (() => {
   const params = new URLSearchParams(window.location.search);
   const scopeKeys = ["tenant_id", "company_code", "shop_id", "site_id", "edge_id"];
+  function portalToken() {
+    const hash=new URLSearchParams(window.location.hash.replace(/^#/,""));
+    const incoming=hash.get("session");
+    if(incoming){sessionStorage.setItem("snapkey_portal_session",incoming);history.replaceState(null,"",window.location.pathname+window.location.search);}
+    return incoming || sessionStorage.getItem("snapkey_portal_session") || "";
+  }
+  async function authFetch(url, options={}) {
+    const token=portalToken();
+    const headers=new Headers(options.headers||{});
+    if(token) headers.set("Authorization","Bearer "+token);
+    return fetch(url,{...options,headers});
+  }
+  async function bootstrapCrmSession() {
+    const token=portalToken(); if(!token) return;
+    const response=await authFetch("/session/status");
+    if(!response.ok) throw new Error("Your Madhushala Camera session is invalid or expired.");
+    const session=await response.json();
+    const values={tenant_id:session.tenantId,company_code:session.companyCode,shop_id:session.shopCode};
+    Object.entries(values).forEach(([key,value])=>{if(value) sessionStorage.setItem("snapkey_"+key,String(value));});
+    if(session.displayName) sessionStorage.setItem("snapkey_display_name",session.displayName);
+    if(session.role) sessionStorage.setItem("snapkey_role",session.role);
+  }
 
   function portalScope() {
     const scope = {};
@@ -50,9 +72,9 @@
       const scope = requireScope(["tenant_id"]);
       const [healthResponse, summaryResponse, cameraResponse, unknownResponse] = await Promise.all([
         fetch("/health"),
-        fetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/summary"),
-        fetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras"),
-        fetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/events?event_type=UNKNOWN_PERSON&limit=500")
+        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/summary"),
+        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras"),
+        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/events?event_type=UNKNOWN_PERSON&limit=500")
       ]);
       if (!healthResponse.ok || !summaryResponse.ok || !cameraResponse.ok || !unknownResponse.ok) throw new Error("Portal API is unavailable.");
       const health = await healthResponse.json();
@@ -85,7 +107,7 @@
 
   async function createEdgeCommand(commandType, request) {
     const scope=requireScope(["tenant_id","shop_id","edge_id"]);
-    const response=await fetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edge-commands",{
+    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edge-commands",{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({tenant_id:scope.tenant_id,shop_id:scope.shop_id,edge_id:scope.edge_id,command_type:commandType,request})
     });
@@ -98,7 +120,7 @@
     const scope=requireScope(["tenant_id"]);
     const deadline=Date.now()+timeoutMs;
     while(Date.now()<deadline){
-      const response=await fetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edge-commands/"+encodeURIComponent(commandId));
+      const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edge-commands/"+encodeURIComponent(commandId));
       const body=await response.json();
       if(!response.ok) throw new Error(body.detail || "Unable to read edge command.");
       if(body.status==="SUCCEEDED") return body.result || {};
@@ -152,7 +174,7 @@
     if(!container) return;
     try{
       const scope=requireScope(["tenant_id","shop_id","edge_id"]);
-      const response=await fetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id)+"&edge_id="+encodeURIComponent(scope.edge_id));
+      const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id)+"&edge_id="+encodeURIComponent(scope.edge_id));
       const body=await response.json(); if(!response.ok) throw new Error(body.detail||"Unable to load cameras.");
       const items=body.items||[];
       if(!items.length){container.innerHTML="<p>No cameras configured for this edge yet.</p>";return;}
@@ -179,7 +201,7 @@
     if(!confirm("Delete camera "+cameraId+"?")) return;
     try{
       const scope=requireScope(["tenant_id","shop_id","edge_id"]);
-      const response=await fetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras/"+encodeURIComponent(cameraId)+"?shop_id="+encodeURIComponent(scope.shop_id)+"&edge_id="+encodeURIComponent(scope.edge_id),{method:"DELETE"});
+      const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras/"+encodeURIComponent(cameraId)+"?shop_id="+encodeURIComponent(scope.shop_id)+"&edge_id="+encodeURIComponent(scope.edge_id),{method:"DELETE"});
       const body=await response.json(); if(!response.ok) throw new Error(body.detail||"Unable to delete camera.");
       showMessage("Camera deleted from cloud configuration."); await loadConfiguredCameras();
     }catch(error){showMessage(error.message,true);}
@@ -219,7 +241,7 @@
           face_recognition_skip: Number(document.getElementById("face-skip").value || 2)
         }
       };
-      const response = await fetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras/" + encodeURIComponent(cameraId), {
+      const response = await authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras/" + encodeURIComponent(cameraId), {
         method: "PUT",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload)
@@ -262,6 +284,5 @@
     loadConfiguredCameras();
   }
 
-  loadSystemStatus();
-  wireCameraPage();
+  bootstrapCrmSession().then(()=>{loadSystemStatus();wireCameraPage();}).catch(error=>showMessage(error.message,true));
 })();
