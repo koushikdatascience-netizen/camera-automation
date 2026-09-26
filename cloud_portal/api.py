@@ -156,6 +156,47 @@ def delete_portal_camera(tenant_id: str, camera_id: str, shop_id: str, edge_id: 
     return {"deleted": True}
 
 
+class EdgeCommandRequest(BaseModel):
+    tenant_id: str
+    shop_id: str
+    edge_id: str
+    command_type: str
+    request: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/portal/v1/tenants/{tenant_id}/edge-commands")
+def create_portal_edge_command(tenant_id: str, request: EdgeCommandRequest):
+    if request.tenant_id != tenant_id:
+        raise HTTPException(400, "Command tenant does not match request path")
+    if request.command_type not in {"ONVIF_PROBE", "CAMERA_TEST"}:
+        raise HTTPException(400, "Unsupported edge command")
+    return store.create_edge_command(request.model_dump())
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/edge-commands/{command_id}")
+def portal_edge_command(tenant_id: str, command_id: str):
+    command=store.get_edge_command(command_id, tenant_id)
+    if not command: raise HTTPException(404, "Edge command not found")
+    return command
+
+
+@app.get("/edge/v1/commands")
+def edge_commands(principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global:
+        raise HTTPException(403, "Scoped edge credential is required for commands")
+    return {"items":store.claim_edge_commands(principal.tenant_id,principal.shop_id,principal.edge_id)}
+
+
+@app.post("/edge/v1/commands/{command_id}/result")
+def edge_command_result(command_id: str, result: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global:
+        raise HTTPException(403, "Scoped edge credential is required for commands")
+    status="SUCCEEDED" if result.get("ok",False) else "FAILED"
+    if not store.complete_edge_command(command_id,principal.tenant_id,principal.shop_id,principal.edge_id,status,result):
+        raise HTTPException(404, "Claimed edge command not found")
+    return {"ok":True}
+
+
 @app.get("/edge/v1/config/cameras")
 def edge_camera_config(principal: EdgePrincipal = Depends(require_edge_token)):
     if principal.legacy_global:
