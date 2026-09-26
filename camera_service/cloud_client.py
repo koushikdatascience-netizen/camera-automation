@@ -72,3 +72,16 @@ class CloudSyncClient:
         )
         response.raise_for_status()
         return response.json() if response.content else {"ok": True}
+
+
+    def camera_config(self) -> dict[str, Any]:
+        """Fetch camera assignments bound to this edge credential."""
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response = requests.get(
+            self.config.base_url.rstrip("/") + "/edge/v1/config/cameras",
+            headers={"Authorization": f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json() if response.content else {"items": []}
