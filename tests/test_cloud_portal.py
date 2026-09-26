@@ -35,4 +35,6 @@ def test_cloud_portal_dashboard_page_renders(tmp_path, monkeypatch):
  client=TestClient(api.app)
  response=client.get('/portal')
  assert response.status_code==200
- assert 'SnapKey Vision AI' in response.text and 'Cloud command center' in response.text
+ assert 'SnapKey Eye' in response.text
+ assert 'System Status' in response.text
+ assert '/portal/cameras.html' in response.text
