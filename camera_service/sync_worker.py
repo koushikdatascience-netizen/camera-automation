@@ -5,6 +5,7 @@ import threading
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
+from camera_service.camera.onvif import probe_onvif, select_profile
 
 
 @dataclass
@@ -74,6 +75,20 @@ class EdgeSyncWorker:
 
             synced = 0
             failed = 0
+            command_sync = {"fetched": 0, "completed": 0, "failed": 0}
+            try:
+                commands = self.cloud_client.edge_commands()
+                command_sync["fetched"] = len(commands)
+                for command in commands:
+                    try:
+                        result = self._execute_command(command)
+                        self.cloud_client.complete_edge_command(command["id"], {"ok": True, **result})
+                        command_sync["completed"] += 1
+                    except Exception as exc:
+                        self.cloud_client.complete_edge_command(command["id"], {"ok": False, "error": str(exc)})
+                        command_sync["failed"] += 1
+            except Exception as exc:
+                command_sync["error"] = str(exc)
             camera_sync = {"fetched": 0, "applied": 0, "failed": 0}
             if self.camera_manager is not None:
                 try:
@@ -101,8 +116,23 @@ class EdgeSyncWorker:
                     failed += 1
 
             result = SyncRunResult(enabled=True, synced=synced, failed=failed)
-            self._remember(result, {"camera_sync": camera_sync})
+            self._remember(result, {"camera_sync": camera_sync, "command_sync": command_sync})
             return result
+
+    def _execute_command(self, command: dict[str, Any]) -> dict[str, Any]:
+        command_type=str(command.get("command_type") or "")
+        request=command.get("request") or {}
+        if command_type=="ONVIF_PROBE":
+            result=probe_onvif(str(request.get("host") or ""),int(request.get("port") or 80),
+                               str(request.get("username") or ""),str(request.get("password") or ""))
+            result["recommended_profile"]=select_profile(result.get("profiles") or [],str(request.get("purpose") or "ai"))
+            return result
+        if command_type=="CAMERA_TEST":
+            if self.camera_manager is None: raise RuntimeError("camera manager is unavailable")
+            source=str(request.get("source") or "")
+            ok,message=self.camera_manager.test_connection(source)
+            return {"connected":bool(ok),"message":message}
+        raise RuntimeError(f"Unsupported edge command: {command_type}")
 
     def status(self) -> dict[str, Any]:
         return {
