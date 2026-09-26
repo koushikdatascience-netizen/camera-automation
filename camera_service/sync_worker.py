@@ -28,12 +28,13 @@ class SyncRunResult:
 class EdgeSyncWorker:
     """Best-effort local queue drain for cloud portal/mobile visibility."""
 
-    def __init__(self, store, cloud_client, edge_config, sync_config, license_manager):
+    def __init__(self, store, cloud_client, edge_config, sync_config, license_manager, camera_manager=None):
         self.store = store
         self.cloud_client = cloud_client
         self.edge_config = edge_config
         self.sync_config = sync_config
         self.license_manager = license_manager
+        self.camera_manager = camera_manager
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -73,6 +74,20 @@ class EdgeSyncWorker:
 
             synced = 0
             failed = 0
+            camera_sync = {"fetched": 0, "applied": 0, "failed": 0}
+            if self.camera_manager is not None:
+                try:
+                    assignment = self.cloud_client.camera_config()
+                    items = assignment.get("items") or []
+                    camera_sync["fetched"] = len(items)
+                    for camera in items:
+                        try:
+                            self.camera_manager.apply_cloud_camera(camera)
+                            camera_sync["applied"] += 1
+                        except Exception:
+                            camera_sync["failed"] += 1
+                except Exception as exc:
+                    camera_sync["error"] = str(exc)
             for row in self.store.queued_events(getattr(self.sync_config, "batch_size", 50)):
                 try:
                     event = json.loads(row["payload_json"])
@@ -86,7 +101,7 @@ class EdgeSyncWorker:
                     failed += 1
 
             result = SyncRunResult(enabled=True, synced=synced, failed=failed)
-            self._remember(result)
+            self._remember(result, {"camera_sync": camera_sync})
             return result
 
     def status(self) -> dict[str, Any]:
