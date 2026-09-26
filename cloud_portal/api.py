@@ -156,6 +156,20 @@ def delete_portal_camera(tenant_id: str, camera_id: str, shop_id: str, edge_id: 
     return {"deleted": True}
 
 
+@app.get("/edge/v1/config/cameras")
+def edge_camera_config(principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global:
+        raise HTTPException(403, "Scoped edge credential is required for camera configuration")
+    return {
+        "tenant_id": principal.tenant_id,
+        "company_code": principal.company_code,
+        "shop_id": principal.shop_id,
+        "site_id": principal.site_id,
+        "edge_id": principal.edge_id,
+        "items": store.list_cameras(principal.tenant_id, shop_id=principal.shop_id, edge_id=principal.edge_id),
+    }
+
+
 @app.post("/edge/v1/events")
 def ingest_edge_event(envelope: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
     required = ["schema_version", "tenant_id", "site_id", "edge_id", "event_id", "event_type", "event_time", "payload"]
