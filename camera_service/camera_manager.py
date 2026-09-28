@@ -841,6 +841,8 @@ class CameraManager:
                                 elif camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
                                     snapshot_path = self._save_event_snapshot(roi, camera_id, "unknown")
                                     store.add_person_event(None, getattr(attendance_engine, "store_id", "store-1"), camera_id, "UNKNOWN_INSIDE_ALERT", datetime.now(timezone.utc), {"track_id": track_id, "score": score, "snapshot_path": snapshot_path})
+                                    if camera_config is not None and camera_config.camera_role.value in {"GENERAL", "SECURITY"}:
+                                        self._security_alerter.alarm_beep(f"unknown:{camera_id}:{track_id}", True, 1250, 180, 3.0)
                                     self._track_identity_cache[cache_key] = {
                                         "checked_at": now,
                                         "person_id": None,
