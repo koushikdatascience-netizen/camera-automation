@@ -670,6 +670,33 @@ def portal_face_image(tenant_id: str,person_id: str,face_id: str,principal: Port
     if not face or not face.get("image_path") or not Path(face["image_path"]).is_file(): raise HTTPException(404,"Face image not found")
     return FileResponse(face["image_path"],media_type="image/jpeg")
 
+@app.get("/portal/v1/tenants/{tenant_id}/attendance")
+def portal_attendance(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    people={str(p["id"]):p for p in store.list_cloud_people(tenant_id,principal.shop_id)}
+    raw=[e for e in store.list_events(tenant_id,limit=500) if str(e.get("shop_id") or e.get("site_id") or "")==str(principal.shop_id)]
+    sessions={}; person_events=[]
+    for event in raw:
+        event_type=str(event.get("event_type") or "")
+        payload=event.get("payload") or {}
+        inner=payload.get("payload") if isinstance(payload.get("payload"),dict) else payload
+        person_id=str(inner.get("person_id") or "")
+        metadata=inner.get("metadata") or {}
+        person=people.get(person_id,{})
+        if event_type in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT"}:
+            sid=str(metadata.get("attendance_session_id") or event.get("id") or "")
+            record=sessions.setdefault(sid,{"session_id":sid,"person_id":person_id,"full_name":person.get("full_name") or person_id or "Unknown",
+                "employee_code":person.get("employee_code") or "—","role":person.get("role") or "—","entry_time":None,"exit_time":None})
+            if event_type=="ATTENDANCE_ENTRY": record["entry_time"]=str(event.get("event_time") or "")
+            else: record["exit_time"]=str(event.get("event_time") or "")
+        if event_type in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT","BREAK_START","BREAK_END"}:
+            person_events.append({"event_id":event.get("id"),"event_type":event_type,"event_time":str(event.get("event_time") or ""),
+                "person_id":person_id,"full_name":person.get("full_name") or person_id or "Unknown","employee_code":person.get("employee_code") or "—",
+                "camera_id":event.get("camera_id"),"confidence":metadata.get("confidence")})
+    records=sorted(sessions.values(),key=lambda x:x.get("entry_time") or x.get("exit_time") or "",reverse=True)
+    presence=[{**r,"status":"PRESENT"} for r in records if r.get("entry_time") and not r.get("exit_time")]
+    return {"records":records,"presence":presence,"events":person_events[:100]}
+
 @app.get("/portal/v1/tenants/{tenant_id}/crm/status")
 def crm_status(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
