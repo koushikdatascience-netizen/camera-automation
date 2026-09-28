@@ -9,7 +9,7 @@ import hmac
 import secrets
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -374,6 +374,37 @@ def edge_camera_config(principal: EdgePrincipal = Depends(require_edge_token)):
         "site_id": principal.site_id,
         "edge_id": principal.edge_id,
         "items": store.list_cameras(principal.tenant_id, shop_id=principal.shop_id, edge_id=principal.edge_id),
+    }
+
+
+@app.post("/edge/v1/events/{event_id}/evidence")
+async def upload_edge_event_evidence(
+    event_id: str,
+    file: UploadFile = File(...),
+    principal: EdgePrincipal = Depends(require_edge_token),
+):
+    if principal.legacy_global:
+        raise HTTPException(403, "Scoped edge credential is required for evidence upload")
+    safe_event_id = "".join(ch for ch in event_id if ch.isalnum() or ch in {"-", "_", ":"})[:160]
+    if not safe_event_id:
+        raise HTTPException(400, "Invalid event_id")
+    content_type = (file.content_type or "").lower()
+    if content_type not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+        raise HTTPException(415, "Only JPEG, PNG, and WebP evidence images are supported")
+    data = await file.read(5 * 1024 * 1024 + 1)
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Evidence image exceeds 5 MB")
+    suffix = { "image/png": ".png", "image/webp": ".webp" }.get(content_type, ".jpg")
+    root = Path(os.getenv("SNAPKEY_EVIDENCE_ROOT", "/app/data/evidence"))
+    target_dir = root / str(principal.tenant_id) / str(principal.shop_id) / str(principal.edge_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{safe_event_id}{suffix}"
+    target.write_bytes(data)
+    return {
+        "event_id": event_id,
+        "evidence_id": f"{principal.tenant_id}/{principal.shop_id}/{principal.edge_id}/{safe_event_id}{suffix}",
+        "content_type": content_type,
+        "size_bytes": len(data),
     }
 
 
