@@ -1511,7 +1511,7 @@
             const cameraData = {
                 camera_id: document.getElementById('camera-id').value.trim(),
                 name: document.getElementById('camera-name').value.trim(),
-                source_type: 'rtsp',
+                source_type: /^\d+$/.test(document.getElementById('rtsp-url').value.trim()) ? 'webcam' : 'rtsp',
                 rtsp_url: document.getElementById('rtsp-url').value.trim(),
                 enabled: true,
                 camera_role: document.getElementById('camera-role').value,
@@ -1568,8 +1568,12 @@
                     document.getElementById('camera-setup-form').reset();
                     loadCameras();
                 } else {
-                    const error = await response.json();
-                    alert('Error saving camera: ' + (error.detail || 'Unknown error'));
+                    const error = await response.json().catch(() => ({}));
+                    const detail = error.detail ?? error.message ?? 'Unknown error';
+                    const readableDetail = typeof detail === 'string'
+                        ? detail
+                        : (detail.message || JSON.stringify(detail, null, 2));
+                    alert('Error saving camera: ' + readableDetail);
                 }
             } catch (error) {
                 console.error('Error saving camera:', error);
