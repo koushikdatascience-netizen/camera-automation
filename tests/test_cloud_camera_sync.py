@@ -33,6 +33,20 @@ def test_camera_manager_applies_cloud_assignment_idempotently(tmp_path):
     assert len(manager.list_cameras())==1
 
 
+def test_camera_manager_resolves_edge_local_cloud_assignment(tmp_path):
+    manager=CameraManager(str(tmp_path/"edge.db"))
+    local=cloud_camera("webcam-01","0")
+    local["source_type"]="webcam"
+    manager.apply_cloud_camera(local)
+    adopted=cloud_camera("webcam-01","edge-local:webcam-01")
+    adopted["name"]="Entrance Webcam"
+    adopted["source_type"]="webcam"
+    adopted["camera_role"]="GENERAL"
+    result=manager.apply_cloud_camera(adopted)
+    assert result.name=="Entrance Webcam"
+    assert result.rtsp_url=="0"
+
+
 def test_camera_manager_accepts_generic_source_types_without_vendor_lockin(tmp_path):
     manager=CameraManager(str(tmp_path/"edge.db"))
     for camera_id, source_type, source in [

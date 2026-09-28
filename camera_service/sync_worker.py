@@ -74,7 +74,7 @@ class EdgeSyncWorker:
     def _loop(self) -> None:
         while not self._stop.is_set():
             self.run_once()
-            delay = max(2.0, float(getattr(self.sync_config, "interval_seconds", 15.0)))
+            delay = min(5.0, max(2.0, float(getattr(self.sync_config, "interval_seconds", 15.0))))
             self._stop.wait(delay)
 
     def run_once(self) -> SyncRunResult:

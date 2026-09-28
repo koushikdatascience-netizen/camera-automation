@@ -11,7 +11,16 @@
     const token=portalToken();
     const headers=new Headers(options.headers||{});
     if(token) headers.set("Authorization","Bearer "+token);
-    return fetch(url,{...options,headers});
+    const timeoutMs=options.timeoutMs || 20000;
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),timeoutMs);
+    try{
+      const cleanOptions={...options,headers,signal:controller.signal};
+      delete cleanOptions.timeoutMs;
+      return await fetch(url,cleanOptions);
+    }finally{
+      clearTimeout(timer);
+    }
   }
   async function bootstrapCrmSession() {
     const token=portalToken();
@@ -151,11 +160,13 @@
   }
 
   async function createEdgeCommand(commandType, request, options={}) {
-    const scope=requireScope(["tenant_id","shop_id","edge_id"]);
+    const scope=requireScope(["tenant_id","shop_id"]);
     const edgeId=options.edgeId || scope.edge_id;
+    if(!edgeId) throw new Error("No edge device is selected. Wait for the edge to appear online, then try again.");
     const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edge-commands",{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({tenant_id:scope.tenant_id,shop_id:scope.shop_id,edge_id:edgeId,command_type:commandType,request})
+      body:JSON.stringify({tenant_id:scope.tenant_id,shop_id:scope.shop_id,edge_id:edgeId,command_type:commandType,request}),
+      timeoutMs:15000
     });
     const body=await response.json();
     if(!response.ok) throw new Error(body.detail || "Unable to send command to edge.");
@@ -256,9 +267,10 @@
       const localOnly=inventory.filter(camera=>!configuredIds.has(camera.camera_id));
       if(!items.length && !localOnly.length){container.innerHTML="<p>No cameras configured or reported by this edge yet.</p>";return;}
       const configuredHtml=items.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type)+" · "+escapeHtml(camera.camera_role)+" · Cloud managed</small></div><div style='display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end'><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(camera.edge_id||selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button><button class='btn btn-light edit-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Edit</button><button class='btn btn-light delete-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Delete</button></div></div>").join("");
-      const localHtml=localOnly.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type||"camera")+" · "+escapeHtml(camera.camera_role||"GENERAL")+" · Edge discovered</small></div><div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end'><strong style='color:"+(camera.online?"#166534":"#6b7280")+"'>● "+(camera.online?"Online":"Offline")+"</strong><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button></div></div>").join("");
+      const localHtml=localOnly.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type||"camera")+" · "+escapeHtml(camera.camera_role||"GENERAL")+" · Edge discovered</small></div><div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end'><strong style='color:"+(camera.online?"#166534":"#6b7280")+"'>● "+(camera.online?"Online":"Offline")+"</strong><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button><button class='btn btn-light adopt-local-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Configure</button></div></div>").join("");
       container.innerHTML=configuredHtml+localHtml;
       container.querySelectorAll(".test-existing-camera").forEach(button=>button.addEventListener("click",()=>testCameraConnection({cameraId:button.dataset.id,edgeId:button.dataset.edgeId,sourceType:button.dataset.sourceType,button})));
+      container.querySelectorAll(".adopt-local-camera").forEach(button=>button.addEventListener("click",()=>adoptLocalCamera(localOnly.find(x=>x.camera_id===button.dataset.id))));
       container.querySelectorAll(".edit-camera").forEach(button=>button.addEventListener("click",()=>editCamera(items.find(x=>x.camera_id===button.dataset.id))));
       container.querySelectorAll(".delete-camera").forEach(button=>button.addEventListener("click",()=>deleteCamera(button.dataset.id)));
     }catch(error){container.innerHTML="<p>"+escapeHtml(error.message)+"</p>";}
@@ -270,10 +282,28 @@
     document.getElementById("camera-name").value=camera.name||"";
     document.getElementById("camera-id").value=camera.camera_id||"";
     document.getElementById("camera-source").value=camera.source||"";
+    document.getElementById("camera-source").dataset.edgeLocalCamera="";
     document.getElementById("source-type").value=camera.source_type||"rtsp";
     document.getElementById("camera-zone").value=camera.camera_zone||"";
     document.getElementById("crowd-threshold").value=camera.crowd_threshold||10;
     const role=document.getElementById("camera-role"); role.value=camera.camera_role==="GENERAL"?"General":"Entry";
+    window.scrollTo({top:0,behavior:"smooth"});
+  }
+
+  function adoptLocalCamera(camera){
+    if(!camera) return;
+    document.getElementById("camera-name").value=camera.name||camera.camera_id||"";
+    document.getElementById("camera-id").value=camera.camera_id||"";
+    const source=document.getElementById("camera-source");
+    source.value="";
+    source.dataset.edgeLocalCamera=camera.camera_id||"";
+    source.placeholder="Stored securely on edge as "+(camera.camera_id||"local camera");
+    document.getElementById("source-type").value=camera.source_type||"webcam";
+    document.getElementById("camera-zone").value=camera.camera_zone||"";
+    document.getElementById("crowd-threshold").value=camera.crowd_threshold||10;
+    const role=document.getElementById("camera-role");
+    role.value=(camera.camera_role==="ENTRANCE_EXIT")?"Entry":"General";
+    showMessage("Camera loaded from edge. Choose role/features and save; source stays hidden on the local PC.");
     window.scrollTo({top:0,behavior:"smooth"});
   }
 
@@ -292,7 +322,9 @@
       const scope = requireScope(["tenant_id", "shop_id", "site_id", "edge_id"]);
       const cameraId = document.getElementById("camera-id").value.trim();
       const name = document.getElementById("camera-name").value.trim();
-      const source = document.getElementById("camera-source").value.trim();
+      const sourceInput = document.getElementById("camera-source");
+      const edgeLocalCamera = sourceInput.dataset.edgeLocalCamera || "";
+      const source = sourceInput.value.trim() || (edgeLocalCamera === cameraId ? "edge-local:" + cameraId : "");
       const roleValue = document.getElementById("camera-role").value;
       if (!cameraId || !name || !source || !roleValue) throw new Error("Camera Name, Camera ID, Camera Source and Camera Role are required.");
       const checks = Array.from(document.querySelectorAll(".feature-card input[type=checkbox]"));
@@ -340,6 +372,11 @@
       const node = document.getElementById(id);
       if (node) node.value = "";
     });
+    const source = document.getElementById("camera-source");
+    if (source) {
+      source.dataset.edgeLocalCamera = "";
+      source.placeholder = "RTSP URL, video file path or webcam index";
+    }
     const role = document.getElementById("camera-role");
     if (role) role.value = "";
   }

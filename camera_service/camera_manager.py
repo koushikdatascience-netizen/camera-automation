@@ -232,6 +232,11 @@ class CameraManager:
         source = str(camera_data.get("source") or camera_data.get("rtsp_url") or "").strip()
         if not source:
             raise ValueError(f"camera {camera_id} has no source")
+        if source.startswith("edge-local:"):
+            existing_local = self.get_camera(source.split(":", 1)[1].strip() or camera_id)
+            if not existing_local:
+                raise ValueError(f"camera {camera_id} uses an edge-local source but is not present locally")
+            source = existing_local.rtsp_url
         settings = camera_data.get("settings") or {}
         features = camera_data.get("features") or {}
         supported_features = {
