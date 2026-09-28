@@ -14,9 +14,10 @@
     return fetch(url,{...options,headers});
   }
   async function bootstrapCrmSession() {
-    const token=portalToken(); if(!token) return;
+    const token=portalToken();
+    if(!token){ window.location.replace("/login"); throw new Error("Login required."); }
     const response=await authFetch("/session/status");
-    if(!response.ok) throw new Error("Your Madhushala Camera session is invalid or expired.");
+    if(!response.ok){ sessionStorage.removeItem("snapkey_portal_session"); window.location.replace("/login"); throw new Error("Your Camera Eye session is invalid or expired."); }
     const session=await response.json();
     const values={tenant_id:session.tenantId,company_code:session.companyCode,shop_id:session.shopCode};
     Object.entries(values).forEach(([key,value])=>{if(value) sessionStorage.setItem("snapkey_"+key,String(value));});
@@ -40,7 +41,7 @@
     const scope = portalScope();
     const missing = keys.filter(key => !scope[key]);
     if (missing.length) {
-      throw new Error("Portal scope is not configured: " + missing.join(", ") + ". Open the portal from the authenticated Madhushala shop context.");
+      throw new Error("Portal scope is not configured: " + missing.join(", ") + ". Sign in to Camera Eye again.");
     }
     return scope;
   }
