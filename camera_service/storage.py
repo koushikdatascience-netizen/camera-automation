@@ -63,6 +63,33 @@ class SQLiteStore:
         camera_id=payload.get('camera_id')
         return {**payload,'scope':{**scope,'camera_id':str(camera_id or 'system')}}
 
+    def apply_cloud_personnel(self, items):
+        """Idempotently mirror the shop-scoped cloud roster into local recognition tables."""
+        now=self.now(); seen=set()
+        with self._lock,self._conn() as c:
+            for item in items:
+                pid=str(item["person_id"]); seen.add(pid)
+                c.execute("""INSERT INTO personnel(id,employee_code,full_name,role,phone,email,active,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee_code=excluded.employee_code,
+                    full_name=excluded.full_name,role=excluded.role,phone=excluded.phone,email=excluded.email,
+                    active=excluded.active,updated_at=excluded.updated_at""",
+                    (pid,str(item["employee_code"]),str(item["full_name"]),str(item["role"]),item.get("phone"),item.get("email"),
+                     1 if item.get("active",True) else 0,now,now))
+                cloud_face_ids=set()
+                for face in item.get("faces") or []:
+                    fid=str(face["face_id"]); cloud_face_ids.add(fid)
+                    c.execute("""INSERT INTO face_profiles(id,person_id,embedding_json,quality,created_at,image_path)
+                        VALUES(?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET person_id=excluded.person_id,
+                        embedding_json=excluded.embedding_json,quality=excluded.quality""",
+                        (fid,pid,json.dumps(face["embedding"]),float(face.get("quality") or 0),now))
+                # Cloud is authoritative for cloud-ID faces. Preserve any local/manual
+                # faces with unrelated IDs, but remove cloud faces no longer assigned.
+                existing=c.execute("SELECT id FROM face_profiles WHERE person_id=?",(pid,)).fetchall()
+                for row in existing:
+                    if row["id"] not in cloud_face_ids and str(row["id"]).startswith("cloud_"):
+                        c.execute("DELETE FROM face_profiles WHERE id=?",(row["id"],))
+        return {"applied":len(seen)}
+
     def create_person(self, d):
         pid=str(uuid.uuid4()); now=self.now()
         with self._lock,self._conn() as c: c.execute("INSERT INTO personnel VALUES(?,?,?,?,?,?,?,?,?)",(pid,d.employee_code,d.full_name,d.role.value,d.phone,d.email,1,now,now))
