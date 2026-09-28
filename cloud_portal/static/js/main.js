@@ -429,5 +429,85 @@
     loadConfiguredCameras();
   }
 
-  bootstrapCrmSession().then(()=>{loadSystemStatus();wireCameraPage();}).catch(error=>showMessage(error.message,true));
+  function renderPersonnel(items){
+    const body=document.getElementById("personnel-table-body");
+    if(!body) return;
+    const count=document.getElementById("personnel-count");
+    if(count) count.textContent=items.length+" Personnel";
+    if(!items.length){
+      body.innerHTML="<tr class='empty-row'><td colspan='7'><div class='empty-personnel'><div class='empty-personnel-icon'>👥</div><h3>No personnel added yet</h3><p>Add your first person using the form above.</p></div></td></tr>";
+      return;
+    }
+    body.innerHTML=items.map(person=>{
+      const initials=String(person.full_name||"?").split(/\s+/).slice(0,2).map(x=>x[0]||"").join("").toUpperCase();
+      const face=person.face_enrolled?"✓ Enrolled":"Face required";
+      const sync=person.edge_synced?"✓ Edge synced":"Sync pending";
+      const crm=person.crm_mapping?"✓ CRM mapped":"CRM not mapped";
+      return "<tr><td><div class='avatar'>"+escapeHtml(initials)+"</div></td>"+
+        "<td><strong>"+escapeHtml(person.full_name||"")+"</strong><br><small>"+face+" · "+sync+" · "+crm+"</small></td>"+
+        "<td>"+escapeHtml(person.employee_code||"")+"</td><td>"+escapeHtml(person.role||"")+"</td>"+
+        "<td>"+(person.active?"Active":"Inactive")+"</td><td>"+escapeHtml(String(person.created_at||"").slice(0,10))+"</td>"+
+        "<td><button class='btn deactivate-person' data-person-id='"+escapeHtml(person.person_id)+"'>"+(person.active?"Deactivate":"Inactive")+"</button></td></tr>";
+    }).join("");
+    body.querySelectorAll(".deactivate-person").forEach(button=>button.addEventListener("click",async()=>{
+      if(button.textContent==="Inactive") return;
+      try{
+        const scope=requireScope(["tenant_id"]);
+        const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel/"+encodeURIComponent(button.dataset.personId),{method:"DELETE"});
+        if(!response.ok) throw new Error((await response.json()).detail||"Unable to deactivate person.");
+        showMessage("Personnel profile deactivated. The edge will receive the change automatically.");
+        await loadPersonnel();
+      }catch(error){showMessage(error.message,true);}
+    }));
+  }
+
+  async function loadPersonnel(){
+    if(!document.getElementById("personnel-table-body")) return;
+    const scope=requireScope(["tenant_id"]);
+    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel");
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.detail||"Unable to load personnel.");
+    renderPersonnel(data.items||[]);
+  }
+
+  async function addPersonnel(){
+    const button=document.getElementById("add-person-btn");
+    try{
+      const scope=requireScope(["tenant_id"]);
+      const name=document.getElementById("person-name").value.trim();
+      const code=document.getElementById("employee-code").value.trim();
+      const role=document.getElementById("person-role").value;
+      const file=document.getElementById("face-image").files[0];
+      if(!name||!code||!role) throw new Error("Name, employee code and role are required.");
+      if(!file) throw new Error("Upload one clear front-facing face image.");
+      button.disabled=true; button.textContent="Creating & enrolling…";
+      let response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel",{
+        method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({full_name:name,employee_code:code,role})
+      });
+      let person=await response.json();
+      if(!response.ok) throw new Error(person.detail||"Unable to create personnel.");
+      const form=new FormData(); form.append("file",file);
+      response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel/"+encodeURIComponent(person.id)+"/faces",{method:"POST",body:form,timeoutMs:120000});
+      const face=await response.json();
+      if(!response.ok){
+        await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel/"+encodeURIComponent(person.id),{method:"DELETE"});
+        throw new Error(face.detail||"Face enrollment failed.");
+      }
+      ["person-name","employee-code","face-image"].forEach(id=>document.getElementById(id).value="");
+      document.getElementById("person-role").value="";
+      showMessage("Person enrolled successfully. The assigned edge will sync the face automatically.");
+      await loadPersonnel();
+    }catch(error){showMessage(error.message,true);}
+    finally{if(button){button.disabled=false;button.textContent="+ Add Person";}}
+  }
+
+  function wirePersonnelPage(){
+    const button=document.getElementById("add-person-btn");
+    if(!button) return;
+    button.addEventListener("click",addPersonnel);
+    document.getElementById("focus-add-person-btn")?.addEventListener("click",()=>document.getElementById("person-name")?.focus());
+    loadPersonnel().catch(error=>showMessage(error.message,true));
+  }
+
+  bootstrapCrmSession().then(()=>{loadSystemStatus();wireCameraPage();wirePersonnelPage();}).catch(error=>showMessage(error.message,true));
 })();
