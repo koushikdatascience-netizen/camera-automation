@@ -41,6 +41,7 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS camera_configs(tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, camera_id TEXT NOT NULL, name TEXT NOT NULL, source_type TEXT NOT NULL, source TEXT NOT NULL, camera_role TEXT NOT NULL, camera_zone TEXT, crowd_threshold INTEGER NOT NULL DEFAULT 10, enabled INTEGER NOT NULL DEFAULT 1, features_json TEXT NOT NULL, settings_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(tenant_id,shop_id,edge_id,camera_id));
                 CREATE TABLE IF NOT EXISTS edge_commands(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,edge_id TEXT NOT NULL,command_type TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL, result_json TEXT,created_at TEXT NOT NULL,claimed_at TEXT,completed_at TEXT);
                 CREATE TABLE IF NOT EXISTS portal_sessions(session_id TEXT PRIMARY KEY,token_hash TEXT UNIQUE NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,user_id TEXT,display_name TEXT,role TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS portal_users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,display_name TEXT NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'OWNER',enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id, site_id, event_time);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_type ON edge_events(tenant_id, event_type, event_time);
                 """
@@ -259,6 +260,17 @@ class PortalStore:
         data.pop("request_json",None)
         return data
 
+
+    def create_portal_user(self, user: dict[str, Any]) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute("""INSERT INTO portal_users(id,email,password_hash,display_name,tenant_id,company_code,shop_id,role,enabled,created_at)
+                VALUES(?,?,?,?,?,?,?,?,1,?)""",(user["id"],user["email"],user["password_hash"],user["display_name"],
+                user["tenant_id"],user.get("company_code"),user["shop_id"],user["role"],user["created_at"]))
+
+    def portal_user_by_email(self, email: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute("SELECT * FROM portal_users WHERE lower(email)=lower(?) AND enabled=1",(email,)).fetchone()
+        return dict(row) if row else None
 
     def create_portal_session(self, session: dict[str, Any]) -> None:
         with self._lock,self._conn() as conn:
