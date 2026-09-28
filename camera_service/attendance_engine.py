@@ -46,12 +46,21 @@ class AttendanceEngine:
                 return {'type':'EXIT_WITHOUT_OPEN_SESSION'}
             return {'type':'EXIT','session':s}
     def on_track_lost(self,camera_id,track_id):
+        """Forget transient tracking state without changing business attendance state.
+
+        A lost tracker can mean occlusion, dropped frames, camera reconnect, or a person
+        simply leaving this camera's field of view. It is not evidence that an employee
+        started a CRM break. Breaks must be emitted by an explicit, confirmed break
+        workflow (for example a configured break zone/camera or portal action).
+        """
         with self._lock:
-            ident=self.identities.pop((camera_id,track_id),None); self.crossings.pop((camera_id,track_id),None)
+            ident=self.identities.pop((camera_id,track_id),None)
+            self.crossings.pop((camera_id,track_id),None)
             if ident:
                 p=self.presence.get(ident.person_id)
-                if p and p.status=='PRESENT' and p.current_track_id==track_id:
-                    p.status='BREAK'; p.break_started_at=ident.timestamp; p.last_seen_at=ident.timestamp; p.last_camera_id=camera_id
-                    self.store.add_person_event(ident.person_id,self.store_id,camera_id,'BREAK_START',ident.timestamp,{'track_id':track_id,'snapshot_path':p.last_snapshot_path})
+                if p and p.current_track_id==track_id:
+                    p.current_track_id=None
+                    p.last_seen_at=ident.timestamp
+                    p.last_camera_id=camera_id
     def presence_list(self):
         return [vars(v).copy() for v in self.presence.values()]
