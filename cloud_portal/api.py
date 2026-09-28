@@ -559,6 +559,37 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
     return result
 
 
+@app.get("/portal/v1/tenants/{tenant_id}/personnel")
+def portal_personnel(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    """Return credential-free personnel discovered from this shop's edge heartbeats.
+
+    Face embeddings and local image paths intentionally never enter the browser.
+    """
+    _portal_scope(tenant_id, principal)
+    mappings = {str(item["local_person_id"]): item for item in store.list_crm_person_mappings(tenant_id, principal.shop_id)}
+    items: dict[str, dict[str, Any]] = {}
+    for edge in store.list_edges(tenant_id, shop_id=principal.shop_id):
+        edge_id = str(edge.get("edge_id") or "")
+        status = edge.get("status") or {}
+        for person in status.get("personnel") or []:
+            person_id = str(person.get("person_id") or "").strip()
+            if not person_id:
+                continue
+            current = items.get(person_id)
+            record = {
+                "person_id": person_id,
+                "employee_code": person.get("employee_code"),
+                "full_name": person.get("full_name"),
+                "role": person.get("role"),
+                "active": bool(person.get("active", True)),
+                "face_count": int(person.get("face_count") or 0),
+                "edge_ids": sorted(set((current or {}).get("edge_ids", []) + [edge_id])),
+                "crm_mapping": mappings.get(person_id),
+            }
+            items[person_id] = record
+    return {"items": sorted(items.values(), key=lambda item: (str(item.get("full_name") or "").lower(), item["person_id"]))}
+
+
 @app.get("/portal/v1/tenants/{tenant_id}/crm/status")
 def crm_status(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
