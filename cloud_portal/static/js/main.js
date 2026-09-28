@@ -66,32 +66,63 @@
     node.textContent = message;
   }
 
+  function edgeOnline(edge) {
+    const stamp = Date.parse(edge.received_at || edge.last_seen_at || "");
+    return Number.isFinite(stamp) && (Date.now() - stamp) < 90000;
+  }
+
+  function renderEdges(edges) {
+    const container=document.getElementById("edge-device-list");
+    if(!container) return;
+    if(!edges.length){container.innerHTML="<p>No edge device has reported for this shop yet.</p>";return;}
+    container.innerHTML=edges.map(edge=>{
+      const status=edge.status||{};
+      const cameras=status.cameras||[];
+      const online=edgeOnline(edge);
+      const cameraText=cameras.length
+        ? cameras.map(camera=>escapeHtml(camera.name||camera.camera_id)+" ("+(camera.online?"online":"offline")+")").join(", ")
+        : "No local cameras reported";
+      return "<div style='padding:14px 0;border-bottom:1px solid #e5e7eb'>"+
+        "<div style='display:flex;justify-content:space-between;gap:12px'><div><strong>"+escapeHtml(edge.edge_id)+"</strong>"+
+        "<br><small>"+escapeHtml(edge.shop_id||"")+" · "+escapeHtml(edge.site_id||"")+"</small></div>"+
+        "<strong style='color:"+(online?"#166534":"#b91c1c")+"'>● "+(online?"Online":"Offline")+"</strong></div>"+
+        "<div style='margin-top:8px'><small>"+cameraText+"</small></div></div>";
+    }).join("");
+  }
+
   async function loadSystemStatus() {
     if (!document.getElementById("configured-cameras")) return;
     try {
       const scope = requireScope(["tenant_id"]);
-      const [healthResponse, summaryResponse, cameraResponse, unknownResponse] = await Promise.all([
+      const [healthResponse, summaryResponse, cameraResponse, unknownResponse, edgeResponse] = await Promise.all([
         fetch("/health"),
         authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/summary"),
         authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras"),
-        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/events?event_type=UNKNOWN_PERSON&limit=500")
+        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/events?event_type=UNKNOWN_PERSON&limit=500"),
+        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/edges")
       ]);
-      if (!healthResponse.ok || !summaryResponse.ok || !cameraResponse.ok || !unknownResponse.ok) throw new Error("Portal API is unavailable.");
+      if (!healthResponse.ok || !summaryResponse.ok || !cameraResponse.ok || !unknownResponse.ok || !edgeResponse.ok) throw new Error("Portal API is unavailable or this session is not authorized.");
       const health = await healthResponse.json();
       await summaryResponse.json();
       const cameras = await cameraResponse.json();
       const unknown = await unknownResponse.json();
+      const edgesBody = await edgeResponse.json();
+      const edges=edgesBody.items||[];
+      renderEdges(edges);
+      const inventory=edges.flatMap(edge=>(edge.status?.cameras||[]).map(camera=>({...camera,edge_id:edge.edge_id})));
+      const configuredIds=new Set((cameras.items||[]).map(camera=>camera.edge_id+"::"+camera.camera_id));
+      const uniqueInventory=inventory.filter(camera=>!configuredIds.has(camera.edge_id+"::"+camera.camera_id));
       setText("application-status", health.status === "ok" ? "● Online" : "● Degraded");
       setText("database-status", "● Connected");
-      setText("configured-cameras", (cameras.items || []).length);
-      const online = (cameras.items || []).filter(camera => camera.status && camera.status.online).length;
-      setText("online-cameras", online);
+      setText("configured-cameras", (cameras.items || []).length + uniqueInventory.length);
+      setText("online-cameras", inventory.filter(camera=>camera.online).length);
       const today = new Date().toISOString().slice(0, 10);
       const todayUnknown = (unknown.items || []).filter(item => String(item.event_time || "").slice(0, 10) === today).length;
       setText("unknown-incidents", todayUnknown);
     } catch (error) {
       setText("application-status", "● Setup Required");
       setText("database-status", "Connected");
+      renderEdges([]);
       showMessage(error.message, true);
     }
   }
@@ -173,12 +204,28 @@
     const container=document.getElementById("configured-camera-list");
     if(!container) return;
     try{
-      const scope=requireScope(["tenant_id","shop_id","edge_id"]);
-      const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id)+"&edge_id="+encodeURIComponent(scope.edge_id));
+      const scope=requireScope(["tenant_id","shop_id"]);
+      const edgeResponse=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edges");
+      const edgeBody=await edgeResponse.json(); if(!edgeResponse.ok) throw new Error(edgeBody.detail||"Unable to load edge devices.");
+      const edges=edgeBody.items||[];
+      const selectedEdge=scope.edge_id || edges[0]?.edge_id || "";
+      if(selectedEdge){
+        sessionStorage.setItem("snapkey_edge_id",selectedEdge);
+        const selected=edges.find(edge=>edge.edge_id===selectedEdge);
+        if(selected?.site_id) sessionStorage.setItem("snapkey_site_id",selected.site_id);
+      }
+      const url="/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id)+(selectedEdge?"&edge_id="+encodeURIComponent(selectedEdge):"");
+      const response=await authFetch(url);
       const body=await response.json(); if(!response.ok) throw new Error(body.detail||"Unable to load cameras.");
       const items=body.items||[];
-      if(!items.length){container.innerHTML="<p>No cameras configured for this edge yet.</p>";return;}
-      container.innerHTML=items.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type)+" · "+escapeHtml(camera.camera_role)+"</small></div><div><button class='btn btn-light edit-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Edit</button> <button class='btn btn-light delete-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Delete</button></div></div>").join("");
+      const edge=edges.find(item=>item.edge_id===selectedEdge);
+      const inventory=edge?.status?.cameras||[];
+      const configuredIds=new Set(items.map(camera=>camera.camera_id));
+      const localOnly=inventory.filter(camera=>!configuredIds.has(camera.camera_id));
+      if(!items.length && !localOnly.length){container.innerHTML="<p>No cameras configured or reported by this edge yet.</p>";return;}
+      const configuredHtml=items.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type)+" · "+escapeHtml(camera.camera_role)+" · Cloud managed</small></div><div><button class='btn btn-light edit-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Edit</button> <button class='btn btn-light delete-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Delete</button></div></div>").join("");
+      const localHtml=localOnly.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type||"camera")+" · "+escapeHtml(camera.camera_role||"GENERAL")+" · Edge discovered</small></div><strong style='color:"+(camera.online?"#166534":"#6b7280")+"'>● "+(camera.online?"Online":"Offline")+"</strong></div>").join("");
+      container.innerHTML=configuredHtml+localHtml;
       container.querySelectorAll(".edit-camera").forEach(button=>button.addEventListener("click",()=>editCamera(items.find(x=>x.camera_id===button.dataset.id))));
       container.querySelectorAll(".delete-camera").forEach(button=>button.addEventListener("click",()=>deleteCamera(button.dataset.id)));
     }catch(error){container.innerHTML="<p>"+escapeHtml(error.message)+"</p>";}
