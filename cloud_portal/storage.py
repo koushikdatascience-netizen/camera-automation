@@ -84,7 +84,7 @@ class PortalStore:
             conn.execute("INSERT OR IGNORE INTO tenants(id,name,created_at) VALUES(?,?,?)", (tenant_id, tenant_id, now))
             conn.execute("INSERT OR IGNORE INTO sites(id,tenant_id,name,created_at) VALUES(?,?,?,?)", (site_id, tenant_id, site_id, now))
             conn.execute("INSERT OR REPLACE INTO edge_machines(id,tenant_id,site_id,last_seen_at) VALUES(?,?,?,?)", (edge_id, tenant_id, site_id, now))
-            conn.execute(
+            inserted = conn.execute(
                 "INSERT OR IGNORE INTO edge_events(id,tenant_id,company_code,shop_id,site_id,edge_id,store_id,camera_id,event_type,event_time,received_at,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     event_id,
@@ -100,8 +100,8 @@ class PortalStore:
                     now,
                     json.dumps(envelope),
                 ),
-            )
-        return {"ok": True, "event_id": event_id, "tenant_id": tenant_id, "site_id": site_id}
+            ).rowcount > 0
+        return {"ok": True, "event_id": event_id, "tenant_id": tenant_id, "site_id": site_id, "inserted": bool(inserted)}
 
     def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         query = "SELECT * FROM edge_events WHERE tenant_id=?"
