@@ -119,13 +119,13 @@ class PostgresPortalStore:
             conn.execute(text("INSERT INTO tenants(id,name,created_at) VALUES(:id,:name,:now) ON CONFLICT(id) DO NOTHING"),{"id":tenant_id,"name":tenant_id,"now":now})
             conn.execute(text("INSERT INTO sites(id,tenant_id,name,created_at) VALUES(:id,:tenant,:name,:now) ON CONFLICT(id,tenant_id) DO NOTHING"),{"id":site_id,"tenant":tenant_id,"name":site_id,"now":now})
             conn.execute(text("INSERT INTO edge_machines(id,tenant_id,site_id,last_seen_at) VALUES(:id,:tenant,:site,:now) ON CONFLICT(id,tenant_id,site_id) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at"),{"id":edge_id,"tenant":tenant_id,"site":site_id,"now":now})
-            conn.execute(text("""INSERT INTO edge_events(id,tenant_id,company_code,shop_id,site_id,edge_id,store_id,camera_id,event_type,event_time,received_at,payload_json)
+            inserted = conn.execute(text("""INSERT INTO edge_events(id,tenant_id,company_code,shop_id,site_id,edge_id,store_id,camera_id,event_type,event_time,received_at,payload_json)
                 VALUES(:id,:tenant,:company,:shop,:site,:edge,:store,:camera,:type,:event_time,:received,CAST(:payload AS JSONB))
                 ON CONFLICT(id) DO NOTHING"""),{
                 "id":event_id,"tenant":tenant_id,"company":envelope.get("company_code"),"shop":envelope.get("shop_id") or site_id,
                 "site":site_id,"edge":edge_id,"store":envelope.get("store_id"),"camera":envelope.get("camera_id"),"type":envelope.get("event_type"),
-                "event_time":envelope.get("event_time"),"received":now,"payload":json.dumps(envelope)})
-        return {"ok":True,"event_id":event_id,"tenant_id":tenant_id,"site_id":site_id}
+                "event_time":envelope.get("event_time"),"received":now,"payload":json.dumps(envelope)}).rowcount > 0
+        return {"ok":True,"event_id":event_id,"tenant_id":tenant_id,"site_id":site_id,"inserted":bool(inserted)}
 
     def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100):
         clauses=["tenant_id=:tenant"]; params={"tenant":tenant_id,"limit":max(1,min(500,int(limit)))}
