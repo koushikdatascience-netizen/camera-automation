@@ -70,6 +70,12 @@ class PostgresPortalStore:
                 tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'OWNER',
                 enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL)""",
             """CREATE INDEX IF NOT EXISTS idx_portal_users_email ON portal_users(email)""",
+            """CREATE TABLE IF NOT EXISTS crm_person_mappings(
+                tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, local_person_id TEXT NOT NULL,
+                crm_user_id TEXT NOT NULL, employee_code TEXT, break_master_id TEXT, enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(tenant_id,shop_id,local_person_id))""",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_crm_person_user ON crm_person_mappings(tenant_id,shop_id,crm_user_id)""",
         ]
         with self._conn() as conn:
             for statement in statements:
@@ -312,3 +318,28 @@ class PostgresPortalStore:
         for key in ("created_at","expires_at"):
             if hasattr(data.get(key),"isoformat"): data[key]=data[key].isoformat()
         return data
+    def upsert_crm_person_mapping(self, mapping: dict[str, Any]) -> dict[str, Any]:
+        now=self.now()
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO crm_person_mappings(tenant_id,shop_id,local_person_id,crm_user_id,employee_code,break_master_id,enabled,created_at,updated_at)
+                VALUES(:tenant,:shop,:local,:crm,:employee,:break,TRUE,:now,:now)
+                ON CONFLICT(tenant_id,shop_id,local_person_id) DO UPDATE SET crm_user_id=EXCLUDED.crm_user_id,
+                employee_code=EXCLUDED.employee_code,break_master_id=EXCLUDED.break_master_id,enabled=TRUE,updated_at=EXCLUDED.updated_at"""),
+                {"tenant":mapping["tenant_id"],"shop":mapping["shop_id"],"local":mapping["local_person_id"],
+                 "crm":mapping["crm_user_id"],"employee":mapping.get("employee_code"),"break":mapping.get("break_master_id"),"now":now})
+        return self.crm_person_mapping(mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"])
+
+    def crm_person_mapping(self, tenant_id: str, shop_id: str, local_person_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT tenant_id,shop_id,local_person_id,crm_user_id,employee_code,break_master_id,enabled,created_at,updated_at
+                FROM crm_person_mappings WHERE tenant_id=:tenant AND shop_id=:shop AND local_person_id=:local AND enabled=TRUE"""),
+                {"tenant":tenant_id,"shop":shop_id,"local":local_person_id}).mappings().first()
+        return dict(row) if row else None
+
+    def list_crm_person_mappings(self, tenant_id: str, shop_id: str) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT tenant_id,shop_id,local_person_id,crm_user_id,employee_code,break_master_id,enabled,created_at,updated_at
+                FROM crm_person_mappings WHERE tenant_id=:tenant AND shop_id=:shop AND enabled=TRUE ORDER BY employee_code NULLS LAST,local_person_id"""),
+                {"tenant":tenant_id,"shop":shop_id}).mappings().all()
+        return [dict(row) for row in rows]
+
