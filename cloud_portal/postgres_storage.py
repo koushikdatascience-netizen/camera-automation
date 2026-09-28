@@ -80,6 +80,10 @@ class PostgresPortalStore:
     def provision_edge_credential(self, token_hash: str, tenant_id: str, company_code: str | None,
                                   shop_id: str, site_id: str, edge_id: str) -> None:
         with self._conn() as conn:
+            conn.execute(text("""UPDATE edge_credentials SET enabled=FALSE
+                WHERE tenant_id=:tenant AND shop_id=:shop AND site_id=:site AND edge_id=:edge
+                AND token_hash<>:token_hash AND enabled=TRUE"""),
+                {"token_hash":token_hash,"tenant":tenant_id,"shop":shop_id,"site":site_id,"edge":edge_id})
             conn.execute(text("""INSERT INTO edge_credentials(token_hash,tenant_id,company_code,shop_id,site_id,edge_id,enabled,created_at)
                 VALUES(:token_hash,:tenant,:company,:shop,:site,:edge,TRUE,:now)
                 ON CONFLICT(token_hash) DO UPDATE SET tenant_id=EXCLUDED.tenant_id,company_code=EXCLUDED.company_code,

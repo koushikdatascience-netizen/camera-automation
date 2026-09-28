@@ -10,6 +10,25 @@ from pathlib import Path
 
 import uvicorn
 
+def configure_frozen_ca_bundle() -> None:
+    """Point HTTPS clients at the bundled certifi CA file in PyInstaller builds."""
+    if not getattr(sys, "frozen", False):
+        return
+    bundle_base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    candidates = [
+        bundle_base / "certifi" / "cacert.pem",
+        Path(sys.executable).resolve().parent / "_internal" / "certifi" / "cacert.pem",
+        Path(sys.executable).resolve().parent / "certifi" / "cacert.pem",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            os.environ.setdefault("REQUESTS_CA_BUNDLE", str(candidate))
+            os.environ.setdefault("SSL_CERT_FILE", str(candidate))
+            return
+
+
+configure_frozen_ca_bundle()
+
 from camera_service.api import app
 
 _LOG_STREAM = None

@@ -4,6 +4,7 @@
 from pathlib import Path
 
 import insightface
+import certifi
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
@@ -19,6 +20,7 @@ datas = [
     ("../../config.example.yaml", "."),
     ("../../yolo11m.pt", "."),
     (str(INSIGHTFACE_OBJECTS / "meanshape_68.pkl"), "objects"),
+    (certifi.where(), "certifi"),
 ]
 if SCISSORS_MODEL.exists():
     datas.append((str(SCISSORS_MODEL), "kaggle-model"))
