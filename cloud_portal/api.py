@@ -317,6 +317,10 @@ app.mount("/static", StaticFiles(directory=PORTAL_STATIC_DIR), name="static")
 def portal_home():
     return FileResponse(PORTAL_STATIC_DIR / "index.html")
 
+@app.get("/login", include_in_schema=False)
+def portal_login():
+    return FileResponse(PORTAL_STATIC_DIR / "login.html")
+
 
 @app.get("/portal/{page_name}", include_in_schema=False)
 def portal_page(page_name: str):
