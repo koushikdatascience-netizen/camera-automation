@@ -281,8 +281,11 @@
   function editCamera(camera){
     document.getElementById("camera-name").value=camera.name||"";
     document.getElementById("camera-id").value=camera.camera_id||"";
-    document.getElementById("camera-source").value=camera.source||"";
-    document.getElementById("camera-source").dataset.edgeLocalCamera="";
+    const editSource=document.getElementById("camera-source");
+    editSource.value="";
+    editSource.dataset.edgeLocalCamera="";
+    editSource.dataset.cloudExistingCamera=camera.camera_id||"";
+    editSource.placeholder=camera.source_configured ? "Stored securely; leave blank to keep existing source" : "RTSP URL, video file path or webcam index";
     document.getElementById("source-type").value=camera.source_type||"rtsp";
     document.getElementById("camera-zone").value=camera.camera_zone||"";
     document.getElementById("crowd-threshold").value=camera.crowd_threshold||10;
@@ -297,6 +300,7 @@
     const source=document.getElementById("camera-source");
     source.value="";
     source.dataset.edgeLocalCamera=camera.camera_id||"";
+    source.dataset.cloudExistingCamera="";
     source.placeholder="Stored securely on edge as "+(camera.camera_id||"local camera");
     document.getElementById("source-type").value=camera.source_type||"webcam";
     document.getElementById("camera-zone").value=camera.camera_zone||"";
@@ -324,7 +328,10 @@
       const name = document.getElementById("camera-name").value.trim();
       const sourceInput = document.getElementById("camera-source");
       const edgeLocalCamera = sourceInput.dataset.edgeLocalCamera || "";
-      const source = sourceInput.value.trim() || (edgeLocalCamera === cameraId ? "edge-local:" + cameraId : "");
+      const cloudExistingCamera = sourceInput.dataset.cloudExistingCamera || "";
+      const source = sourceInput.value.trim()
+        || (edgeLocalCamera === cameraId ? "edge-local:" + cameraId : "")
+        || (cloudExistingCamera === cameraId ? "__KEEP_EXISTING__" : "");
       const roleValue = document.getElementById("camera-role").value;
       if (!cameraId || !name || !source || !roleValue) throw new Error("Camera Name, Camera ID, Camera Source and Camera Role are required.");
       const checks = Array.from(document.querySelectorAll(".feature-card input[type=checkbox]"));
@@ -375,6 +382,7 @@
     const source = document.getElementById("camera-source");
     if (source) {
       source.dataset.edgeLocalCamera = "";
+      source.dataset.cloudExistingCamera = "";
       source.placeholder = "RTSP URL, video file path or webcam index";
     }
     const role = document.getElementById("camera-role");
