@@ -44,11 +44,13 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - vision_evidence_data:/app/data/evidence
+      - vision_face_models:/root/.insightface
     networks: [vision]
 
 volumes:
   vision_postgres_data:
   vision_evidence_data:
+  vision_face_models:
 
 networks:
   vision:
