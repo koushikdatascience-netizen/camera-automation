@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 
 import requests
 
@@ -37,6 +38,22 @@ class CloudSyncClient:
             "camera_id": event.get("camera_id"),
             "payload": event,
         }
+
+    def upload_event_evidence(self, event_id: str, snapshot_path: str) -> dict[str, Any]:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        path = Path(snapshot_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"event evidence not found: {path}")
+        with path.open("rb") as stream:
+            response = requests.post(
+                self.config.base_url.rstrip("/") + f"/edge/v1/events/{event_id}/evidence",
+                files={"file": (path.name, stream, "image/jpeg")},
+                headers={"Authorization": f"Bearer {self.config.api_token}"},
+                timeout=max(float(self.config.timeout_seconds), 30.0),
+            )
+        response.raise_for_status()
+        return response.json()
 
     def post_event(self, edge_config, event: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled():
