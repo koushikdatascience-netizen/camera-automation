@@ -128,6 +128,7 @@ class PortalRegisterRequest(BaseModel):
     display_name: str
     company_code: str
     shop_code: str
+    activation_code: str
 
 class PortalLoginRequest(BaseModel):
     email: str
@@ -160,6 +161,8 @@ def _native_session(user: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/auth/register")
 def register_portal_user(payload: PortalRegisterRequest):
+    if not _edge_activation_code_valid(payload.activation_code):
+        raise HTTPException(401, "Invalid Camera Eye activation code")
     email=payload.email.strip().lower(); password=payload.password
     if "@" not in email: raise HTTPException(400,"Enter a valid email address")
     if len(password)<8: raise HTTPException(400,"Password must be at least 8 characters")
@@ -524,7 +527,10 @@ def portal_edges(tenant_id: str, principal: PortalPrincipal = Depends(require_po
 
 
 @app.post("/portal/v1/licenses/issue")
-def issue_license(request: LicenseIssueRequest):
+def issue_license(request: LicenseIssueRequest, http_request: Request):
+    supplied=http_request.headers.get("X-CRM-Integration-Key","")
+    if not _crm_integration_key_valid(supplied):
+        raise HTTPException(401, "Administrative integration key is required")
     return _issue_license_payload(
         tenant_id=request.tenant_id,
         site_id=request.site_id,
