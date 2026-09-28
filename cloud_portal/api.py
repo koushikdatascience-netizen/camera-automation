@@ -554,20 +554,26 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
     if not mapping:
         return
     event_time=datetime.fromisoformat(str(envelope["event_time"]).replace("Z","+00:00"))
+    if event_time.tzinfo is None:
+        event_time=event_time.replace(tzinfo=timezone.utc)
+    event_time=event_time.astimezone(timezone.utc)
+    # SnapKey UserRoster/LoginLogout accepts one payload for both mutations.
+    # Preserve the camera event timestamp as an ISO-8601 UTC value: ENTRY fills
+    # actualStartTime; EXIT fills actualOffTime. The unused fields are empty
+    # strings, matching the CRM contract supplied by the customer.
+    crm_timestamp=event_time.isoformat(timespec="milliseconds").replace("+00:00","Z")
     crm_user_id=mapping["crm_user_id"]
     if event_type in {"ATTENDANCE_ENTRY", "ATTENDANCE_EXIT"} and os.getenv("SNAPKEY_CRM_ATTENDANCE_ENABLED", "0").strip() != "1":
-        # LoginLogout's exact vendor contract must be verified before mutating a
-        # customer's roster. Recognition/attendance remains fully operational in
-        # Camera Eye while CRM attendance delivery is deliberately gated.
         return
+    location="Camera Eye - "+str(envelope.get("site_id") or shop_id)
     if event_type=="ATTENDANCE_ENTRY":
-        crm_client.login_logout({"userId":crm_user_id,"date":event_time.date().isoformat(),
-            "actualStartTime":event_time.strftime("%H:%M:%S"),"actualOffTime":None,
-            "loginLocation":str(envelope.get("site_id") or shop_id),"logoutLocation":None})
+        crm_client.login_logout({"userId":crm_user_id,"date":crm_timestamp,
+            "actualStartTime":crm_timestamp,"actualOffTime":"",
+            "loginLocation":location,"logoutLocation":""})
     elif event_type=="ATTENDANCE_EXIT":
-        crm_client.login_logout({"userId":crm_user_id,"date":event_time.date().isoformat(),
-            "actualStartTime":None,"actualOffTime":event_time.strftime("%H:%M:%S"),
-            "loginLocation":None,"logoutLocation":str(envelope.get("site_id") or shop_id)})
+        crm_client.login_logout({"userId":crm_user_id,"date":crm_timestamp,
+            "actualStartTime":"","actualOffTime":crm_timestamp,
+            "loginLocation":"","logoutLocation":location})
     elif event_type=="BREAK_START":
         # Current edge track-loss events are not sufficiently strong evidence of a real break.
         # Only explicitly confirmed break events may mutate CRM break state.
