@@ -138,6 +138,16 @@ class EdgeSyncWorker:
                             camera_sync["failed"] += 1
                 except Exception as exc:
                     camera_sync["error"] = str(exc)
+            personnel_sync={"fetched":0,"applied":0,"failed":0}
+            try:
+                roster=self.cloud_client.personnel_config()
+                people=roster.get("items") or []
+                personnel_sync["fetched"]=len(people)
+                applied=self.store.apply_cloud_personnel(people)
+                personnel_sync["applied"]=int(applied.get("applied") or 0)
+            except Exception as exc:
+                personnel_sync["failed"]+=1
+                personnel_sync["error"]=str(exc)
             for row in self.store.queued_events(getattr(self.sync_config, "batch_size", 50)):
                 try:
                     event = json.loads(row["payload_json"])
@@ -160,7 +170,7 @@ class EdgeSyncWorker:
                     failed += 1
 
             result = SyncRunResult(enabled=True, synced=synced, failed=failed)
-            self._remember(result, {"heartbeat": heartbeat_sync, "camera_sync": camera_sync, "command_sync": command_sync})
+            self._remember(result, {"heartbeat": heartbeat_sync, "camera_sync": camera_sync, "personnel_sync": personnel_sync, "command_sync": command_sync})
             return result
 
     def _edge_status_payload(self, license_status) -> dict[str, Any]:
