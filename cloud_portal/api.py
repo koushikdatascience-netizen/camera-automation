@@ -568,6 +568,14 @@ def crm_breaks(tenant_id: str, principal: PortalPrincipal = Depends(require_port
     try: return {"items":crm_client.my_breaks()}
     except httpx.HTTPError as exc: raise HTTPException(502,f"SnapKey CRM break lookup failed: {exc}") from exc
 
+@app.get("/portal/v1/tenants/{tenant_id}/crm/face-embeddings/{employee_code}")
+def crm_face_embeddings(tenant_id: str, employee_code: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
+    try: return {"employee_code":employee_code,"data":crm_client.face_embeddings(employee_code)}
+    except httpx.HTTPError as exc: raise HTTPException(502,f"SnapKey CRM face-embedding lookup failed: {exc}") from exc
+
+
 @app.get("/portal/v1/tenants/{tenant_id}/crm/person-mappings")
 def crm_person_mappings(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
