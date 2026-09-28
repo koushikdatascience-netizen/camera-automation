@@ -34,8 +34,12 @@ class PostgresPortalStore:
         statements = [
             """CREATE TABLE IF NOT EXISTS tenants(id TEXT PRIMARY KEY, name TEXT, created_at TIMESTAMPTZ NOT NULL)""",
             """CREATE TABLE IF NOT EXISTS sites(id TEXT NOT NULL, tenant_id TEXT NOT NULL, name TEXT, created_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(id,tenant_id))""",
-            """CREATE TABLE IF NOT EXISTS edge_machines(id TEXT NOT NULL, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, last_seen_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(id,tenant_id,site_id))""",
-            """CREATE TABLE IF NOT EXISTS edge_heartbeats(tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, received_at TIMESTAMPTZ NOT NULL, status_json JSONB NOT NULL, PRIMARY KEY(tenant_id,site_id,edge_id))""",
+            """CREATE TABLE IF NOT EXISTS edge_machines(id TEXT NOT NULL, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, last_seen_at TIMESTAMPTZ NOT NULL, company_code TEXT, shop_id TEXT, PRIMARY KEY(id,tenant_id,site_id))""",
+            """CREATE TABLE IF NOT EXISTS edge_heartbeats(tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, received_at TIMESTAMPTZ NOT NULL, status_json JSONB NOT NULL, company_code TEXT, shop_id TEXT, PRIMARY KEY(tenant_id,site_id,edge_id))""",
+            """ALTER TABLE edge_machines ADD COLUMN IF NOT EXISTS company_code TEXT""",
+            """ALTER TABLE edge_machines ADD COLUMN IF NOT EXISTS shop_id TEXT""",
+            """ALTER TABLE edge_heartbeats ADD COLUMN IF NOT EXISTS company_code TEXT""",
+            """ALTER TABLE edge_heartbeats ADD COLUMN IF NOT EXISTS shop_id TEXT""",
             """CREATE TABLE IF NOT EXISTS edge_credentials(token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL)""",
             """DROP INDEX IF EXISTS idx_edge_credentials_identity""",
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_credentials_active_identity ON edge_credentials(tenant_id,shop_id,site_id,edge_id) WHERE enabled=TRUE""",
@@ -130,15 +134,43 @@ class PostgresPortalStore:
 
     def record_heartbeat(self, payload: dict[str, Any]):
         tenant=str(payload["tenant_id"]); site=str(payload["site_id"]); edge=str(payload["edge_id"]); now=self.now()
+        company=payload.get("company_code"); shop=str(payload.get("shop_id") or site)
         with self._conn() as conn:
             conn.execute(text("INSERT INTO tenants(id,name,created_at) VALUES(:id,:id,:now) ON CONFLICT(id) DO NOTHING"),{"id":tenant,"now":now})
             conn.execute(text("INSERT INTO sites(id,tenant_id,name,created_at) VALUES(:site,:tenant,:site,:now) ON CONFLICT(id,tenant_id) DO NOTHING"),{"site":site,"tenant":tenant,"now":now})
-            conn.execute(text("INSERT INTO edge_machines(id,tenant_id,site_id,last_seen_at) VALUES(:edge,:tenant,:site,:now) ON CONFLICT(id,tenant_id,site_id) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at"),{"edge":edge,"tenant":tenant,"site":site,"now":now})
-            conn.execute(text("""INSERT INTO edge_heartbeats(tenant_id,site_id,edge_id,received_at,status_json)
-                VALUES(:tenant,:site,:edge,:now,CAST(:status AS JSONB))
-                ON CONFLICT(tenant_id,site_id,edge_id) DO UPDATE SET received_at=EXCLUDED.received_at,status_json=EXCLUDED.status_json"""),
-                {"tenant":tenant,"site":site,"edge":edge,"now":now,"status":json.dumps(payload.get("status") or {})})
+            conn.execute(text("""INSERT INTO edge_machines(id,tenant_id,site_id,last_seen_at,company_code,shop_id)
+                VALUES(:edge,:tenant,:site,:now,:company,:shop)
+                ON CONFLICT(id,tenant_id,site_id) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at,
+                company_code=EXCLUDED.company_code,shop_id=EXCLUDED.shop_id"""),
+                {"edge":edge,"tenant":tenant,"site":site,"now":now,"company":company,"shop":shop})
+            conn.execute(text("""INSERT INTO edge_heartbeats(tenant_id,site_id,edge_id,received_at,status_json,company_code,shop_id)
+                VALUES(:tenant,:site,:edge,:now,CAST(:status AS JSONB),:company,:shop)
+                ON CONFLICT(tenant_id,site_id,edge_id) DO UPDATE SET received_at=EXCLUDED.received_at,
+                status_json=EXCLUDED.status_json,company_code=EXCLUDED.company_code,shop_id=EXCLUDED.shop_id"""),
+                {"tenant":tenant,"site":site,"edge":edge,"now":now,"status":json.dumps(payload.get("status") or {}),
+                 "company":company,"shop":shop})
         return {"ok":True,"tenant_id":tenant,"site_id":site,"edge_id":edge,"received_at":now.isoformat()}
+
+    def list_edges(self, tenant_id: str, shop_id: str | None = None) -> list[dict[str, Any]]:
+        clauses=["m.tenant_id=:tenant"]; params: dict[str, Any]={"tenant":tenant_id}
+        if shop_id:
+            clauses.append("m.shop_id=:shop"); params["shop"]=shop_id
+        query="""SELECT m.id AS edge_id,m.tenant_id,m.company_code,m.shop_id,m.site_id,m.last_seen_at,
+                        h.received_at,h.status_json
+                 FROM edge_machines m
+                 LEFT JOIN edge_heartbeats h ON h.tenant_id=m.tenant_id AND h.site_id=m.site_id AND h.edge_id=m.id
+                 WHERE """+" AND ".join(clauses)+" ORDER BY m.last_seen_at DESC"
+        with self._conn() as conn:
+            rows=conn.execute(text(query),params).mappings().all()
+        result=[]
+        for row in rows:
+            data=dict(row)
+            for key in ("last_seen_at","received_at"):
+                if hasattr(data.get(key),"isoformat"): data[key]=data[key].isoformat()
+            status=data.pop("status_json") or {}
+            data["status"]=status if isinstance(status,dict) else json.loads(status)
+            result.append(data)
+        return result
 
 
     def upsert_camera(self, camera: dict[str, Any]) -> dict[str, Any]:
