@@ -47,6 +47,10 @@ class PortalStore:
             )
             self._ensure_column(conn, "edge_events", "company_code", "TEXT")
             self._ensure_column(conn, "edge_events", "shop_id", "TEXT")
+            self._ensure_column(conn, "edge_machines", "company_code", "TEXT")
+            self._ensure_column(conn, "edge_machines", "shop_id", "TEXT")
+            self._ensure_column(conn, "edge_heartbeats", "company_code", "TEXT")
+            self._ensure_column(conn, "edge_heartbeats", "shop_id", "TEXT")
 
     @staticmethod
     def _ensure_column(conn, table: str, column: str, definition: str) -> None:
@@ -129,13 +133,44 @@ class PortalStore:
         tenant_id = str(payload["tenant_id"])
         site_id = str(payload["site_id"])
         edge_id = str(payload["edge_id"])
+        company_code = payload.get("company_code")
+        shop_id = str(payload.get("shop_id") or site_id)
         now = self.now()
         with self._lock, self._conn() as conn:
             conn.execute("INSERT OR IGNORE INTO tenants(id,name,created_at) VALUES(?,?,?)", (tenant_id, tenant_id, now))
             conn.execute("INSERT OR IGNORE INTO sites(id,tenant_id,name,created_at) VALUES(?,?,?,?)", (site_id, tenant_id, site_id, now))
-            conn.execute("INSERT OR REPLACE INTO edge_machines(id,tenant_id,site_id,last_seen_at) VALUES(?,?,?,?)", (edge_id, tenant_id, site_id, now))
-            conn.execute("INSERT OR REPLACE INTO edge_heartbeats(tenant_id,site_id,edge_id,received_at,status_json) VALUES(?,?,?,?,?)", (tenant_id, site_id, edge_id, now, json.dumps(payload.get("status") or {})))
+            conn.execute("""INSERT INTO edge_machines(id,tenant_id,site_id,last_seen_at,company_code,shop_id)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(id,tenant_id,site_id) DO UPDATE SET
+                last_seen_at=excluded.last_seen_at,company_code=excluded.company_code,shop_id=excluded.shop_id""",
+                (edge_id, tenant_id, site_id, now, company_code, shop_id))
+            conn.execute("""INSERT INTO edge_heartbeats(tenant_id,site_id,edge_id,received_at,status_json,company_code,shop_id)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(tenant_id,site_id,edge_id) DO UPDATE SET
+                received_at=excluded.received_at,status_json=excluded.status_json,
+                company_code=excluded.company_code,shop_id=excluded.shop_id""",
+                (tenant_id, site_id, edge_id, now, json.dumps(payload.get("status") or {}), company_code, shop_id))
         return {"ok": True, "tenant_id": tenant_id, "site_id": site_id, "edge_id": edge_id, "received_at": now}
+
+    def list_edges(self, tenant_id: str, shop_id: str | None = None) -> list[dict[str, Any]]:
+        query = """SELECT m.id AS edge_id,m.tenant_id,m.company_code,m.shop_id,m.site_id,m.last_seen_at,
+                          h.received_at,h.status_json
+                   FROM edge_machines m
+                   LEFT JOIN edge_heartbeats h ON h.tenant_id=m.tenant_id AND h.site_id=m.site_id AND h.edge_id=m.id
+                   WHERE m.tenant_id=?"""
+        args: list[Any] = [tenant_id]
+        if shop_id:
+            query += " AND m.shop_id=?"
+            args.append(shop_id)
+        query += " ORDER BY m.last_seen_at DESC"
+        with self._conn() as conn:
+            rows = conn.execute(query, args).fetchall()
+        result = []
+        for row in rows:
+            data = dict(row)
+            data["status"] = json.loads(data.pop("status_json") or "{}")
+            result.append(data)
+        return result
 
 
     def upsert_camera(self, camera: dict[str, Any]) -> dict[str, Any]:
