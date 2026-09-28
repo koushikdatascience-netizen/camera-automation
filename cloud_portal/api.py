@@ -8,6 +8,8 @@ import hashlib
 import hmac
 import secrets
 import httpx
+import cv2
+import numpy as np
 from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
@@ -19,6 +21,7 @@ from pydantic import BaseModel, Field
 from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
 from cloud_portal.crm_client import crm_client
+from camera_service.face_service import FaceService
 
 
 def build_portal_store():
@@ -135,6 +138,27 @@ class PortalRegisterRequest(BaseModel):
 class PortalLoginRequest(BaseModel):
     email: str
     password: str
+
+class CloudPersonCreate(BaseModel):
+    employee_code: str = Field(min_length=1,max_length=64)
+    full_name: str = Field(min_length=1,max_length=128)
+    role: str = "WORKER"
+    phone: str | None = None
+    email: str | None = None
+
+class CloudPersonPatch(BaseModel):
+    full_name: str | None = None
+    role: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    active: bool | None = None
+
+_cloud_face_service: FaceService | None = None
+def _cloud_face_enroller() -> FaceService:
+    global _cloud_face_service
+    if _cloud_face_service is None:
+        _cloud_face_service=FaceService(None)
+    return _cloud_face_service
 
 class CrmPersonMappingRequest(BaseModel):
     local_person_id: str
@@ -472,6 +496,17 @@ def edge_camera_config(principal: EdgePrincipal = Depends(require_edge_token)):
     }
 
 
+@app.get("/edge/v1/config/personnel")
+def edge_personnel_config(principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global: raise HTTPException(403,"Scoped edge credential is required for personnel configuration")
+    items=[]
+    for person in store.list_cloud_people(principal.tenant_id,principal.shop_id):
+        faces=store.list_cloud_faces(principal.tenant_id,principal.shop_id,str(person["id"]),include_embedding=True)
+        items.append({"person_id":str(person["id"]),"employee_code":person["employee_code"],"full_name":person["full_name"],
+            "role":person["role"],"phone":person.get("phone"),"email":person.get("email"),"active":bool(person["active"]),
+            "faces":[{"face_id":str(f["id"]),"embedding":f["embedding"],"quality":float(f["quality"])} for f in faces]})
+    return {"tenant_id":principal.tenant_id,"shop_id":principal.shop_id,"items":items}
+
 @app.post("/edge/v1/events/{event_id}/evidence")
 async def upload_edge_event_evidence(
     event_id: str,
@@ -566,34 +601,74 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
 
 @app.get("/portal/v1/tenants/{tenant_id}/personnel")
 def portal_personnel(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
-    """Return credential-free personnel discovered from this shop's edge heartbeats.
-
-    Face embeddings and local image paths intentionally never enter the browser.
-    """
     _portal_scope(tenant_id, principal)
-    mappings = {str(item["local_person_id"]): item for item in store.list_crm_person_mappings(tenant_id, principal.shop_id)}
-    items: dict[str, dict[str, Any]] = {}
-    for edge in store.list_edges(tenant_id, shop_id=principal.shop_id):
-        edge_id = str(edge.get("edge_id") or "")
-        status = edge.get("status") or {}
-        for person in status.get("personnel") or []:
-            person_id = str(person.get("person_id") or "").strip()
-            if not person_id:
-                continue
-            current = items.get(person_id)
-            record = {
-                "person_id": person_id,
-                "employee_code": person.get("employee_code"),
-                "full_name": person.get("full_name"),
-                "role": person.get("role"),
-                "active": bool(person.get("active", True)),
-                "face_count": int(person.get("face_count") or 0),
-                "edge_ids": sorted(set((current or {}).get("edge_ids", []) + [edge_id])),
-                "crm_mapping": mappings.get(person_id),
-            }
-            items[person_id] = record
-    return {"items": sorted(items.values(), key=lambda item: (str(item.get("full_name") or "").lower(), item["person_id"]))}
+    mappings={str(x["local_person_id"]):x for x in store.list_crm_person_mappings(tenant_id,principal.shop_id)}
+    edge_people={}
+    for edge in store.list_edges(tenant_id,shop_id=principal.shop_id):
+        for person in (edge.get("status") or {}).get("personnel") or []:
+            edge_people.setdefault(str(person.get("person_id") or ""),[]).append(str(edge.get("edge_id") or ""))
+    items=[]
+    for person in store.list_cloud_people(tenant_id,principal.shop_id):
+        pid=str(person["id"]); item=dict(person)
+        item["person_id"]=pid; item["edge_ids"]=sorted(set(edge_people.get(pid,[])))
+        item["edge_synced"]=bool(item["edge_ids"]); item["crm_mapping"]=mappings.get(pid)
+        item["face_enrolled"]=int(item.get("face_count") or 0)>0
+        items.append(item)
+    return {"items":items}
 
+@app.post("/portal/v1/tenants/{tenant_id}/personnel")
+def create_portal_person(tenant_id: str, request: CloudPersonCreate, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    role=request.role.strip().upper()
+    if role not in {"OWNER","MANAGER","WORKER"}: raise HTTPException(400,"Role must be OWNER, MANAGER, or WORKER")
+    try:
+        return store.create_cloud_person({"id":secrets.token_urlsafe(18),"tenant_id":tenant_id,"shop_id":principal.shop_id,
+            "employee_code":request.employee_code.strip(),"full_name":request.full_name.strip(),"role":role,
+            "phone":request.phone,"email":request.email})
+    except Exception as exc:
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower(): raise HTTPException(409,"Employee code already exists in this shop")
+        raise
+
+@app.patch("/portal/v1/tenants/{tenant_id}/personnel/{person_id}")
+def patch_portal_person(tenant_id: str, person_id: str, request: CloudPersonPatch, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    item=store.update_cloud_person(tenant_id,principal.shop_id,person_id,request.model_dump(exclude_unset=True))
+    if not item: raise HTTPException(404,"Person not found")
+    return item
+
+@app.delete("/portal/v1/tenants/{tenant_id}/personnel/{person_id}")
+def deactivate_portal_person(tenant_id: str, person_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    item=store.update_cloud_person(tenant_id,principal.shop_id,person_id,{"active":False})
+    if not item: raise HTTPException(404,"Person not found")
+    return {"ok":True}
+
+@app.post("/portal/v1/tenants/{tenant_id}/personnel/{person_id}/faces")
+async def enroll_portal_face(tenant_id: str, person_id: str, file: UploadFile=File(...), principal: PortalPrincipal=Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if not store.get_cloud_person(tenant_id,principal.shop_id,person_id): raise HTTPException(404,"Person not found")
+    if (file.content_type or "").lower() not in {"image/jpeg","image/jpg","image/png","image/webp"}: raise HTTPException(415,"Unsupported image type")
+    raw=await file.read(8*1024*1024+1)
+    if len(raw)>8*1024*1024: raise HTTPException(413,"Image exceeds 8 MB")
+    image=cv2.imdecode(np.frombuffer(raw,np.uint8),cv2.IMREAD_COLOR)
+    if image is None: raise HTTPException(400,"Invalid image")
+    try: embedding,quality=_cloud_face_enroller().enroll(image)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    face_id=secrets.token_urlsafe(18)
+    root=Path(os.getenv("SNAPKEY_EVIDENCE_ROOT","/app/data/evidence"))/"personnel"/tenant_id/principal.shop_id/person_id
+    root.mkdir(parents=True,exist_ok=True); path=root/(face_id+".jpg")
+    cv2.imwrite(str(path),image)
+    face=store.add_cloud_face({"id":face_id,"person_id":person_id,"tenant_id":tenant_id,"shop_id":principal.shop_id,
+        "embedding":embedding,"quality":quality,"image_path":str(path)})
+    return {**face,"image_url":f"/portal/v1/tenants/{tenant_id}/personnel/{person_id}/faces/{face_id}/image"}
+
+@app.get("/portal/v1/tenants/{tenant_id}/personnel/{person_id}/faces/{face_id}/image")
+def portal_face_image(tenant_id: str,person_id: str,face_id: str,principal: PortalPrincipal=Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    faces=store.list_cloud_faces(tenant_id,principal.shop_id,person_id)
+    face=next((x for x in faces if str(x["id"])==face_id),None)
+    if not face or not face.get("image_path") or not Path(face["image_path"]).is_file(): raise HTTPException(404,"Face image not found")
+    return FileResponse(face["image_path"],media_type="image/jpeg")
 
 @app.get("/portal/v1/tenants/{tenant_id}/crm/status")
 def crm_status(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
