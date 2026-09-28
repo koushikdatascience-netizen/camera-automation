@@ -353,11 +353,20 @@ def _portal_scope(tenant_id: str, principal: PortalPrincipal) -> None:
         raise HTTPException(403,"Portal session is not authorized for this tenant")
 
 
+def _portal_camera_view(camera: dict[str, Any]) -> dict[str, Any]:
+    """Return browser-safe camera metadata without exposing connection credentials."""
+    view = dict(camera)
+    source = str(view.pop("source", "") or "")
+    view["source_configured"] = bool(source)
+    view["source_is_edge_local"] = source.startswith("edge-local:")
+    return view
+
+
 @app.get("/portal/v1/tenants/{tenant_id}/cameras")
 def portal_cameras(tenant_id: str, shop_id: str | None = None, edge_id: str | None = None, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id,principal)
     if shop_id and shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
-    return {"items": store.list_cameras(tenant_id, shop_id=principal.shop_id, edge_id=edge_id)}
+    return {"items": [_portal_camera_view(camera) for camera in store.list_cameras(tenant_id, shop_id=principal.shop_id, edge_id=edge_id)]}
 
 
 @app.put("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
@@ -368,9 +377,18 @@ def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConf
         raise HTTPException(400, "Camera scope does not match request path")
     if request.source_type not in {"rtsp", "file", "webcam"}:
         raise HTTPException(400, "Unsupported camera source type")
-    if not request.source.strip():
+    payload = request.model_dump()
+    if request.source == "__KEEP_EXISTING__":
+        existing = next((
+            camera for camera in store.list_cameras(tenant_id, shop_id=principal.shop_id, edge_id=request.edge_id)
+            if str(camera.get("camera_id")) == camera_id
+        ), None)
+        if not existing or not str(existing.get("source") or "").strip():
+            raise HTTPException(400, "Existing camera source could not be preserved")
+        payload["source"] = existing["source"]
+    elif not request.source.strip():
         raise HTTPException(400, "Camera source is required")
-    return {"camera": store.upsert_camera(request.model_dump())}
+    return {"camera": _portal_camera_view(store.upsert_camera(payload))}
 
 
 @app.delete("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
