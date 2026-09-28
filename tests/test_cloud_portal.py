@@ -136,7 +136,7 @@ def test_crm_attendance_uses_verified_login_logout_contract(tmp_path, monkeypatc
   'crm_user_id':'crm-user-1','employee_code':'EMP-1','break_master_id':None,
  })
  calls=[]
- monkeypatch.setattr(api.crm_client,'configured',True)
+ api.crm_client.token='test-token'
  monkeypatch.setattr(api.crm_client,'login_logout',lambda payload: calls.append(payload) or {'ok':True})
  base={'schema_version':'edge.event.v1','tenant_id':'tenant-a','shop_id':'SHOP1','site_id':'site-1',
        'edge_id':'edge-1','event_id':'evt-entry','event_type':'ATTENDANCE_ENTRY',
