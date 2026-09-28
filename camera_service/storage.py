@@ -69,6 +69,13 @@ class SQLiteStore:
         with self._lock,self._conn() as c:
             for item in items:
                 pid=str(item["person_id"]); seen.add(pid)
+                legacy=c.execute("SELECT id FROM personnel WHERE employee_code=? AND id<>?",(str(item["employee_code"]),pid)).fetchone()
+                if legacy:
+                    old_id=str(legacy["id"])
+                    c.execute("UPDATE face_profiles SET person_id=? WHERE person_id=?",(pid,old_id))
+                    c.execute("UPDATE attendance_sessions SET person_id=? WHERE person_id=?",(pid,old_id))
+                    c.execute("UPDATE person_events SET person_id=? WHERE person_id=?",(pid,old_id))
+                    c.execute("DELETE FROM personnel WHERE id=?",(old_id,))
                 c.execute("""INSERT INTO personnel(id,employee_code,full_name,role,phone,email,active,created_at,updated_at)
                     VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee_code=excluded.employee_code,
                     full_name=excluded.full_name,role=excluded.role,phone=excluded.phone,email=excluded.email,
@@ -82,11 +89,10 @@ class SQLiteStore:
                         VALUES(?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET person_id=excluded.person_id,
                         embedding_json=excluded.embedding_json,quality=excluded.quality""",
                         (fid,pid,json.dumps(face["embedding"]),float(face.get("quality") or 0),now))
-                # Cloud is authoritative for cloud-ID faces. Preserve any local/manual
-                # faces with unrelated IDs, but remove cloud faces no longer assigned.
+                # Once a person is cloud-managed, the cloud face set is authoritative.
                 existing=c.execute("SELECT id FROM face_profiles WHERE person_id=?",(pid,)).fetchall()
                 for row in existing:
-                    if row["id"] not in cloud_face_ids and str(row["id"]).startswith("cloud_"):
+                    if row["id"] not in cloud_face_ids:
                         c.execute("DELETE FROM face_profiles WHERE id=?",(row["id"],))
         return {"applied":len(seen)}
 
