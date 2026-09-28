@@ -81,9 +81,7 @@
         <p>Add and manage personnel profiles for recognition and attendance.</p>
       </div>
 
-      <button class="btn btn-primary">
-        + Add Person
-      </button>
+      <button class="btn btn-primary" id="focus-add-person-btn">+ Add Person</button>
 
     </div>
 
@@ -156,11 +154,9 @@
           <select id="person-role">
 
             <option value="">Select role</option>
-            <option>Employee</option>
-            <option>Manager</option>
-            <option>Security</option>
-            <option>Administrator</option>
-            <option>Visitor</option>
+            <option value="WORKER">Worker</option>
+            <option value="MANAGER">Manager</option>
+            <option value="OWNER">Owner</option>
 
           </select>
 
@@ -204,7 +200,7 @@
 
         <div class="personnel-form-action">
 
-          <button class="btn btn-primary add-person-button">
+          <button class="btn btn-primary add-person-button" id="add-person-btn">
             + Add Person
           </button>
 
@@ -226,9 +222,7 @@
           <p>View and manage registered personnel.</p>
         </div>
 
-        <div class="personnel-count">
-          0 Personnel
-        </div>
+        <div class="personnel-count" id="personnel-count">0 Personnel</div>
 
       </div>
 
@@ -251,7 +245,7 @@
             </tr>
           </thead>
 
-          <tbody>
+          <tbody id="personnel-table-body">
 
             <!-- Empty state -->
 
@@ -289,5 +283,6 @@
 
 </main>
 
+<script src="/static/js/main.js"></script>
 </body>
 </html>
