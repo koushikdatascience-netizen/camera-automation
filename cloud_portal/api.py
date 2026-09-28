@@ -423,8 +423,7 @@ def ingest_edge_event(envelope: dict[str, Any], principal: EdgePrincipal = Depen
 @app.get("/portal/v1/tenants/{tenant_id}/summary")
 def tenant_summary(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
-    # Summary remains tenant-level for now; detailed resources below are always shop scoped.
-    return store.tenant_summary(tenant_id)
+    return store.tenant_summary(tenant_id, shop_id=principal.shop_id)
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/events")
