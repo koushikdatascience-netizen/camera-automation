@@ -106,6 +106,15 @@ class EdgeSyncWorker:
             for row in self.store.queued_events(getattr(self.sync_config, "batch_size", 50)):
                 try:
                     event = json.loads(row["payload_json"])
+                    metadata = event.get("metadata") or {}
+                    snapshot_path = (
+                        metadata.get("snapshot_path")
+                        or metadata.get("person_path")
+                        or metadata.get("face_path")
+                    )
+                    if snapshot_path:
+                        evidence = self.cloud_client.upload_event_evidence(str(event.get("event_id") or row["id"]), snapshot_path)
+                        event["metadata"] = {**metadata, "cloud_evidence": evidence}
                     self.cloud_client.post_event(self.edge_config, event)
                     self.store.mark_event_synced(row["id"])
                     synced += 1
