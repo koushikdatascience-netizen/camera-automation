@@ -186,10 +186,10 @@ class CameraManager:
             camera_role=camera_data.get('camera_role', CameraRole.GENERAL),
             camera_zone=camera_data.get('camera_zone', CameraZone.INSIDE),
             crowd_threshold=max(1, int(camera_data.get('crowd_threshold', 10) or 10)),
-            tracking_fps=max(1.0, min(float(camera_data.get('tracking_fps', 3.0) or 3.0), 12.0)),
-            tracking_imgsz=max(256, min(int(camera_data.get('tracking_imgsz', 384) or 384), 640)),
-            tracking_quality=max(35, min(int(camera_data.get('tracking_quality', 65) or 65), 95)),
-            tracking_mode=str(camera_data.get('tracking_mode', 'detect') or 'detect').strip().lower() if str(camera_data.get('tracking_mode', 'detect') or 'detect').strip().lower() in {'detect','track'} else 'detect',
+            tracking_fps=max(1.0, min(float(camera_data.get('tracking_fps', os.environ.get("SNAPKEY_PROFILE_TRACKING_FPS", 3.0)) or 3.0), 12.0)),
+            tracking_imgsz=max(256, min(int(camera_data.get('tracking_imgsz', os.environ.get("SNAPKEY_PROFILE_TRACKING_IMGSZ", 384)) or 384), 640)),
+            tracking_quality=max(35, min(int(camera_data.get('tracking_quality', os.environ.get("SNAPKEY_PROFILE_TRACKING_QUALITY", 65)) or 65), 95)),
+            tracking_mode=str(camera_data.get('tracking_mode', os.environ.get("SNAPKEY_PROFILE_TRACKING_MODE", "detect")) or 'detect').strip().lower() if str(camera_data.get('tracking_mode', os.environ.get("SNAPKEY_PROFILE_TRACKING_MODE", "detect")) or 'detect').strip().lower() in {'detect','track'} else 'detect',
             features=CameraFeatures(**features),
             created_at=datetime.now(timezone.utc).isoformat(),
             updated_at=datetime.now(timezone.utc).isoformat()
@@ -248,10 +248,10 @@ class CameraManager:
             "camera_role": camera_data.get("camera_role") or CameraRole.GENERAL.value,
             "camera_zone": self._normalize_cloud_zone(camera_data.get("camera_zone")),
             "crowd_threshold": camera_data.get("crowd_threshold", 10),
-            "tracking_fps": settings.get("tracking_fps", 3.0),
-            "tracking_imgsz": settings.get("max_frame_width", settings.get("tracking_imgsz", 384)),
-            "tracking_quality": settings.get("tracking_quality", 65),
-            "tracking_mode": settings.get("tracking_mode", "detect"),
+            "tracking_fps": settings.get("tracking_fps", os.environ.get("SNAPKEY_PROFILE_TRACKING_FPS", 3.0)),
+            "tracking_imgsz": settings.get("max_frame_width", settings.get("tracking_imgsz", os.environ.get("SNAPKEY_PROFILE_TRACKING_IMGSZ", 384))),
+            "tracking_quality": settings.get("tracking_quality", os.environ.get("SNAPKEY_PROFILE_TRACKING_QUALITY", 65)),
+            "tracking_mode": settings.get("tracking_mode", os.environ.get("SNAPKEY_PROFILE_TRACKING_MODE", "detect")),
             "features": local_features,
         }
         existing = self.get_camera(camera_id)
@@ -575,7 +575,9 @@ class CameraManager:
 
     def _prepare_tracking_frame(self, frame, camera_config=None):
         """Downscale large camera frames before AI/streaming for CPU-friendly demos."""
-        max_width = max(480, min(int(getattr(camera_config, "tracking_imgsz", 384) or 384) * 2, 960))
+        profile_imgsz = int(os.environ.get("SNAPKEY_PROFILE_TRACKING_IMGSZ", "640") or 640)
+        configured_imgsz = int(getattr(camera_config, "tracking_imgsz", profile_imgsz) or profile_imgsz)
+        max_width = max(480, min(configured_imgsz, profile_imgsz) * 2, 960)
         h, w = frame.shape[:2]
         if w <= max_width:
             return frame
@@ -586,7 +588,9 @@ class CameraManager:
         if stream_state is None:
             return True
         now = time.monotonic()
-        ai_fps = max(0.5, min(float(getattr(camera_config, "tracking_fps", 2.0) or 2.0), 8.0))
+        profile_fps = float(os.environ.get("SNAPKEY_PROFILE_TRACKING_FPS", "8") or 8)
+        configured_fps = float(getattr(camera_config, "tracking_fps", profile_fps) or profile_fps)
+        ai_fps = max(0.5, min(configured_fps, profile_fps, 8.0))
         if not stream_state.get("latest_summary"):
             stream_state["last_ai_started_at"] = now
             return True
@@ -622,8 +626,9 @@ class CameraManager:
     def _annotate_tracking_frame(self, frame, model_path: str, face_service=None, recognition_config=None, camera_config=None, attendance_engine=None, store=None, stream_state=None, object_security_model_path: str | None = None, object_security_confidence: float = 0.55):
         try:
             overlays = []
-            imgsz = int(getattr(camera_config, "tracking_imgsz", 384) or 384)
-            mode = getattr(camera_config, "tracking_mode", "detect") or "detect"
+            profile_imgsz = int(os.environ.get("SNAPKEY_PROFILE_TRACKING_IMGSZ", "384") or 384)
+            imgsz = min(int(getattr(camera_config, "tracking_imgsz", profile_imgsz) or profile_imgsz), profile_imgsz)
+            mode = getattr(camera_config, "tracking_mode", None) or os.environ.get("SNAPKEY_PROFILE_TRACKING_MODE", "detect") or "detect"
             router_setting = os.environ.get("SNAPKEY_INFERENCE_ROUTER_ENABLED", "1").strip().lower()
             use_router = router_setting not in {"0", "false", "no", "off"}
 
@@ -913,7 +918,8 @@ class CameraManager:
 
                         security_model = YOLO(object_security_model_path)
                         self._tracking_models[security_key] = security_model
-                    security_imgsz = max(416, min(int(getattr(camera_config, "tracking_imgsz", 512) or 512), 640))
+                    profile_security_imgsz = int(os.environ.get("SNAPKEY_PROFILE_OBJECT_SECURITY_IMGSZ", "640") or 640)
+                    security_imgsz = max(416, min(int(getattr(camera_config, "tracking_imgsz", profile_security_imgsz) or profile_security_imgsz), profile_security_imgsz, 640))
                     security_results = security_model.predict(
                         frame,
                         conf=float(object_security_confidence),
@@ -1146,7 +1152,8 @@ class CameraManager:
             annotated = self._annotate_tracking_frame(frame, model_path, face_service, recognition_config, camera_config, attendance_engine, store, stream_state, object_security_model_path, object_security_confidence)
         else:
             annotated = self._draw_tracking_demo_overlay(frame, camera_config, stream_state or {}, attendance_engine, store)
-        quality = max(35, min(int(getattr(camera_config, "tracking_quality", 65) or 65), 95))
+        profile_quality = int(os.environ.get("SNAPKEY_PROFILE_TRACKING_QUALITY", "65") or 65)
+        quality = max(35, min(int(getattr(camera_config, "tracking_quality", profile_quality) or profile_quality), profile_quality, 95))
         ok, encoded = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
         if not ok:
             return None
@@ -1461,7 +1468,9 @@ class CameraManager:
         inference cannot freeze the client-facing live view.
         """
         rtsp_url = camera_config.rtsp_url
-        target_ai_fps = max(0.5, min(float(getattr(camera_config, "tracking_fps", 2.0) or 2.0), 8.0))
+        profile_fps = float(os.environ.get("SNAPKEY_PROFILE_TRACKING_FPS", "8") or 8)
+        configured_fps = float(getattr(camera_config, "tracking_fps", profile_fps) or profile_fps)
+        target_ai_fps = max(0.5, min(configured_fps, profile_fps, 8.0))
         display_fps = max(6.0, min(target_ai_fps * 4.0, 12.0))
         frame_delay = 1.0 / display_fps
         stream_state = {
@@ -1641,7 +1650,8 @@ class CameraManager:
                                 2,
                             )
                     self._record_security_clip_frame(stream_state, frame, store)
-                    quality = max(35, min(int(getattr(camera_config, "tracking_quality", 65) or 65), 95))
+                    profile_quality = int(os.environ.get("SNAPKEY_PROFILE_TRACKING_QUALITY", "65") or 65)
+                    quality = max(35, min(int(getattr(camera_config, "tracking_quality", profile_quality) or profile_quality), profile_quality, 95))
                     ok, encoded = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
                     if ok and encoded is not None:
                         yield (

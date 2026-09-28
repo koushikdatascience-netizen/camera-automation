@@ -2,6 +2,41 @@ store_id: client-shop-01
 database_path: data/camera_automation.db
 evidence_dir: data/evidence
 yolo_model: yolo11m.pt
+runtime:
+  profile: auto
+  inference_backend: AUTO
+  low_power:
+    model: yolo11n.pt
+    tracking_fps: 1
+    tracking_imgsz: 320
+    tracking_quality: 45
+    tracking_mode: detect
+    object_security_imgsz: 416
+    face_recheck_seconds: 5
+  balanced:
+    model: yolo11n.pt
+    tracking_fps: 3
+    tracking_imgsz: 384
+    tracking_quality: 60
+    tracking_mode: detect
+    object_security_imgsz: 512
+    face_recheck_seconds: 3
+  performance:
+    model: yolo11m.pt
+    tracking_fps: 6
+    tracking_imgsz: 640
+    tracking_quality: 70
+    tracking_mode: track
+    object_security_imgsz: 640
+    face_recheck_seconds: 2
+  cloud_assist:
+    model: yolo11n.pt
+    tracking_fps: 2
+    tracking_imgsz: 384
+    tracking_quality: 60
+    tracking_mode: detect
+    object_security_imgsz: 512
+    face_recheck_seconds: 4
 features:
   attendance: false
   face_recognition: false
@@ -46,7 +81,7 @@ edge:
   license_public_key: ""
 cloud_sync:
   enabled: false
-  base_url: https://your-platform.example.com
+  base_url: https://camera.snapkey.ai
   api_token: CHANGE_ME
   timeout_seconds: 10
   batch_size: 50

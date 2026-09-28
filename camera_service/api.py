@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import cv2, numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query, Form
-from camera_service.config import load_config
+from camera_service.config import load_config, save_edge_activation
 from camera_service.models import PersonnelCreate, PersonnelPatch
 from camera_service.storage import SQLiteStore
 from camera_service.face_service import FaceService
@@ -25,6 +25,7 @@ from typing import Optional
 from pydantic import BaseModel
 import json
 import os
+import requests
 import shutil
 import tempfile
 import webbrowser
@@ -331,6 +332,14 @@ def health():
     return {
         'status':'ok',
         'store_id':config.store_id,
+        'runtime': {
+            'profile': config.runtime.profile,
+            'inference_backend': os.environ.get('SNAPKEY_INFERENCE_BACKEND', 'AUTO'),
+            'model': config.yolo_model,
+            'tracking_fps_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_FPS'),
+            'tracking_imgsz_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_IMGSZ'),
+            'tracking_quality_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_QUALITY'),
+        },
         'cameras':len(camera_manager.list_cameras()),
         'online_cameras':sum(1 for status in statuses if status and status.online),
         'object_security_enabled':config.object_security.enabled or config.features.object_security,
@@ -358,6 +367,14 @@ def edge_status():
         'cloud_sync_enabled': cloud_client.enabled(),
         'cloud_sync_allowed': cloud_client.enabled() and license_status.active,
         'cloud_sync_worker': sync_worker.status(),
+        'runtime': {
+            'profile': config.runtime.profile,
+            'inference_backend': os.environ.get('SNAPKEY_INFERENCE_BACKEND', 'AUTO'),
+            'model': config.yolo_model,
+            'tracking_fps_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_FPS'),
+            'tracking_imgsz_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_IMGSZ'),
+            'tracking_quality_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_QUALITY'),
+        },
         'queue': store.event_queue_status(),
         'alert_recipients': alert_dispatcher.preview_recipients(),
         'evidence': config.evidence.model_dump(),
@@ -380,10 +397,62 @@ class LicenseInstallRequest(BaseModel):
     license: dict
     signature: str
 
+class EdgeActivationRequest(BaseModel):
+    company_code: str
+    shop_code: str
+    activation_code: str
+
 @app.post('/api/v1/license/install')
 def install_license(request: LicenseInstallRequest):
     try:
         status = license_manager.install_signed_license(request.license, request.signature)
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
+@app.post('/api/v1/activate')
+def activate_edge(request: EdgeActivationRequest):
+    global config, cloud_client, license_manager, sync_worker
+    machine_code = license_manager.machine_code()
+    cloud_url = "https://camera.snapkey.ai"
+    try:
+        response = requests.post(
+            cloud_url + "/edge/v1/activate",
+            json={
+                "company_code": request.company_code.strip(),
+                "shop_code": request.shop_code.strip(),
+                "activation_code": request.activation_code.strip(),
+                "machine_code": machine_code,
+                "device_name": socket.gethostname(),
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        activation = response.json()
+        config_path = save_edge_activation(activation)
+        config = load_config()
+        cloud_client.config = config.cloud_sync
+        license_manager.edge = config.edge
+        sync_worker.edge_config = config.edge
+        sync_worker.sync_config = config.cloud_sync
+        license_status = license_manager.install_signed_license(activation["license"], activation["signature"])
+        sync_result = sync_worker.run_once()
+        return {
+            "ok": True,
+            "message": activation.get("message", "Activated successfully"),
+            "config_path": str(config_path),
+            "edge": {
+                "tenant_id": config.edge.tenant_id,
+                "company_code": config.edge.company_code,
+                "shop_id": config.edge.shop_id,
+                "site_id": config.edge.site_id,
+                "edge_id": config.edge.edge_id,
+            },
+            "license": license_status.model_dump(),
+            "sync": sync_result.model_dump(),
+        }
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        raise HTTPException(400, detail)
     except Exception as exc:
         raise HTTPException(400, str(exc))
     return status.model_dump()

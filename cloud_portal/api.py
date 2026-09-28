@@ -17,12 +17,12 @@ from pydantic import BaseModel, Field
 
 from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
-from cloud_portal.postgres_storage import PostgresPortalStore
 
 
 def build_portal_store():
     database_url = os.getenv("SNAPKEY_DATABASE_URL", "").strip()
     if database_url:
+        from cloud_portal.postgres_storage import PostgresPortalStore
         return PostgresPortalStore(database_url)
     if os.getenv("SNAPKEY_ENV", "development").strip().lower() == "production":
         raise RuntimeError("SNAPKEY_DATABASE_URL is required in production")
@@ -35,6 +35,7 @@ if os.getenv("SNAPKEY_ENABLE_CLOUD_INFERENCE", "0").strip() == "1":
     from cloud_portal.inference_api import router as inference_router
     app.include_router(inference_router)
 
+DEFAULT_LICENSE_FEATURES = ["tracking", "attendance", "face_recognition", "unknown_detection", "shoplifting", "object_security", "cloud_sync", "alerts", "evidence_clips"]
 
 class LicenseIssueRequest(BaseModel):
     tenant_id: str
@@ -43,9 +44,16 @@ class LicenseIssueRequest(BaseModel):
     machine_code: str
     plan: str = "professional"
     max_cameras: int = 7
-    features: list[str] = Field(default_factory=lambda: ["tracking", "attendance", "face_recognition", "unknown_detection", "shoplifting", "object_security", "cloud_sync", "alerts", "evidence_clips"])
+    features: list[str] = Field(default_factory=lambda: DEFAULT_LICENSE_FEATURES.copy())
     days: int = 30
     grace_days: int = 7
+
+class EdgeActivationRequest(BaseModel):
+    company_code: str | None = None
+    shop_code: str
+    activation_code: str
+    machine_code: str
+    device_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +127,38 @@ def _crm_integration_key_valid(value: str | None) -> bool:
     expected=os.getenv("SNAPKEY_CRM_INTEGRATION_KEY","").strip()
     return bool(expected and value and secrets.compare_digest(value.strip(),expected))
 
+def _edge_activation_code_valid(value: str | None) -> bool:
+    expected=os.getenv("SNAPKEY_EDGE_ACTIVATION_CODE","").strip()
+    return bool(expected and value and secrets.compare_digest(value.strip(),expected))
+
+def _slug(value: str) -> str:
+    cleaned="".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    return "-".join(part for part in cleaned.split("-") if part) or "default"
+
+def _issue_license_payload(tenant_id: str, site_id: str, edge_id: str, machine_code: str,
+                           plan: str = "professional", max_cameras: int = 7,
+                           features: list[str] | None = None, days: int = 30,
+                           grace_days: int = 7) -> dict[str, Any]:
+    private_key = os.getenv("SNAPKEY_LICENSE_PRIVATE_KEY", "").strip()
+    if not private_key:
+        raise HTTPException(500, "SNAPKEY_LICENSE_PRIVATE_KEY is required to issue licenses")
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=max(1, days))
+    grace = expires + timedelta(days=max(0, grace_days))
+    payload = {
+        "tenant_id": tenant_id,
+        "site_id": site_id,
+        "edge_id": edge_id,
+        "machine_code": machine_code,
+        "plan": plan,
+        "max_cameras": max(1, max_cameras),
+        "features": sorted({feature.strip().lower() for feature in (features or DEFAULT_LICENSE_FEATURES) if feature.strip()}),
+        "issued_at": now.isoformat(),
+        "expires_at": expires.isoformat(),
+        "grace_until": grace.isoformat(),
+    }
+    return {"license": payload, "signature": sign_license_payload(payload, private_key)}
+
 
 @app.post("/crm/session")
 def create_crm_portal_session(payload: CrmPortalSessionRequest, request: Request):
@@ -143,6 +183,46 @@ def create_crm_portal_session(payload: CrmPortalSessionRequest, request: Request
     base=os.getenv("SNAPKEY_PUBLIC_BASE_URL","").rstrip("/")
     launch=(base or "")+"/portal?sessionId="+quote(session_id)+"#session="+quote(token)
     return {"sessionId":session_id,"expiresAt":expires.isoformat(),"launchUrl":launch}
+
+@app.post("/edge/v1/activate")
+def activate_edge(payload: EdgeActivationRequest):
+    if not _edge_activation_code_valid(payload.activation_code):
+        raise HTTPException(401, "Invalid activation code")
+    shop = _slug(payload.shop_code)
+    company = _slug(payload.company_code or shop)
+    machine = payload.machine_code.strip()
+    if not machine:
+        raise HTTPException(400, "machine_code is required")
+    tenant_id = f"tenant-{company}"
+    site_id = f"site-{shop}"
+    edge_id = f"edge-{shop}-{_token_digest(machine)[:8]}"
+    token = secrets.token_urlsafe(32)
+    store.provision_edge_credential(_token_digest(token), tenant_id, payload.company_code, shop, site_id, edge_id)
+    license_data = _issue_license_payload(
+        tenant_id=tenant_id,
+        site_id=site_id,
+        edge_id=edge_id,
+        machine_code=machine,
+        days=int(os.getenv("SNAPKEY_DEFAULT_LICENSE_DAYS", "30")),
+        grace_days=int(os.getenv("SNAPKEY_DEFAULT_LICENSE_GRACE_DAYS", "7")),
+    )
+    return {
+        "edge": {
+            "tenant_id": tenant_id,
+            "company_code": payload.company_code,
+            "shop_id": shop,
+            "site_id": site_id,
+            "edge_id": edge_id,
+        },
+        "cloud": {
+            "base_url": os.getenv("SNAPKEY_PUBLIC_BASE_URL", "https://camera.snapkey.ai").rstrip("/") or "https://camera.snapkey.ai",
+            "api_token": token,
+        },
+        "license": license_data["license"],
+        "signature": license_data["signature"],
+        "license_public_key": os.getenv("SNAPKEY_LICENSE_PUBLIC_KEY", "").strip(),
+        "message": "Edge activated successfully",
+    }
 
 
 def require_portal_session(authorization: str | None = Header(default=None)) -> PortalPrincipal:
@@ -321,25 +401,17 @@ def tenant_events(tenant_id: str, site_id: str | None = None, event_type: str | 
 
 @app.post("/portal/v1/licenses/issue")
 def issue_license(request: LicenseIssueRequest):
-    private_key = os.getenv("SNAPKEY_LICENSE_PRIVATE_KEY", "").strip()
-    if not private_key:
-        raise HTTPException(500, "SNAPKEY_LICENSE_PRIVATE_KEY is required to issue licenses")
-    now = datetime.now(timezone.utc)
-    expires = now + timedelta(days=max(1, request.days))
-    grace = expires + timedelta(days=max(0, request.grace_days))
-    payload = {
-        "tenant_id": request.tenant_id,
-        "site_id": request.site_id,
-        "edge_id": request.edge_id,
-        "machine_code": request.machine_code,
-        "plan": request.plan,
-        "max_cameras": max(1, request.max_cameras),
-        "features": sorted({feature.strip().lower() for feature in request.features if feature.strip()}),
-        "issued_at": now.isoformat(),
-        "expires_at": expires.isoformat(),
-        "grace_until": grace.isoformat(),
-    }
-    return {"license": payload, "signature": sign_license_payload(payload, private_key)}
+    return _issue_license_payload(
+        tenant_id=request.tenant_id,
+        site_id=request.site_id,
+        edge_id=request.edge_id,
+        machine_code=request.machine_code,
+        plan=request.plan,
+        max_cameras=request.max_cameras,
+        features=request.features,
+        days=request.days,
+        grace_days=request.grace_days,
+    )
 
 
 @app.post("/edge/v1/heartbeat")

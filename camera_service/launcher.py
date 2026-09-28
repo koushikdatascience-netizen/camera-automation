@@ -1,13 +1,42 @@
 import os
+import argparse
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 import webbrowser
+from pathlib import Path
 
 import uvicorn
 
 from camera_service.api import app
+
+_LOG_STREAM = None
+
+
+def _runtime_log_dir() -> Path:
+    base = os.environ.get("CAMERA_AUTOMATION_HOME")
+    if base:
+        root = Path(base)
+    else:
+        root = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "MadhushalaCameraAI"
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+def ensure_console_streams() -> None:
+    """Windowed PyInstaller apps have no console streams; Uvicorn logging expects them."""
+    global _LOG_STREAM
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    log_path = _runtime_log_dir() / "launcher.log"
+    _LOG_STREAM = log_path.open("a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = _LOG_STREAM
+    if sys.stderr is None:
+        sys.stderr = _LOG_STREAM
 
 
 def env_bool(name: str, default: bool = True) -> bool:
@@ -50,15 +79,30 @@ def open_browser_when_ready(host: str, port: int) -> None:
 
 
 def main() -> None:
+    ensure_console_streams()
+    parser = argparse.ArgumentParser(description="Madhushala Camera AI edge service")
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8091")))
+    parser.add_argument("--background", action="store_true", help="Run without opening the setup browser.")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open the setup browser.")
+    parser.add_argument("--open-ui", action="store_true", help="Open the setup UI and exit.")
+    args = parser.parse_args()
+
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
-    host = os.environ.get("HOST", "127.0.0.1")
-    port = int(os.environ.get("PORT", "8091"))
+    host = args.host
+    port = args.port
     log_level = os.environ.get("LOG_LEVEL", "info").lower()
+    setup_url = f"http://{host}:{port}/setup"
+
+    if args.open_ui:
+        open_browser(setup_url)
+        return
 
     print(f"Starting SnapKey Vision AI on http://{host}:{port}")
 
-    if env_bool("AUTO_OPEN_BROWSER", True):
+    auto_open_browser = env_bool("AUTO_OPEN_BROWSER", True) and not args.background and not args.no_browser
+    if auto_open_browser:
         browser_thread = threading.Thread(
             target=open_browser_when_ready,
             args=(host, port),

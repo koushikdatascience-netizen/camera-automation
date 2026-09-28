@@ -1,10 +1,15 @@
-﻿# SnapKey Vision AI PyInstaller spec.
+# SnapKey Vision AI PyInstaller spec.
 # Keep this build in ONEDIR mode because AI/CV dependencies are large.
 
+from pathlib import Path
+
+import insightface
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 block_cipher = None
+INSIGHTFACE_OBJECTS = Path(insightface.__file__).parent / "data" / "objects"
+SCISSORS_MODEL = Path("../../kaggle-model/scissors_yolo11m_960.pt")
 
 datas = [
     ("../../camera_service/web/setup.html", "camera_service/web"),
@@ -13,8 +18,10 @@ datas = [
     ("../../assets/brand", "assets/brand"),
     ("../../config.example.yaml", "."),
     ("../../yolo11m.pt", "."),
-    ("../../kaggle-model/scissors_yolo11m_960.pt", "kaggle-model"),
+    (str(INSIGHTFACE_OBJECTS / "meanshape_68.pkl"), "objects"),
 ]
+if SCISSORS_MODEL.exists():
+    datas.append((str(SCISSORS_MODEL), "kaggle-model"))
 binaries = []
 hiddenimports = [
     "camera_service.api",
@@ -95,7 +102,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,
     icon="../../assets/brand/app.ico",
 )
 
