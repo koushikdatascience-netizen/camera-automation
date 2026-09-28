@@ -70,6 +70,17 @@ class PostgresPortalStore:
                 tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'OWNER',
                 enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL)""",
             """CREATE INDEX IF NOT EXISTS idx_portal_users_email ON portal_users(email)""",
+            """CREATE TABLE IF NOT EXISTS cloud_personnel(
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, employee_code TEXT NOT NULL,
+                full_name TEXT NOT NULL, role TEXT NOT NULL, phone TEXT, email TEXT, active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+                UNIQUE(tenant_id,shop_id,employee_code))""",
+            """CREATE INDEX IF NOT EXISTS idx_cloud_personnel_scope ON cloud_personnel(tenant_id,shop_id,active)""",
+            """CREATE TABLE IF NOT EXISTS cloud_face_profiles(
+                id TEXT PRIMARY KEY, person_id TEXT NOT NULL, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
+                embedding_json JSONB NOT NULL, quality DOUBLE PRECISION NOT NULL, image_path TEXT,
+                created_at TIMESTAMPTZ NOT NULL, FOREIGN KEY(person_id) REFERENCES cloud_personnel(id) ON DELETE CASCADE)""",
+            """CREATE INDEX IF NOT EXISTS idx_cloud_faces_person ON cloud_face_profiles(tenant_id,shop_id,person_id)""",
             """CREATE TABLE IF NOT EXISTS crm_person_mappings(
                 tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, local_person_id TEXT NOT NULL,
                 crm_user_id TEXT NOT NULL, employee_code TEXT, break_master_id TEXT, enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -148,6 +159,64 @@ class PostgresPortalStore:
                 events=conn.execute(text("SELECT event_type,COUNT(*) AS count FROM edge_events WHERE tenant_id=:t GROUP BY event_type"),{"t":tenant_id}).mappings().all()
         return {"tenant_id":tenant_id,"sites":sites,"edges":edges,"events":{r["event_type"]:r["count"] for r in events}}
 
+
+    def create_cloud_person(self, item: dict[str, Any]) -> dict[str, Any]:
+        now=self.now()
+        with self._conn() as conn:
+            row=conn.execute(text("""INSERT INTO cloud_personnel(id,tenant_id,shop_id,employee_code,full_name,role,phone,email,active,created_at,updated_at)
+                VALUES(:id,:tenant,:shop,:code,:name,:role,:phone,:email,TRUE,:now,:now) RETURNING *"""),
+                {"id":item["id"],"tenant":item["tenant_id"],"shop":item["shop_id"],"code":item["employee_code"],
+                 "name":item["full_name"],"role":item["role"],"phone":item.get("phone"),"email":item.get("email"),"now":now}).mappings().one()
+        return dict(row)
+
+    def list_cloud_people(self, tenant_id: str, shop_id: str) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT p.*,COUNT(f.id) AS face_count FROM cloud_personnel p
+                LEFT JOIN cloud_face_profiles f ON f.person_id=p.id
+                WHERE p.tenant_id=:tenant AND p.shop_id=:shop GROUP BY p.id ORDER BY p.full_name"""),
+                {"tenant":tenant_id,"shop":shop_id}).mappings().all()
+        return [dict(r) for r in rows]
+
+    def get_cloud_person(self, tenant_id: str, shop_id: str, person_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("SELECT * FROM cloud_personnel WHERE tenant_id=:tenant AND shop_id=:shop AND id=:id"),
+                {"tenant":tenant_id,"shop":shop_id,"id":person_id}).mappings().first()
+        return dict(row) if row else None
+
+    def update_cloud_person(self, tenant_id: str, shop_id: str, person_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
+        allowed={k:v for k,v in changes.items() if k in {"full_name","role","phone","email","active"} and v is not None}
+        if allowed:
+            allowed["updated_at"]=self.now(); params={**allowed,"tenant":tenant_id,"shop":shop_id,"id":person_id}
+            sets=",".join(f"{key}=:{key}" for key in allowed)
+            with self._conn() as conn: conn.execute(text(f"UPDATE cloud_personnel SET {sets} WHERE tenant_id=:tenant AND shop_id=:shop AND id=:id"),params)
+        return self.get_cloud_person(tenant_id,shop_id,person_id)
+
+    def add_cloud_face(self, item: dict[str, Any]) -> dict[str, Any]:
+        with self._conn() as conn:
+            row=conn.execute(text("""INSERT INTO cloud_face_profiles(id,person_id,tenant_id,shop_id,embedding_json,quality,image_path,created_at)
+                VALUES(:id,:person,:tenant,:shop,CAST(:embedding AS JSONB),:quality,:image_path,:created) RETURNING id,person_id,quality,image_path,created_at"""),
+                {"id":item["id"],"person":item["person_id"],"tenant":item["tenant_id"],"shop":item["shop_id"],
+                 "embedding":json.dumps(item["embedding"]),"quality":item["quality"],"image_path":item.get("image_path"),"created":self.now()}).mappings().one()
+        return dict(row)
+
+    def list_cloud_faces(self, tenant_id: str, shop_id: str, person_id: str, include_embedding: bool=False) -> list[dict[str, Any]]:
+        cols="id,person_id,quality,image_path,created_at"+(",embedding_json" if include_embedding else "")
+        with self._conn() as conn:
+            rows=conn.execute(text(f"SELECT {cols} FROM cloud_face_profiles WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person ORDER BY created_at DESC"),
+                {"tenant":tenant_id,"shop":shop_id,"person":person_id}).mappings().all()
+        out=[]
+        for row in rows:
+            item=dict(row)
+            if include_embedding:
+                item["embedding"]=item.pop("embedding_json")
+            out.append(item)
+        return out
+
+    def delete_cloud_face(self, tenant_id: str, shop_id: str, person_id: str, face_id: str) -> bool:
+        with self._conn() as conn:
+            result=conn.execute(text("DELETE FROM cloud_face_profiles WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person AND id=:face"),
+                {"tenant":tenant_id,"shop":shop_id,"person":person_id,"face":face_id})
+        return bool(result.rowcount)
 
     def record_heartbeat(self, payload: dict[str, Any]):
         tenant=str(payload["tenant_id"]); site=str(payload["site_id"]); edge=str(payload["edge_id"]); now=self.now()
