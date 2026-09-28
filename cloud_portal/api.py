@@ -235,9 +235,12 @@ def create_crm_portal_session(payload: CrmPortalSessionRequest, request: Request
     supplied=request.headers.get("X-CRM-Integration-Key","")
     if not _crm_integration_key_valid(supplied):
         raise HTTPException(401,"Invalid CRM integration key")
-    shop=payload.shopCode.strip()
+    shop=_slug(payload.shopCode)
     if not shop: raise HTTPException(400,"shopCode is required")
-    tenant=(payload.tenantId or payload.companyCode or "").strip()
+    # Camera Eye edge activation uses tenant-{company slug}. Prefer companyCode so
+    # a CRM launch lands in the exact same tenant/shop as the activated Windows edge.
+    company=(payload.companyCode or "").strip()
+    tenant=(f"tenant-{_slug(company)}" if company else (payload.tenantId or "").strip())
     if not tenant: raise HTTPException(400,"tenantId or companyCode is required")
     session_id=secrets.token_urlsafe(18)
     token=secrets.token_urlsafe(32)
