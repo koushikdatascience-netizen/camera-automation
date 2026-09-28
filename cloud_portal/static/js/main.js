@@ -22,6 +22,16 @@
       clearTimeout(timer);
     }
   }
+  function hydratePortalIdentity() {
+    const name=sessionStorage.getItem("snapkey_display_name") || "Camera Eye User";
+    const role=sessionStorage.getItem("snapkey_role") || "User";
+    document.querySelectorAll(".profile-info strong").forEach(node=>node.textContent=name);
+    document.querySelectorAll(".profile-info span").forEach(node=>node.textContent=role);
+    const initials=name.split(/\s+/).filter(Boolean).slice(0,2).map(part=>part[0]?.toUpperCase()||"").join("") || "CE";
+    document.querySelectorAll(".avatar").forEach(node=>node.textContent=initials);
+    document.querySelectorAll(".header-date").forEach(node=>node.textContent=new Intl.DateTimeFormat(undefined,{weekday:"long",year:"numeric",month:"long",day:"numeric"}).format(new Date()));
+  }
+
   async function bootstrapCrmSession() {
     const token=portalToken();
     if(!token){ window.location.replace("/login"); throw new Error("Login required."); }
@@ -32,6 +42,7 @@
     Object.entries(values).forEach(([key,value])=>{if(value) sessionStorage.setItem("snapkey_"+key,String(value));});
     if(session.displayName) sessionStorage.setItem("snapkey_display_name",session.displayName);
     if(session.role) sessionStorage.setItem("snapkey_role",session.role);
+    hydratePortalIdentity();
   }
 
   function portalScope() {
@@ -266,7 +277,13 @@
       const configuredIds=new Set(items.map(camera=>camera.camera_id));
       const localOnly=inventory.filter(camera=>!configuredIds.has(camera.camera_id));
       if(!items.length && !localOnly.length){container.innerHTML="<p>No cameras configured or reported by this edge yet.</p>";return;}
-      const configuredHtml=items.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type)+" · "+escapeHtml(camera.camera_role)+" · Cloud managed</small></div><div style='display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end'><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(camera.edge_id||selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button><button class='btn btn-light edit-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Edit</button><button class='btn btn-light delete-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Delete</button></div></div>").join("");
+      const configuredHtml=items.map(camera=>{
+        const runtime=inventory.find(local=>local.camera_id===camera.camera_id);
+        const state=runtime ? (runtime.state || (runtime.online?"ONLINE":"OFFLINE")) : "WAITING FOR EDGE";
+        const online=!!runtime?.online;
+        const statusColor=online?"#166534":(runtime?"#6b7280":"#92400e");
+        return "<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type)+" · "+escapeHtml(camera.camera_role)+" · Cloud managed</small></div><div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end'><strong style='color:"+statusColor+"'>● "+escapeHtml(state)+"</strong><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(camera.edge_id||selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button><button class='btn btn-light edit-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Edit</button><button class='btn btn-light delete-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Delete</button></div></div>";
+      }).join("");
       const localHtml=localOnly.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type||"camera")+" · "+escapeHtml(camera.camera_role||"GENERAL")+" · Edge discovered</small></div><div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end'><strong style='color:"+(camera.online?"#166534":"#6b7280")+"'>● "+(camera.online?"Online":"Offline")+"</strong><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button><button class='btn btn-light adopt-local-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Configure</button></div></div>").join("");
       container.innerHTML=configuredHtml+localHtml;
       container.querySelectorAll(".test-existing-camera").forEach(button=>button.addEventListener("click",()=>testCameraConnection({cameraId:button.dataset.id,edgeId:button.dataset.edgeId,sourceType:button.dataset.sourceType,button})));
