@@ -10,7 +10,7 @@ import secrets
 import httpx
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -503,8 +503,46 @@ async def upload_edge_event_evidence(
     }
 
 
+def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
+    if not crm_client.configured:
+        return
+    event_type=str(envelope.get("event_type") or "")
+    if event_type not in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT","BREAK_START","BREAK_END"}:
+        return
+    payload=envelope.get("payload") or {}
+    local_person_id=str(payload.get("person_id") or envelope.get("person_id") or "").strip()
+    if not local_person_id:
+        return
+    tenant_id=str(envelope.get("tenant_id") or "")
+    shop_id=str(envelope.get("shop_id") or "")
+    mapping=store.crm_person_mapping(tenant_id,shop_id,local_person_id)
+    if not mapping:
+        return
+    event_time=datetime.fromisoformat(str(envelope["event_time"]).replace("Z","+00:00"))
+    crm_user_id=mapping["crm_user_id"]
+    if event_type=="ATTENDANCE_ENTRY":
+        crm_client.login_logout({"userId":crm_user_id,"date":event_time.date().isoformat(),
+            "actualStartTime":event_time.strftime("%H:%M:%S"),"actualOffTime":None,
+            "loginLocation":str(envelope.get("site_id") or shop_id),"logoutLocation":None})
+    elif event_type=="ATTENDANCE_EXIT":
+        crm_client.login_logout({"userId":crm_user_id,"date":event_time.date().isoformat(),
+            "actualStartTime":None,"actualOffTime":event_time.strftime("%H:%M:%S"),
+            "loginLocation":None,"logoutLocation":str(envelope.get("site_id") or shop_id)})
+    elif event_type=="BREAK_START":
+        # Current edge track-loss events are not sufficiently strong evidence of a real break.
+        # Only explicitly confirmed break events may mutate CRM break state.
+        metadata=payload.get("metadata") or {}
+        if metadata.get("crm_confirmed_break") is True and mapping.get("break_master_id"):
+            crm_client.start_break(crm_user_id,mapping["break_master_id"])
+    elif event_type=="BREAK_END":
+        metadata=payload.get("metadata") or {}
+        if metadata.get("crm_confirmed_break") is True:
+            crm_client.end_break(crm_user_id)
+
+
 @app.post("/edge/v1/events")
-def ingest_edge_event(envelope: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
+def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTasks,
+                      principal: EdgePrincipal = Depends(require_edge_token)):
     required = ["schema_version", "tenant_id", "site_id", "edge_id", "event_id", "event_type", "event_time", "payload"]
     missing = [key for key in required if not envelope.get(key)]
     if missing:
@@ -512,7 +550,9 @@ def ingest_edge_event(envelope: dict[str, Any], principal: EdgePrincipal = Depen
     if envelope["schema_version"] != "edge.event.v1":
         raise HTTPException(400, "Unsupported event schema")
     _enforce_edge_scope(principal, envelope)
-    return store.ingest_event(envelope)
+    result=store.ingest_event(envelope)
+    background_tasks.add_task(_deliver_crm_attendance_event,envelope)
+    return result
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/crm/status")
