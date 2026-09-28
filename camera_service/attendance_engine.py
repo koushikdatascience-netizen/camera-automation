@@ -45,6 +45,44 @@ class AttendanceEngine:
                 self.store.add_person_event(ident.person_id,self.store_id,cross.camera_id,'EXIT_WITHOUT_OPEN_SESSION',cross.timestamp)
                 return {'type':'EXIT_WITHOUT_OPEN_SESSION'}
             return {'type':'EXIT','session':s}
+    def start_break(self, person_id: str, camera_id: str, timestamp: datetime | None = None, break_master_id: str | None = None):
+        """Create a business-confirmed break event.
+
+        This is intentionally separate from tracking lifecycle events so CRM break
+        state can only change from an explicit break action/zone workflow.
+        """
+        ts = timestamp or datetime.now().astimezone()
+        with self._lock:
+            p = self.presence.get(person_id)
+            if not p or p.status != 'PRESENT':
+                raise ValueError('person must be present before starting a break')
+            p.status = 'BREAK'
+            p.break_started_at = ts
+            p.last_seen_at = ts
+            p.last_camera_id = camera_id
+            metadata = {'crm_confirmed_break': True}
+            if break_master_id:
+                metadata['break_master_id'] = break_master_id
+            event_id = self.store.add_person_event(person_id,self.store_id,camera_id,'BREAK_START',ts,metadata)
+            return {'event_id':event_id,'person_id':person_id,'status':'BREAK','started_at':ts.isoformat()}
+
+    def end_break(self, person_id: str, camera_id: str, timestamp: datetime | None = None):
+        ts = timestamp or datetime.now().astimezone()
+        with self._lock:
+            p = self.presence.get(person_id)
+            if not p or p.status != 'BREAK':
+                raise ValueError('person is not currently on break')
+            started = p.break_started_at
+            p.status = 'PRESENT'
+            p.break_started_at = None
+            p.last_seen_at = ts
+            p.last_camera_id = camera_id
+            event_id = self.store.add_person_event(person_id,self.store_id,camera_id,'BREAK_END',ts,{
+                'crm_confirmed_break': True,
+                'break_started_at': started.isoformat() if started else None,
+            })
+            return {'event_id':event_id,'person_id':person_id,'status':'PRESENT','ended_at':ts.isoformat()}
+
     def on_track_lost(self,camera_id,track_id):
         """Forget transient tracking state without changing business attendance state.
 
