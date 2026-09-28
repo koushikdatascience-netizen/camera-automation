@@ -486,11 +486,28 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 
 def _web_asset_dir() -> Path:
-    """Resolve setup UI assets in source and PyInstaller-frozen builds."""
+    """Resolve setup UI assets in source and PyInstaller ONEDIR builds."""
+    candidates: list[Path] = []
+
     if getattr(sys, "frozen", False):
-        bundle_base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
-        return bundle_base / "camera_service" / "web"
-    return Path(__file__).resolve().parent / "web"
+        executable_dir = Path(sys.executable).resolve().parent
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "camera_service" / "web")
+        candidates.extend([
+            executable_dir / "_internal" / "camera_service" / "web",
+            executable_dir / "camera_service" / "web",
+        ])
+
+    candidates.append(Path(__file__).resolve().parent / "web")
+
+    for candidate in candidates:
+        if (candidate / "setup.html").is_file():
+            return candidate
+
+    # Return the primary candidate so the /setup diagnostic reports the
+    # exact path that was attempted if all candidates are unexpectedly absent.
+    return candidates[0]
 
 
 WEB_ASSET_DIR = _web_asset_dir()
