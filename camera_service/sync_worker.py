@@ -184,6 +184,22 @@ class EdgeSyncWorker:
                     "ai_fps": runtime.ai_fps if runtime else 0.0,
                     "last_error": runtime.last_error if runtime else None,
                 })
+        personnel = []
+        try:
+            for person in self.store.list_people():
+                faces = self.store.list_faces(person["id"])
+                personnel.append({
+                    "person_id": person["id"],
+                    "employee_code": person["employee_code"],
+                    "full_name": person["full_name"],
+                    "role": person["role"],
+                    "active": bool(person["active"]),
+                    "face_count": len(faces),
+                })
+        except Exception:
+            # Heartbeat must remain available even if an older local database is
+            # temporarily unable to provide the optional personnel inventory.
+            personnel = []
         return {
             "service": "SnapKeyVisionAI",
             "license": {
@@ -194,6 +210,8 @@ class EdgeSyncWorker:
             "camera_count": len(cameras),
             "online_camera_count": sum(1 for camera in cameras if camera["online"]),
             "cameras": cameras,
+            "personnel_count": len(personnel),
+            "personnel": personnel,
         }
 
     def _execute_command(self, command: dict[str, Any]) -> dict[str, Any]:
