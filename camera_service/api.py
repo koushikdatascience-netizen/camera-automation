@@ -813,6 +813,28 @@ def delete_face(person_id:str,face_id:str,s=Depends(get_store)):
     if not s.delete_face(person_id,face_id): raise HTTPException(404,'Face not found')
     return {'deleted':True}
 
+class BreakActionRequest(BaseModel):
+    camera_id: str = "manual"
+    break_master_id: str | None = None
+
+@app.post('/api/v1/personnel/{person_id}/break/start')
+def start_person_break(person_id: str, body: BreakActionRequest, s=Depends(get_store)):
+    if not s.get_person(person_id):
+        raise HTTPException(404, 'Person not found')
+    try:
+        return attendance_engine.start_break(person_id, body.camera_id, break_master_id=body.break_master_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+@app.post('/api/v1/personnel/{person_id}/break/end')
+def end_person_break(person_id: str, body: BreakActionRequest, s=Depends(get_store)):
+    if not s.get_person(person_id):
+        raise HTTPException(404, 'Person not found')
+    try:
+        return attendance_engine.end_break(person_id, body.camera_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
 # Attendance APIs
 @app.get('/api/v1/attendance')
 def attendance(person_id:str|None=None,s=Depends(get_store)): return {'items':s.attendance(person_id)}
