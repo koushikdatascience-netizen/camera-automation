@@ -421,13 +421,26 @@ def ingest_edge_event(envelope: dict[str, Any], principal: EdgePrincipal = Depen
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/summary")
-def tenant_summary(tenant_id: str):
+def tenant_summary(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    # Summary remains tenant-level for now; detailed resources below are always shop scoped.
     return store.tenant_summary(tenant_id)
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/events")
-def tenant_events(tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100):
-    return {"items": store.list_events(tenant_id, site_id=site_id, event_type=event_type, limit=limit)}
+def tenant_events(tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100,
+                  principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    items = store.list_events(tenant_id, site_id=site_id, event_type=event_type, limit=limit)
+    # Backward-compatible storage implementations may not accept shop_id yet, so enforce
+    # the authenticated shop boundary before returning any event to the browser.
+    return {"items": [item for item in items if str(item.get("shop_id") or item.get("site_id") or "") == str(principal.shop_id)]}
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/edges")
+def portal_edges(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    return {"items": store.list_edges(tenant_id, shop_id=principal.shop_id)}
 
 
 @app.post("/portal/v1/licenses/issue")
