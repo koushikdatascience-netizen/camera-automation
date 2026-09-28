@@ -116,17 +116,17 @@ class PortalStore:
             rows = conn.execute(query, args).fetchall()
             return [dict(row) | {"payload": json.loads(row["payload_json"])} for row in rows]
 
-    def tenant_summary(self, tenant_id: str) -> dict[str, Any]:
+    def tenant_summary(self, tenant_id: str, shop_id: str | None = None) -> dict[str, Any]:
         with self._conn() as conn:
-            sites = conn.execute("SELECT COUNT(*) AS count FROM sites WHERE tenant_id=?", (tenant_id,)).fetchone()["count"]
-            edges = conn.execute("SELECT COUNT(*) AS count FROM edge_machines WHERE tenant_id=?", (tenant_id,)).fetchone()["count"]
-            events = conn.execute("SELECT event_type, COUNT(*) AS count FROM edge_events WHERE tenant_id=? GROUP BY event_type", (tenant_id,)).fetchall()
-            return {
-                "tenant_id": tenant_id,
-                "sites": sites,
-                "edges": edges,
-                "events": {row["event_type"]: row["count"] for row in events},
-            }
+            if shop_id:
+                edges = conn.execute("SELECT COUNT(*) AS count FROM edge_machines WHERE tenant_id=? AND shop_id=?", (tenant_id, shop_id)).fetchone()["count"]
+                sites = conn.execute("SELECT COUNT(DISTINCT site_id) AS count FROM edge_machines WHERE tenant_id=? AND shop_id=?", (tenant_id, shop_id)).fetchone()["count"]
+                events = conn.execute("SELECT event_type, COUNT(*) AS count FROM edge_events WHERE tenant_id=? AND shop_id=? GROUP BY event_type", (tenant_id, shop_id)).fetchall()
+            else:
+                sites = conn.execute("SELECT COUNT(*) AS count FROM sites WHERE tenant_id=?", (tenant_id,)).fetchone()["count"]
+                edges = conn.execute("SELECT COUNT(*) AS count FROM edge_machines WHERE tenant_id=?", (tenant_id,)).fetchone()["count"]
+                events = conn.execute("SELECT event_type, COUNT(*) AS count FROM edge_events WHERE tenant_id=? GROUP BY event_type", (tenant_id,)).fetchall()
+            return {"tenant_id": tenant_id, "sites": sites, "edges": edges, "events": {row["event_type"]: row["count"] for row in events}}
 
 
     def record_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
