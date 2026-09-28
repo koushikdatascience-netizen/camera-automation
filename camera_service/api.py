@@ -483,26 +483,38 @@ def alert_preview():
 # Setup UI Route
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
-import os
 
-# Mount static files. check_dir=False keeps fresh/source-only installs from
-# failing at import time if no static assets are currently present.
+
+def _web_asset_dir() -> Path:
+    """Resolve setup UI assets in source and PyInstaller-frozen builds."""
+    if getattr(sys, "frozen", False):
+        bundle_base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        return bundle_base / "camera_service" / "web"
+    return Path(__file__).resolve().parent / "web"
+
+
+WEB_ASSET_DIR = _web_asset_dir()
+WEB_STATIC_DIR = WEB_ASSET_DIR / "static"
+
+# check_dir=False keeps source-only installs from failing at import time when
+# optional static assets are absent. Frozen builds resolve through sys._MEIPASS.
 app.mount(
     "/static",
-    StaticFiles(
-        directory=os.path.join(os.path.dirname(__file__), "web", "static"),
-        check_dir=False,
-    ),
+    StaticFiles(directory=str(WEB_STATIC_DIR), check_dir=False),
     name="static",
 )
 
+
 @app.get("/setup", response_class=HTMLResponse)
 async def setup_ui():
+    setup_path = WEB_ASSET_DIR / "setup.html"
     try:
-        with open(os.path.join(os.path.dirname(__file__), "web", "setup.html"), "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read(), status_code=200)
+        return HTMLResponse(content=setup_path.read_text(encoding="utf-8"), status_code=200)
     except FileNotFoundError:
-        return HTMLResponse(content="<h1>Setup UI not found</h1>", status_code=404)
+        return HTMLResponse(
+            content=f"<h1>Setup UI not found</h1><p>Expected: {setup_path}</p>",
+            status_code=404,
+        )
 
 # Camera CRUD APIs
 class CameraCreate(BaseModel):
