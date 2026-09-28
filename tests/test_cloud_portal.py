@@ -120,3 +120,37 @@ def test_crm_portal_session_is_hashed_and_scope_bound(tmp_path, monkeypatch):
  assert status.status_code==200 and status.json()['shopCode']=='SHOP1'
  assert token not in str(api.store.portal_session_by_hash(api._token_digest(token)))
  assert client.get('/portal/v1/tenants/tenant-b/cameras',headers={'Authorization':'Bearer '+token}).status_code==403
+
+
+
+def test_crm_attendance_uses_verified_login_logout_contract(tmp_path, monkeypatch):
+ monkeypatch.setenv('SNAPKEY_PORTAL_DB',str(tmp_path/'crm-attendance.db'))
+ monkeypatch.delenv('SNAPKEY_DATABASE_URL',raising=False)
+ monkeypatch.setenv('SNAPKEY_ENV','development')
+ monkeypatch.setenv('SNAPKEY_CRM_ATTENDANCE_ENABLED','1')
+ import importlib
+ import cloud_portal.api as api
+ importlib.reload(api)
+ api.store.upsert_crm_person_mapping({
+  'tenant_id':'tenant-a','shop_id':'SHOP1','local_person_id':'person-1',
+  'crm_user_id':'crm-user-1','employee_code':'EMP-1','break_master_id':None,
+ })
+ calls=[]
+ monkeypatch.setattr(api.crm_client,'configured',True)
+ monkeypatch.setattr(api.crm_client,'login_logout',lambda payload: calls.append(payload) or {'ok':True})
+ base={'schema_version':'edge.event.v1','tenant_id':'tenant-a','shop_id':'SHOP1','site_id':'site-1',
+       'edge_id':'edge-1','event_id':'evt-entry','event_type':'ATTENDANCE_ENTRY',
+       'event_time':'2026-09-28T12:03:40.692Z','payload':{'person_id':'person-1'}}
+ api._deliver_crm_attendance_event(base)
+ assert calls[-1]=={
+  'userId':'crm-user-1','date':'2026-09-28T12:03:40.692Z',
+  'actualStartTime':'2026-09-28T12:03:40.692Z','actualOffTime':'',
+  'loginLocation':'Camera Eye - site-1','logoutLocation':'',
+ }
+ exit_event={**base,'event_id':'evt-exit','event_type':'ATTENDANCE_EXIT','event_time':'2026-09-28T18:15:20.000Z'}
+ api._deliver_crm_attendance_event(exit_event)
+ assert calls[-1]=={
+  'userId':'crm-user-1','date':'2026-09-28T18:15:20.000Z',
+  'actualStartTime':'','actualOffTime':'2026-09-28T18:15:20.000Z',
+  'loginLocation':'','logoutLocation':'Camera Eye - site-1',
+ }
