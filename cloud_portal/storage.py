@@ -42,6 +42,7 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS edge_commands(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,edge_id TEXT NOT NULL,command_type TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL, result_json TEXT,created_at TEXT NOT NULL,claimed_at TEXT,completed_at TEXT);
                 CREATE TABLE IF NOT EXISTS portal_sessions(session_id TEXT PRIMARY KEY,token_hash TEXT UNIQUE NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,user_id TEXT,display_name TEXT,role TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS portal_users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,display_name TEXT NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'OWNER',enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS crm_person_mappings(tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,local_person_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,employee_code TEXT,break_master_id TEXT,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(tenant_id,shop_id,local_person_id));
                 CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id, site_id, event_time);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_type ON edge_events(tenant_id, event_type, event_time);
                 """
@@ -287,3 +288,22 @@ class PortalStore:
         with self._conn() as conn:
             row=conn.execute("SELECT * FROM portal_sessions WHERE token_hash=?",(token_hash,)).fetchone()
         return dict(row) if row else None
+    def upsert_crm_person_mapping(self, mapping: dict[str, Any]) -> dict[str, Any]:
+        now=self.now()
+        with self._lock,self._conn() as conn:
+            conn.execute("""INSERT INTO crm_person_mappings(tenant_id,shop_id,local_person_id,crm_user_id,employee_code,break_master_id,enabled,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,1,?,?) ON CONFLICT(tenant_id,shop_id,local_person_id) DO UPDATE SET
+                crm_user_id=excluded.crm_user_id,employee_code=excluded.employee_code,break_master_id=excluded.break_master_id,enabled=1,updated_at=excluded.updated_at""",
+                (mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"],mapping["crm_user_id"],mapping.get("employee_code"),mapping.get("break_master_id"),now,now))
+        return self.crm_person_mapping(mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"])
+
+    def crm_person_mapping(self, tenant_id: str, shop_id: str, local_person_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute("SELECT * FROM crm_person_mappings WHERE tenant_id=? AND shop_id=? AND local_person_id=? AND enabled=1",(tenant_id,shop_id,local_person_id)).fetchone()
+        return dict(row) if row else None
+
+    def list_crm_person_mappings(self, tenant_id: str, shop_id: str) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute("SELECT * FROM crm_person_mappings WHERE tenant_id=? AND shop_id=? AND enabled=1 ORDER BY employee_code,local_person_id",(tenant_id,shop_id)).fetchall()
+        return [dict(row) for row in rows]
+
