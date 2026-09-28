@@ -520,6 +520,11 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
         return
     event_time=datetime.fromisoformat(str(envelope["event_time"]).replace("Z","+00:00"))
     crm_user_id=mapping["crm_user_id"]
+    if event_type in {"ATTENDANCE_ENTRY", "ATTENDANCE_EXIT"} and os.getenv("SNAPKEY_CRM_ATTENDANCE_ENABLED", "0").strip() != "1":
+        # LoginLogout's exact vendor contract must be verified before mutating a
+        # customer's roster. Recognition/attendance remains fully operational in
+        # Camera Eye while CRM attendance delivery is deliberately gated.
+        return
     if event_type=="ATTENDANCE_ENTRY":
         crm_client.login_logout({"userId":crm_user_id,"date":event_time.date().isoformat(),
             "actualStartTime":event_time.strftime("%H:%M:%S"),"actualOffTime":None,
