@@ -42,6 +42,10 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS edge_commands(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,edge_id TEXT NOT NULL,command_type TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL, result_json TEXT,created_at TEXT NOT NULL,claimed_at TEXT,completed_at TEXT);
                 CREATE TABLE IF NOT EXISTS portal_sessions(session_id TEXT PRIMARY KEY,token_hash TEXT UNIQUE NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,user_id TEXT,display_name TEXT,role TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS portal_users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,display_name TEXT NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'OWNER',enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS cloud_personnel(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,employee_code TEXT NOT NULL,full_name TEXT NOT NULL,role TEXT NOT NULL,phone TEXT,email TEXT,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(tenant_id,shop_id,employee_code));
+                CREATE TABLE IF NOT EXISTS cloud_face_profiles(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,embedding_json TEXT NOT NULL,quality REAL NOT NULL,image_path TEXT,created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS idx_cloud_personnel_scope ON cloud_personnel(tenant_id,shop_id,active);
+                CREATE INDEX IF NOT EXISTS idx_cloud_faces_person ON cloud_face_profiles(tenant_id,shop_id,person_id);
                 CREATE TABLE IF NOT EXISTS crm_person_mappings(tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,local_person_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,employee_code TEXT,break_master_id TEXT,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(tenant_id,shop_id,local_person_id));
                 CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id, site_id, event_time);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_type ON edge_events(tenant_id, event_type, event_time);
@@ -130,6 +134,45 @@ class PortalStore:
                 events = conn.execute("SELECT event_type, COUNT(*) AS count FROM edge_events WHERE tenant_id=? GROUP BY event_type", (tenant_id,)).fetchall()
             return {"tenant_id": tenant_id, "sites": sites, "edges": edges, "events": {row["event_type"]: row["count"] for row in events}}
 
+
+    def create_cloud_person(self,item):
+        now=self.now()
+        with self._lock,self._conn() as c:
+            c.execute("INSERT INTO cloud_personnel(id,tenant_id,shop_id,employee_code,full_name,role,phone,email,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?,?)",
+                (item["id"],item["tenant_id"],item["shop_id"],item["employee_code"],item["full_name"],item["role"],item.get("phone"),item.get("email"),now,now))
+        return self.get_cloud_person(item["tenant_id"],item["shop_id"],item["id"])
+    def list_cloud_people(self,tenant_id,shop_id):
+        with self._conn() as c:
+            rows=c.execute("""SELECT p.*,COUNT(f.id) face_count FROM cloud_personnel p LEFT JOIN cloud_face_profiles f ON f.person_id=p.id
+                WHERE p.tenant_id=? AND p.shop_id=? GROUP BY p.id ORDER BY p.full_name""",(tenant_id,shop_id)).fetchall()
+        return [dict(r) for r in rows]
+    def get_cloud_person(self,tenant_id,shop_id,person_id):
+        with self._conn() as c:
+            r=c.execute("SELECT * FROM cloud_personnel WHERE tenant_id=? AND shop_id=? AND id=?",(tenant_id,shop_id,person_id)).fetchone()
+        return dict(r) if r else None
+    def update_cloud_person(self,tenant_id,shop_id,person_id,changes):
+        allowed={k:v for k,v in changes.items() if k in {"full_name","role","phone","email","active"} and v is not None}
+        if "active" in allowed: allowed["active"]=int(bool(allowed["active"]))
+        if allowed:
+            allowed["updated_at"]=self.now(); sql="UPDATE cloud_personnel SET "+",".join(f"{k}=?" for k in allowed)+" WHERE tenant_id=? AND shop_id=? AND id=?"
+            with self._lock,self._conn() as c: c.execute(sql,tuple(allowed.values())+(tenant_id,shop_id,person_id))
+        return self.get_cloud_person(tenant_id,shop_id,person_id)
+    def add_cloud_face(self,item):
+        with self._lock,self._conn() as c:
+            c.execute("INSERT INTO cloud_face_profiles(id,person_id,tenant_id,shop_id,embedding_json,quality,image_path,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (item["id"],item["person_id"],item["tenant_id"],item["shop_id"],json.dumps(item["embedding"]),item["quality"],item.get("image_path"),self.now()))
+        return {"id":item["id"],"person_id":item["person_id"],"quality":item["quality"],"image_path":item.get("image_path")}
+    def list_cloud_faces(self,tenant_id,shop_id,person_id,include_embedding=False):
+        cols="id,person_id,quality,image_path,created_at"+(",embedding_json" if include_embedding else "")
+        with self._conn() as c: rows=c.execute(f"SELECT {cols} FROM cloud_face_profiles WHERE tenant_id=? AND shop_id=? AND person_id=? ORDER BY created_at DESC",(tenant_id,shop_id,person_id)).fetchall()
+        out=[]
+        for r in rows:
+            item=dict(r)
+            if include_embedding: item["embedding"]=json.loads(item.pop("embedding_json"))
+            out.append(item)
+        return out
+    def delete_cloud_face(self,tenant_id,shop_id,person_id,face_id):
+        with self._lock,self._conn() as c: return c.execute("DELETE FROM cloud_face_profiles WHERE tenant_id=? AND shop_id=? AND person_id=? AND id=?",(tenant_id,shop_id,person_id,face_id)).rowcount>0
 
     def record_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         tenant_id = str(payload["tenant_id"])
