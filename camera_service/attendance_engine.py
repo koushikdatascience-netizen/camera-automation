@@ -16,12 +16,15 @@ class AttendanceEngine:
         with self._lock:
             self.identities[key]=ev
             p=self.presence.get(ev.person_id) or Presence(person_id=ev.person_id,first_seen_today=ev.timestamp)
-            if p.status=='BREAK':
-                self.store.add_person_event(ev.person_id,self.store_id,ev.camera_id,'BREAK_END',ev.timestamp,{'track_id':ev.track_id,'break_started_at':p.break_started_at.isoformat() if p.break_started_at else None,'snapshot_path':ev.snapshot_path})
-                p.break_started_at=None
+            # Recognition itself must not end a business break. A person can remain
+            # visible to a camera while on break; only the explicit break workflow
+            # transitions BREAK -> PRESENT.
             session, _ = self.store.create_arrival(ev.person_id,self.store_id,ev.timestamp,ev.camera_id,ev.confidence,ev.snapshot_path,confirmed=False)
             p.attendance_session_id=session['id'] if session else p.attendance_session_id
-            p.last_seen_at=ev.timestamp; p.last_camera_id=ev.camera_id; p.last_confidence=ev.confidence; p.status='PRESENT'; self.presence[ev.person_id]=p
+            p.last_seen_at=ev.timestamp; p.last_camera_id=ev.camera_id; p.last_confidence=ev.confidence
+            if p.status != 'BREAK':
+                p.status='PRESENT'
+            self.presence[ev.person_id]=p
             p.current_track_id=ev.track_id; p.last_snapshot_path=ev.snapshot_path or p.last_snapshot_path
             cross=self.crossings.get(key)
             if cross and abs((ev.timestamp-cross.timestamp).total_seconds())<=self.pending_window_seconds: return self._apply(ev,cross)
