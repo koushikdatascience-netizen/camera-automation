@@ -75,6 +75,12 @@ class EdgeSyncWorker:
 
             synced = 0
             failed = 0
+            heartbeat_sync = {"sent": False}
+            try:
+                heartbeat = self.cloud_client.heartbeat(self.edge_config, self._edge_status_payload(license_status))
+                heartbeat_sync = {"sent": True, "received_at": heartbeat.get("received_at")}
+            except Exception as exc:
+                heartbeat_sync = {"sent": False, "error": str(exc)}
             command_sync = {"fetched": 0, "completed": 0, "failed": 0}
             try:
                 commands = self.cloud_client.edge_commands()
@@ -125,8 +131,41 @@ class EdgeSyncWorker:
                     failed += 1
 
             result = SyncRunResult(enabled=True, synced=synced, failed=failed)
-            self._remember(result, {"camera_sync": camera_sync, "command_sync": command_sync})
+            self._remember(result, {"heartbeat": heartbeat_sync, "camera_sync": camera_sync, "command_sync": command_sync})
             return result
+
+    def _edge_status_payload(self, license_status) -> dict[str, Any]:
+        """Build a credential-free inventory/status heartbeat for the cloud portal."""
+        cameras = []
+        if self.camera_manager is not None:
+            for camera in self.camera_manager.list_cameras():
+                runtime = self.camera_manager.get_camera_status(camera.camera_id)
+                cameras.append({
+                    "camera_id": camera.camera_id,
+                    "name": camera.name,
+                    "source_type": camera.source_type,
+                    "camera_role": camera.camera_role.value if hasattr(camera.camera_role, "value") else str(camera.camera_role),
+                    "camera_zone": camera.camera_zone.value if hasattr(camera.camera_zone, "value") else str(camera.camera_zone),
+                    "enabled": bool(camera.enabled),
+                    "features": camera.features.model_dump(),
+                    "online": bool(runtime.online) if runtime else False,
+                    "state": runtime.state.value if runtime and hasattr(runtime.state, "value") else (str(runtime.state) if runtime else "UNKNOWN"),
+                    "last_frame_at": runtime.last_frame_at if runtime else None,
+                    "capture_fps": runtime.capture_fps if runtime else 0.0,
+                    "ai_fps": runtime.ai_fps if runtime else 0.0,
+                    "last_error": runtime.last_error if runtime else None,
+                })
+        return {
+            "service": "SnapKeyVisionAI",
+            "license": {
+                "active": bool(license_status.active),
+                "plan": license_status.plan,
+                "mode": license_status.mode,
+            },
+            "camera_count": len(cameras),
+            "online_camera_count": sum(1 for camera in cameras if camera["online"]),
+            "cameras": cameras,
+        }
 
     def _execute_command(self, command: dict[str, Any]) -> dict[str, Any]:
         command_type=str(command.get("command_type") or "")
