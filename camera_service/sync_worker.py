@@ -88,8 +88,20 @@ class EdgeSyncWorker:
                 for command in commands:
                     try:
                         result = self._execute_command(command)
-                        self.cloud_client.complete_edge_command(command["id"], {"ok": True, **result})
-                        command_sync["completed"] += 1
+                        camera_test_failed = (
+                            str(command.get("command_type") or "") == "CAMERA_TEST"
+                            and result.get("success") is False
+                        )
+                        if camera_test_failed:
+                            self.cloud_client.complete_edge_command(command["id"], {
+                                "ok": False,
+                                **result,
+                                "error": result.get("message") or "Camera connection failed",
+                            })
+                            command_sync["failed"] += 1
+                        else:
+                            self.cloud_client.complete_edge_command(command["id"], {"ok": True, **result})
+                            command_sync["completed"] += 1
                     except Exception as exc:
                         self.cloud_client.complete_edge_command(command["id"], {"ok": False, "error": str(exc)})
                         command_sync["failed"] += 1
