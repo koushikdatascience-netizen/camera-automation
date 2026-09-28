@@ -9,7 +9,7 @@ ENV PYTHONPATH=/app
 COPY requirements-cloud.txt .
 # insightface builds a small native extension; keep build tools out of the final
 # image layer after installation.
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libxcb1 libgl1 libglib2.0-0 \
     && pip install --no-cache-dir 'Cython>=3.0' \
     && pip install --no-cache-dir -r requirements-cloud.txt \
     && apt-get purge -y --auto-remove build-essential \
