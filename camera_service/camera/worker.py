@@ -9,6 +9,7 @@ from camera_service.identity_engine import IdentityResolutionEngine
 from camera_service.line_crossing import LineCrossingDetector
 from camera_service.models import IdentitySeen, LineCrossingEvent
 from camera_service.camera.sources import VideoSource
+from camera_service.object_security.alerts import ObjectSecurityAlerter
 
 class CameraWorker:
     def __init__(self,app_config,camera_config,store,face_service,attendance_engine,tracker=None):
@@ -19,6 +20,7 @@ class CameraWorker:
             except Exception: self.tracker=CentroidTracker()
         self.line=LineCrossingDetector(camera_config.attendance_line) if camera_config.attendance_line else None
         self.last_tracks=set(); self.last_face_attempt={}
+        self.alerter=ObjectSecurityAlerter()
     def process_tracks(self,frame,tracks,ts=None):
         ts=ts or datetime.now(timezone.utc); current=set()
         for tr in tracks:
@@ -39,7 +41,12 @@ class CameraWorker:
             match,score=self.face.recognize(best.get('embedding'),self.app.recognition.known_threshold)
             state=self.identity.observe(self.camera.camera_id,tid,ts,match['person_id'] if match else None,score,True)
             if state.state=='KNOWN':
-                self.attendance.on_identity(IdentitySeen(store_id=self.app.store_id,camera_id=self.camera.camera_id,track_id=tid,person_id=state.person_id,timestamp=ts,confidence=state.confidence,bbox=bbox))
+                snapshot_path=self._save_known_snapshot(roi,tid,ts)
+                self.attendance.on_identity(IdentitySeen(
+                    store_id=self.app.store_id,camera_id=self.camera.camera_id,track_id=tid,
+                    person_id=state.person_id,timestamp=ts,confidence=state.confidence,bbox=bbox,
+                    snapshot_path=snapshot_path,
+                ))
             elif state.state=='UNKNOWN' and self.camera.features.unknown_enabled:
                 self._save_unknown(frame,roi,tid,state,ts)
         lost=self.last_tracks-current
@@ -47,9 +54,17 @@ class CameraWorker:
             self.identity.forget(self.camera.camera_id,tid); self.attendance.on_track_lost(self.camera.camera_id,tid)
             if self.line: self.line.forget(tid)
         self.last_tracks=current
+    def _save_known_snapshot(self,person_roi,tid,ts):
+        root=Path(self.app.evidence_dir)/self.camera.camera_id
+        root.mkdir(parents=True,exist_ok=True)
+        path=root/f"known_{tid}_{int(ts.timestamp()*1000)}.jpg"
+        return str(path) if cv2.imwrite(str(path),person_roi) else None
+
     def _save_unknown(self,frame,person_roi,tid,state,ts):
         root=Path(self.app.evidence_dir)/self.camera.camera_id; root.mkdir(parents=True,exist_ok=True); base=f"unknown_{tid}_{int(ts.timestamp())}"; person_path=root/f"{base}_person.jpg"; full_path=root/f"{base}_frame.jpg"; cv2.imwrite(str(person_path),person_roi); cv2.imwrite(str(full_path),frame)
-        self.store.upsert_unknown(self.app.store_id,self.camera.camera_id,tid,state.first_seen,ts,ts,state.attempts,state.best_similarity,None,str(person_path),None)
+        _,created=self.store.upsert_unknown(self.app.store_id,self.camera.camera_id,tid,state.first_seen,ts,ts,state.attempts,state.best_similarity,None,str(person_path),None)
+        if created and self.camera.camera_role.value in {"GENERAL","SECURITY"}:
+            self.alerter.alarm_beep(f"unknown:{self.camera.camera_id}:{tid}",True,1250,180,3.0)
     def run_once(self):
         if not self.source.open(): raise RuntimeError('camera source failed to open')
         ok,frame=self.source.read()
