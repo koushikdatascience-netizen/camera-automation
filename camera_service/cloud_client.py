@@ -104,6 +104,18 @@ class CloudSyncClient:
         return response.json() if response.content else {"items": []}
 
 
+    def personnel_config(self) -> dict[str, Any]:
+        """Fetch the tenant/shop-scoped personnel roster and face embeddings."""
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response=requests.get(
+            self.config.base_url.rstrip("/")+"/edge/v1/config/personnel",
+            headers={"Authorization":f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json() if response.content else {"items":[]}
+
     def edge_commands(self) -> list[dict[str, Any]]:
         if not self.enabled(): raise RuntimeError("cloud sync is disabled")
         response=requests.get(self.config.base_url.rstrip("/")+"/edge/v1/commands",
