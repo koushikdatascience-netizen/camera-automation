@@ -125,12 +125,18 @@ class PostgresPortalStore:
             rows=conn.execute(text(query),params).mappings().all()
             return [dict(r) | {"payload": r["payload_json"] if isinstance(r["payload_json"],dict) else json.loads(r["payload_json"])} for r in rows]
 
-    def tenant_summary(self, tenant_id: str):
+    def tenant_summary(self, tenant_id: str, shop_id: str | None = None):
         with self._conn() as conn:
-            sites=conn.execute(text("SELECT COUNT(*) FROM sites WHERE tenant_id=:t"),{"t":tenant_id}).scalar_one()
-            edges=conn.execute(text("SELECT COUNT(*) FROM edge_machines WHERE tenant_id=:t"),{"t":tenant_id}).scalar_one()
-            events=conn.execute(text("SELECT event_type,COUNT(*) AS count FROM edge_events WHERE tenant_id=:t GROUP BY event_type"),{"t":tenant_id}).mappings().all()
+            if shop_id:
+                sites=conn.execute(text("SELECT COUNT(DISTINCT site_id) FROM edge_machines WHERE tenant_id=:t AND shop_id=:s"),{"t":tenant_id,"s":shop_id}).scalar_one()
+                edges=conn.execute(text("SELECT COUNT(*) FROM edge_machines WHERE tenant_id=:t AND shop_id=:s"),{"t":tenant_id,"s":shop_id}).scalar_one()
+                events=conn.execute(text("SELECT event_type,COUNT(*) AS count FROM edge_events WHERE tenant_id=:t AND shop_id=:s GROUP BY event_type"),{"t":tenant_id,"s":shop_id}).mappings().all()
+            else:
+                sites=conn.execute(text("SELECT COUNT(*) FROM sites WHERE tenant_id=:t"),{"t":tenant_id}).scalar_one()
+                edges=conn.execute(text("SELECT COUNT(*) FROM edge_machines WHERE tenant_id=:t"),{"t":tenant_id}).scalar_one()
+                events=conn.execute(text("SELECT event_type,COUNT(*) AS count FROM edge_events WHERE tenant_id=:t GROUP BY event_type"),{"t":tenant_id}).mappings().all()
         return {"tenant_id":tenant_id,"sites":sites,"edges":edges,"events":{r["event_type"]:r["count"] for r in events}}
+
 
     def record_heartbeat(self, payload: dict[str, Any]):
         tenant=str(payload["tenant_id"]); site=str(payload["site_id"]); edge=str(payload["edge_id"]); now=self.now()
