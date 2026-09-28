@@ -33,13 +33,17 @@ services:
       SNAPKEY_LICENSE_PRIVATE_KEY: ${SNAPKEY_LICENSE_PRIVATE_KEY:?set SNAPKEY_LICENSE_PRIVATE_KEY}
       SNAPKEY_LICENSE_PUBLIC_KEY: ${SNAPKEY_LICENSE_PUBLIC_KEY:?set SNAPKEY_LICENSE_PUBLIC_KEY}
       SNAPKEY_PORTAL_SESSION_TTL_MINUTES: ${SNAPKEY_PORTAL_SESSION_TTL_MINUTES:-60}
+      SNAPKEY_EVIDENCE_ROOT: /app/data/evidence
     command: uvicorn cloud_portal.api:app --host 0.0.0.0 --port 8000
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - vision_evidence_data:/app/data/evidence
     networks: [vision]
 
 volumes:
   vision_postgres_data:
+  vision_evidence_data:
 
 networks:
   vision:
