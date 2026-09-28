@@ -100,9 +100,14 @@ def get_store(): return store
 def _camera_feature_names(features) -> set[str]:
     data = features.model_dump() if hasattr(features, "model_dump") else dict(features or {})
     enabled = {name for name, value in data.items() if value}
+    # Normalize compatibility aliases to the canonical commercial feature names.
+    # A camera may persist both fields for backward compatibility, but licensing
+    # must not require the same capability twice under two different names.
     if "unknown_person_detection" in enabled:
+        enabled.discard("unknown_person_detection")
         enabled.add("unknown_detection")
     if "shoplifting_detection" in enabled:
+        enabled.discard("shoplifting_detection")
         enabled.add("shoplifting")
     return enabled
 
