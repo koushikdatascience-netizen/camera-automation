@@ -189,16 +189,30 @@
     }catch(error){showMessage(error.message,true);}
   }
 
+  let cameraTestInProgress=false;
   async function testCameraConnection(){
+    const button=document.getElementById("test-camera-btn");
+    if(cameraTestInProgress) return;
+    cameraTestInProgress=true;
+    const originalText=button?.textContent || "Test Connection";
+    if(button){button.disabled=true;button.textContent="Testing...";}
     try{
       const source=document.getElementById("camera-source").value.trim();
       if(!source) throw new Error("Enter or discover a camera source first.");
-      showMessage("Testing camera from the assigned edge device...");
+      showMessage("Testing camera from the assigned edge device. Please wait...");
       const command=await createEdgeCommand("CAMERA_TEST",{source});
-      const result=await waitForEdgeCommand(command.id);
-      if(result.connected===false || result.success===false) throw new Error(result.message||result.error||"Camera connection failed.");
-      showMessage(result.message || "Camera connection succeeded on the edge device.");
-    }catch(error){showMessage(error.message,true);}
+      const result=await waitForEdgeCommand(command.id,45000);
+      if(result.connected===false || result.success===false || result.ok===false)
+        throw new Error(result.message||result.error||"Camera connection failed.");
+      const resolution=result.resolution ? " · "+result.resolution.width+"×"+result.resolution.height : "";
+      const frames=result.frames_received ? " · "+result.frames_received+" frames received" : "";
+      showMessage((result.message || "Camera connected successfully")+resolution+frames+".");
+    }catch(error){
+      showMessage(error.message,true);
+    }finally{
+      cameraTestInProgress=false;
+      if(button){button.disabled=false;button.textContent=originalText;}
+    }
   }
 
   async function loadConfiguredCameras(){
