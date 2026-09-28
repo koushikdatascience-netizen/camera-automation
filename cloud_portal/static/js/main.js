@@ -509,5 +509,24 @@
     loadPersonnel().catch(error=>showMessage(error.message,true));
   }
 
-  bootstrapCrmSession().then(()=>{loadSystemStatus();wireCameraPage();wirePersonnelPage();}).catch(error=>showMessage(error.message,true));
+  function fmtTime(value){if(!value)return "—";const d=new Date(value);return Number.isNaN(d.getTime())?"—":d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});}
+  function fmtDate(value){if(!value)return "—";const d=new Date(value);return Number.isNaN(d.getTime())?"—":d.toLocaleDateString();}
+  function renderAttendance(data){
+    const records=document.getElementById("attendance-records-body");
+    if(!records)return;
+    const rows=data.records||[]; const count=document.getElementById("attendance-count"); if(count)count.textContent=rows.length+" Records";
+    records.innerHTML=rows.length?rows.map(r=>"<tr><td><strong>"+escapeHtml(r.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(r.employee_code||"—")+"</td><td>"+escapeHtml(r.role||"—")+"</td><td>"+fmtDate(r.entry_time||r.exit_time)+"</td><td>"+fmtTime(r.entry_time)+"</td><td>"+fmtTime(r.exit_time)+"</td><td>—</td><td><span class='status-badge "+(r.exit_time?"":"active")+"'>"+(r.exit_time?"Completed":"Present")+"</span></td><td>—</td></tr>").join(""):"<tr><td colspan='9'>No real attendance events received from this shop yet.</td></tr>";
+    const presence=document.getElementById("presence-body"); const active=data.presence||[];
+    if(presence) presence.innerHTML=active.length?active.map(r=>"<tr><td><strong>"+escapeHtml(r.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(r.employee_code||"—")+"</td><td>"+escapeHtml(r.role||"—")+"</td><td>"+fmtTime(r.entry_time)+"</td><td>"+fmtTime(r.entry_time)+"</td><td>—</td><td>—</td><td>—</td><td><span class='status-badge active'>● Present</span></td></tr>").join(""):"<tr><td colspan='9'>No personnel currently present from confirmed attendance events.</td></tr>";
+    const events=document.getElementById("person-events-body"); const ev=data.events||[];
+    if(events) events.innerHTML=ev.length?ev.map(e=>"<tr><td>"+fmtTime(e.event_time)+"</td><td><strong>"+escapeHtml(e.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(String(e.event_type||"").replaceAll("_"," "))+"</td><td>"+escapeHtml(e.camera_id||"—")+"</td><td>—</td><td>—</td><td>"+(e.confidence!=null?Math.round(Number(e.confidence)*100)+"%":"—")+"</td><td>—</td></tr>").join(""):"<tr><td colspan='8'>No person events received yet.</td></tr>";
+  }
+  async function loadAttendance(){
+    if(!document.getElementById("attendance-records-body"))return;
+    const scope=requireScope(["tenant_id"]); const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance");
+    const data=await response.json(); if(!response.ok)throw new Error(data.detail||"Unable to load attendance."); renderAttendance(data);
+  }
+  function wireAttendancePage(){if(!document.getElementById("attendance-records-body"))return;loadAttendance().catch(error=>showMessage(error.message,true));setInterval(()=>loadAttendance().catch(()=>{}),15000);}
+
+  bootstrapCrmSession().then(()=>{loadSystemStatus();wireCameraPage();wirePersonnelPage();wireAttendancePage();}).catch(error=>showMessage(error.message,true));
 })();
