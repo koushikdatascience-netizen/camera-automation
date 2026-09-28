@@ -19,7 +19,7 @@ def test_cloud_portal_ingests_events_by_tenant(tmp_path, monkeypatch):
  importlib.reload(api)
  client=TestClient(api.app)
  auth=portal_auth(client,monkeypatch)
- envelope={'schema_version':'edge.event.v1','tenant_id':'tenant-a','site_id':'site-1','edge_id':'edge-1','event_id':'evt-1','event_type':'SECURITY_OBJECT_ALERT','event_time':'2026-08-28T09:00:00+00:00','store_id':'store-a','camera_id':'cam-1','payload':{'event_id':'evt-1','metadata':{'object_label':'scissors'}}}
+ envelope={'schema_version':'edge.event.v1','tenant_id':'tenant-a','shop_id':'SHOP1','site_id':'site-1','edge_id':'edge-1','event_id':'evt-1','event_type':'SECURITY_OBJECT_ALERT','event_time':'2026-08-28T09:00:00+00:00','store_id':'store-a','camera_id':'cam-1','payload':{'event_id':'evt-1','metadata':{'object_label':'scissors'}}}
  assert client.post('/edge/v1/events',json=envelope,headers={'Authorization':'Bearer test-edge-token'}).status_code==200
  assert client.get('/portal/v1/tenants/tenant-a/summary',headers=auth).json()['events']['SECURITY_OBJECT_ALERT']==1
  items=client.get('/portal/v1/tenants/tenant-a/events',params={'site_id':'site-1'},headers=auth).json()['items']
@@ -99,6 +99,7 @@ def test_portal_edge_command_roundtrip_is_scope_bound(tmp_path, monkeypatch):
  assert api.store.complete_edge_command(command['id'],'tenant-a','SHOP1','edge-1','SUCCEEDED',{'ok':True,'connected':True})
  result=api.store.get_edge_command(command['id'],'tenant-a')
  assert result['status']=='SUCCEEDED' and result['result']['connected'] is True
+ assert api.store.get_edge_command(command['id'],'tenant-a','SHOP2') is None
  assert api.store.get_edge_command(command['id'],'tenant-b') is None
 
 

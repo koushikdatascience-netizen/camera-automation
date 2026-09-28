@@ -404,7 +404,7 @@ def create_portal_edge_command(tenant_id: str, request: EdgeCommandRequest, prin
 @app.get("/portal/v1/tenants/{tenant_id}/edge-commands/{command_id}")
 def portal_edge_command(tenant_id: str, command_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id,principal)
-    command=store.get_edge_command(command_id, tenant_id)
+    command=store.get_edge_command(command_id, tenant_id, principal.shop_id)
     if not command: raise HTTPException(404, "Edge command not found")
     return command
 

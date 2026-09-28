@@ -272,10 +272,15 @@ class PostgresPortalStore:
                  "tenant":tenant_id,"shop":shop_id,"edge":edge_id})
         return bool(out.rowcount)
 
-    def get_edge_command(self, command_id: str, tenant_id: str) -> dict[str, Any] | None:
+    def get_edge_command(self, command_id: str, tenant_id: str, shop_id: str | None = None) -> dict[str, Any] | None:
+        clauses=["id=:id","tenant_id=:tenant"]
+        params: dict[str, Any]={"id":command_id,"tenant":tenant_id}
+        if shop_id:
+            clauses.append("shop_id=:shop")
+            params["shop"]=shop_id
         with self._conn() as conn:
             row=conn.execute(text("""SELECT id,tenant_id,shop_id,edge_id,command_type,status,result_json,created_at,claimed_at,completed_at
-                FROM edge_commands WHERE id=:id AND tenant_id=:tenant"""),{"id":command_id,"tenant":tenant_id}).mappings().first()
+                FROM edge_commands WHERE """+" AND ".join(clauses)),params).mappings().first()
         if not row: return None
         data=dict(row)
         for key in ("created_at","claimed_at","completed_at"):

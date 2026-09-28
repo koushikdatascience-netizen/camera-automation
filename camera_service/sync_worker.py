@@ -8,6 +8,23 @@ from typing import Any
 from camera_service.camera.onvif import probe_onvif, select_profile
 
 
+def _safe_camera_test_result(result: dict[str, Any], *, source_was_secret: bool) -> dict[str, Any]:
+    """Return camera diagnostics without exposing RTSP credentials to the cloud portal."""
+    safe = dict(result)
+    if source_was_secret:
+        safe.pop("source", None)
+    elif "source" in safe:
+        safe["source"] = _redact_source(str(safe["source"]))
+    return safe
+
+
+def _redact_source(source: str) -> str:
+    if "://" not in source or "@" not in source:
+        return source
+    scheme, rest = source.split("://", 1)
+    return f"{scheme}://***@{rest.split('@', 1)[1]}"
+
+
 @dataclass
 class SyncRunResult:
     enabled: bool
@@ -189,9 +206,29 @@ class EdgeSyncWorker:
             return result
         if command_type=="CAMERA_TEST":
             if self.camera_manager is None: raise RuntimeError("camera manager is unavailable")
-            source=str(request.get("source") or "")
+            camera_id=str(request.get("camera_id") or "").strip()
+            source_was_secret=False
+            source_type=str(request.get("source_type") or "").strip()
+            if camera_id:
+                camera = self.camera_manager.get_camera(camera_id)
+                if not camera:
+                    raise RuntimeError(f"Camera {camera_id} was not found on this edge")
+                source = camera.rtsp_url
+                source_type = camera.source_type
+                source_was_secret = True
+            else:
+                source=str(request.get("source") or "").strip()
+            if not source:
+                raise RuntimeError("Camera source is required")
             result=self.camera_manager.test_rtsp_connection(source)
-            return result if isinstance(result,dict) else {"connected":bool(result)}
+            if not isinstance(result,dict):
+                result={"connected":bool(result)}
+            result=_safe_camera_test_result(result, source_was_secret=source_was_secret)
+            if camera_id:
+                result["camera_id"]=camera_id
+            if source_type:
+                result["source_type"]=source_type
+            return result
         raise RuntimeError(f"Unsupported edge command: {command_type}")
 
     def status(self) -> dict[str, Any]:

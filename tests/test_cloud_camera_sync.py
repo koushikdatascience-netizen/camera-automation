@@ -71,3 +71,56 @@ def test_sync_worker_applies_cloud_camera_assignments(tmp_path):
     assert result.failed==0
     assert manager.get_camera("CAM-1") is not None
     assert worker.last_result["camera_sync"]=={"fetched":1,"applied":1,"failed":0}
+
+
+class FakeCameraManager:
+    def __init__(self):
+        self.sources = []
+
+    def get_camera(self, camera_id):
+        if camera_id == "webcam-01":
+            return SimpleNamespace(camera_id=camera_id, rtsp_url="0", source_type="webcam")
+        if camera_id == "rtsp-01":
+            return SimpleNamespace(camera_id=camera_id, rtsp_url="rtsp://user:secret@10.0.0.2/live", source_type="rtsp")
+        return None
+
+    def test_rtsp_connection(self, source):
+        self.sources.append(source)
+        return {
+            "success": True,
+            "message": "Camera connected successfully",
+            "source": source,
+            "resolution": {"width": 640, "height": 480},
+            "frames_received": 10,
+        }
+
+
+def test_camera_test_command_resolves_existing_camera_without_leaking_source():
+    manager = FakeCameraManager()
+    worker = EdgeSyncWorker(
+        DummyStore(), DummyCloud(), SimpleNamespace(), SimpleNamespace(batch_size=50),
+        DummyLicense(), camera_manager=manager,
+    )
+    result = worker._execute_command({
+        "command_type": "CAMERA_TEST",
+        "request": {"camera_id": "rtsp-01"},
+    })
+    assert manager.sources == ["rtsp://user:secret@10.0.0.2/live"]
+    assert result["success"] is True
+    assert result["camera_id"] == "rtsp-01"
+    assert result["source_type"] == "rtsp"
+    assert "source" not in result
+
+
+def test_camera_test_command_redacts_unsaved_rtsp_source():
+    manager = FakeCameraManager()
+    worker = EdgeSyncWorker(
+        DummyStore(), DummyCloud(), SimpleNamespace(), SimpleNamespace(batch_size=50),
+        DummyLicense(), camera_manager=manager,
+    )
+    result = worker._execute_command({
+        "command_type": "CAMERA_TEST",
+        "request": {"source": "rtsp://user:secret@10.0.0.2/live", "source_type": "rtsp"},
+    })
+    assert result["source"] == "rtsp://***@10.0.0.2/live"
+    assert result["source_type"] == "rtsp"

@@ -72,6 +72,19 @@
     return Number.isFinite(stamp) && (Date.now() - stamp) < 90000;
   }
 
+  function selectActiveEdge(edges, preferredEdgeId="") {
+    if (!edges.length) return null;
+    const preferred = edges.find(edge => edge.edge_id === preferredEdgeId);
+    if (preferred && edgeOnline(preferred)) return preferred;
+    return edges.find(edge => edgeOnline(edge)) || preferred || edges[0];
+  }
+
+  function rememberActiveEdge(edge) {
+    if (!edge) return;
+    sessionStorage.setItem("snapkey_edge_id", edge.edge_id);
+    if (edge.site_id) sessionStorage.setItem("snapkey_site_id", edge.site_id);
+  }
+
   function renderEdges(edges) {
     const container=document.getElementById("edge-device-list");
     if(!container) return;
@@ -137,11 +150,12 @@
     return "file";
   }
 
-  async function createEdgeCommand(commandType, request) {
+  async function createEdgeCommand(commandType, request, options={}) {
     const scope=requireScope(["tenant_id","shop_id","edge_id"]);
+    const edgeId=options.edgeId || scope.edge_id;
     const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edge-commands",{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({tenant_id:scope.tenant_id,shop_id:scope.shop_id,edge_id:scope.edge_id,command_type:commandType,request})
+      body:JSON.stringify({tenant_id:scope.tenant_id,shop_id:scope.shop_id,edge_id:edgeId,command_type:commandType,request})
     });
     const body=await response.json();
     if(!response.ok) throw new Error(body.detail || "Unable to send command to edge.");
@@ -159,7 +173,7 @@
       if(body.status==="FAILED") throw new Error(body.result?.error || "Edge command failed.");
       await new Promise(resolve=>setTimeout(resolve,1000));
     }
-    throw new Error("Edge device did not respond within 30 seconds. Confirm the edge agent is online.");
+    throw new Error("Edge device did not respond within "+Math.round(timeoutMs/1000)+" seconds. Confirm the selected edge agent is online.");
   }
 
   async function discoverOnvifCamera(){
@@ -190,17 +204,23 @@
   }
 
   let cameraTestInProgress=false;
-  async function testCameraConnection(){
-    const button=document.getElementById("test-camera-btn");
+  async function testCameraConnection(options={}){
+    const button=options.button || document.getElementById("test-camera-btn");
     if(cameraTestInProgress) return;
     cameraTestInProgress=true;
     const originalText=button?.textContent || "Test Connection";
     if(button){button.disabled=true;button.textContent="Testing...";}
     try{
-      const source=document.getElementById("camera-source").value.trim();
-      if(!source) throw new Error("Enter or discover a camera source first.");
+      let payload={};
+      if(options.cameraId){
+        payload={camera_id:options.cameraId,source_type:options.sourceType||""};
+      }else{
+        const source=document.getElementById("camera-source").value.trim();
+        if(!source) throw new Error("Enter or discover a camera source first.");
+        payload={source,source_type:sourceType(source)};
+      }
       showMessage("Testing camera from the assigned edge device. Please wait...");
-      const command=await createEdgeCommand("CAMERA_TEST",{source});
+      const command=await createEdgeCommand("CAMERA_TEST",payload,{edgeId:options.edgeId});
       const result=await waitForEdgeCommand(command.id,45000);
       if(result.connected===false || result.success===false || result.ok===false)
         throw new Error(result.message||result.error||"Camera connection failed.");
@@ -223,12 +243,9 @@
       const edgeResponse=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edges");
       const edgeBody=await edgeResponse.json(); if(!edgeResponse.ok) throw new Error(edgeBody.detail||"Unable to load edge devices.");
       const edges=edgeBody.items||[];
-      const selectedEdge=scope.edge_id || edges[0]?.edge_id || "";
-      if(selectedEdge){
-        sessionStorage.setItem("snapkey_edge_id",selectedEdge);
-        const selected=edges.find(edge=>edge.edge_id===selectedEdge);
-        if(selected?.site_id) sessionStorage.setItem("snapkey_site_id",selected.site_id);
-      }
+      const selectedEdgeRecord=selectActiveEdge(edges,scope.edge_id);
+      rememberActiveEdge(selectedEdgeRecord);
+      const selectedEdge=selectedEdgeRecord?.edge_id || "";
       const url="/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id)+(selectedEdge?"&edge_id="+encodeURIComponent(selectedEdge):"");
       const response=await authFetch(url);
       const body=await response.json(); if(!response.ok) throw new Error(body.detail||"Unable to load cameras.");
@@ -238,9 +255,10 @@
       const configuredIds=new Set(items.map(camera=>camera.camera_id));
       const localOnly=inventory.filter(camera=>!configuredIds.has(camera.camera_id));
       if(!items.length && !localOnly.length){container.innerHTML="<p>No cameras configured or reported by this edge yet.</p>";return;}
-      const configuredHtml=items.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type)+" · "+escapeHtml(camera.camera_role)+" · Cloud managed</small></div><div><button class='btn btn-light edit-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Edit</button> <button class='btn btn-light delete-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Delete</button></div></div>").join("");
-      const localHtml=localOnly.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type||"camera")+" · "+escapeHtml(camera.camera_role||"GENERAL")+" · Edge discovered</small></div><strong style='color:"+(camera.online?"#166534":"#6b7280")+"'>● "+(camera.online?"Online":"Offline")+"</strong></div>").join("");
+      const configuredHtml=items.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type)+" · "+escapeHtml(camera.camera_role)+" · Cloud managed</small></div><div style='display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end'><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(camera.edge_id||selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button><button class='btn btn-light edit-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Edit</button><button class='btn btn-light delete-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Delete</button></div></div>").join("");
+      const localHtml=localOnly.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type||"camera")+" · "+escapeHtml(camera.camera_role||"GENERAL")+" · Edge discovered</small></div><div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end'><strong style='color:"+(camera.online?"#166534":"#6b7280")+"'>● "+(camera.online?"Online":"Offline")+"</strong><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button></div></div>").join("");
       container.innerHTML=configuredHtml+localHtml;
+      container.querySelectorAll(".test-existing-camera").forEach(button=>button.addEventListener("click",()=>testCameraConnection({cameraId:button.dataset.id,edgeId:button.dataset.edgeId,sourceType:button.dataset.sourceType,button})));
       container.querySelectorAll(".edit-camera").forEach(button=>button.addEventListener("click",()=>editCamera(items.find(x=>x.camera_id===button.dataset.id))));
       container.querySelectorAll(".delete-camera").forEach(button=>button.addEventListener("click",()=>deleteCamera(button.dataset.id)));
     }catch(error){container.innerHTML="<p>"+escapeHtml(error.message)+"</p>";}

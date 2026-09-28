@@ -252,9 +252,14 @@ class PortalStore:
                 (status,json.dumps(result),self.now(),command_id,tenant_id,shop_id,edge_id))
         return bool(out.rowcount)
 
-    def get_edge_command(self, command_id: str, tenant_id: str) -> dict[str, Any] | None:
+    def get_edge_command(self, command_id: str, tenant_id: str, shop_id: str | None = None) -> dict[str, Any] | None:
+        clauses=["id=?","tenant_id=?"]
+        params=[command_id, tenant_id]
+        if shop_id:
+            clauses.append("shop_id=?")
+            params.append(shop_id)
         with self._conn() as conn:
-            row=conn.execute("SELECT * FROM edge_commands WHERE id=? AND tenant_id=?",(command_id,tenant_id)).fetchone()
+            row=conn.execute("SELECT * FROM edge_commands WHERE "+" AND ".join(clauses),tuple(params)).fetchone()
         if not row: return None
         data=dict(row); data["result"]=json.loads(data.pop("result_json")) if data.get("result_json") else None
         data.pop("request_json",None)
