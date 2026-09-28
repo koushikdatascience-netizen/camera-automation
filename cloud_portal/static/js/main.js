@@ -363,18 +363,21 @@
         camera_zone: document.getElementById("camera-zone").value.trim() || null,
         crowd_threshold: Number(document.getElementById("crowd-threshold").value || 10),
         enabled: true,
+        // These keys intentionally match CameraFeatures/apply_cloud_camera on the edge.
+        // UI-only labels must never silently create feature names the edge ignores.
         features: {
-          person_detection: !!checks[0]?.checked,
+          attendance: !!checks[0]?.checked,
           face_recognition: !!checks[1]?.checked,
-          tracking: !!checks[2]?.checked,
-          crowd_monitoring: !!checks[3]?.checked,
+          unknown_detection: !!checks[2]?.checked,
+          shoplifting: !!checks[3]?.checked,
           object_security: !!checks[4]?.checked
         },
         settings: {
-          tracking_frame_skip: Number(document.getElementById("frame-skip").value || 2),
-          detection_interval: Number(document.getElementById("detection-interval").value || 10),
+          // Keep the portal contract aligned with CameraManager.apply_cloud_camera.
+          tracking_fps: Math.max(1, Math.round(30 / Math.max(1, Number(document.getElementById("frame-skip").value || 2)))),
           max_frame_width: Number(document.getElementById("max-width").value || 960),
-          face_recognition_skip: Number(document.getElementById("face-skip").value || 2)
+          tracking_quality: "balanced",
+          tracking_mode: "auto"
         }
       };
       const response = await authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras/" + encodeURIComponent(cameraId), {
