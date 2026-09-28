@@ -551,7 +551,11 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
         raise HTTPException(400, "Unsupported event schema")
     _enforce_edge_scope(principal, envelope)
     result=store.ingest_event(envelope)
-    background_tasks.add_task(_deliver_crm_attendance_event,envelope)
+    # Edge delivery is at-least-once. Only the first successful insert may create a
+    # downstream CRM mutation; retries of the same event_id are acknowledged without
+    # scheduling another login/logout/break call.
+    if result.get("inserted", True):
+        background_tasks.add_task(_deliver_crm_attendance_event,envelope)
     return result
 
 
