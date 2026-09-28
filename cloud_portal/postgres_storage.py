@@ -65,6 +65,11 @@ class PostgresPortalStore:
                 shop_id TEXT NOT NULL, user_id TEXT, display_name TEXT, role TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL)""",
             """CREATE INDEX IF NOT EXISTS idx_portal_sessions_token ON portal_sessions(token_hash,expires_at)""",
+            """CREATE TABLE IF NOT EXISTS portal_users(
+                id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, display_name TEXT NOT NULL,
+                tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'OWNER',
+                enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL)""",
+            """CREATE INDEX IF NOT EXISTS idx_portal_users_email ON portal_users(email)""",
         ]
         with self._conn() as conn:
             for statement in statements:
@@ -278,6 +283,16 @@ class PostgresPortalStore:
         data["result"]=data.pop("result_json")
         return data
 
+
+    def create_portal_user(self, user: dict[str, Any]) -> None:
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO portal_users(id,email,password_hash,display_name,tenant_id,company_code,shop_id,role,enabled,created_at)
+                VALUES(:id,:email,:password_hash,:display_name,:tenant_id,:company_code,:shop_id,:role,TRUE,:created_at)"""), user)
+
+    def portal_user_by_email(self, email: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("SELECT * FROM portal_users WHERE lower(email)=lower(:email) AND enabled=TRUE"),{"email":email}).mappings().first()
+        return dict(row) if row else None
 
     def create_portal_session(self, session: dict[str, Any]) -> None:
         with self._conn() as conn:
