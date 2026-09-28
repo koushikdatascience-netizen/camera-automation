@@ -122,6 +122,65 @@ class CrmPortalSessionRequest(BaseModel):
     displayName: str | None = None
     role: str = "USER"
 
+class PortalRegisterRequest(BaseModel):
+    email: str
+    password: str
+    display_name: str
+    company_code: str
+    shop_code: str
+
+class PortalLoginRequest(BaseModel):
+    email: str
+    password: str
+
+def _password_hash(password: str, salt: bytes | None = None) -> str:
+    if salt is None:
+        salt=secrets.token_bytes(16)
+    digest=hashlib.pbkdf2_hmac("sha256",password.encode("utf-8"),salt,210000)
+    return salt.hex()+"$"+digest.hex()
+
+def _password_valid(password: str, encoded: str) -> bool:
+    try:
+        salt_hex,digest_hex=encoded.split("$",1)
+        actual=_password_hash(password,bytes.fromhex(salt_hex)).split("$",1)[1]
+        return secrets.compare_digest(actual,digest_hex)
+    except Exception:
+        return False
+
+def _native_session(user: dict[str, Any]) -> dict[str, Any]:
+    session_id=secrets.token_urlsafe(18); token=secrets.token_urlsafe(32)
+    now=datetime.now(timezone.utc); expires=now+timedelta(hours=12)
+    store.create_portal_session({"session_id":session_id,"token_hash":_token_digest(token),
+        "tenant_id":user["tenant_id"],"company_code":user.get("company_code"),"shop_id":user["shop_id"],
+        "user_id":user["id"],"display_name":user["display_name"],"role":user["role"],
+        "created_at":now.isoformat(),"expires_at":expires.isoformat()})
+    return {"token":token,"sessionId":session_id,"expiresAt":expires.isoformat(),
+        "tenantId":user["tenant_id"],"companyCode":user.get("company_code"),"shopCode":user["shop_id"],
+        "displayName":user["display_name"],"role":user["role"]}
+
+@app.post("/auth/register")
+def register_portal_user(payload: PortalRegisterRequest):
+    email=payload.email.strip().lower(); password=payload.password
+    if "@" not in email: raise HTTPException(400,"Enter a valid email address")
+    if len(password)<8: raise HTTPException(400,"Password must be at least 8 characters")
+    if store.portal_user_by_email(email): raise HTTPException(409,"An account already exists for this email")
+    company=_slug(payload.company_code); shop=_slug(payload.shop_code)
+    # Deliberately matches edge activation identity so an owner registering the same
+    # company/shop immediately sees already-activated Camera Eye devices.
+    user={"id":secrets.token_urlsafe(18),"email":email,"password_hash":_password_hash(password),
+        "display_name":payload.display_name.strip() or email.split("@")[0],"tenant_id":f"tenant-{company}",
+        "company_code":payload.company_code.strip(),"shop_id":shop,"role":"OWNER",
+        "created_at":datetime.now(timezone.utc).isoformat()}
+    store.create_portal_user(user)
+    return _native_session(user)
+
+@app.post("/auth/login")
+def login_portal_user(payload: PortalLoginRequest):
+    user=store.portal_user_by_email(payload.email.strip().lower())
+    if not user or not _password_valid(payload.password,user["password_hash"]):
+        raise HTTPException(401,"Invalid email or password")
+    return _native_session(user)
+
 
 def _crm_integration_key_valid(value: str | None) -> bool:
     expected=os.getenv("SNAPKEY_CRM_INTEGRATION_KEY","").strip()
