@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import secrets
+import httpx
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
+from cloud_portal.crm_client import crm_client
 
 
 def build_portal_store():
@@ -133,6 +135,12 @@ class PortalRegisterRequest(BaseModel):
 class PortalLoginRequest(BaseModel):
     email: str
     password: str
+
+class CrmPersonMappingRequest(BaseModel):
+    local_person_id: str
+    crm_user_id: str
+    employee_code: str | None = None
+    break_master_id: str | None = None
 
 def _password_hash(password: str, salt: bytes | None = None) -> str:
     if salt is None:
@@ -502,6 +510,56 @@ def ingest_edge_event(envelope: dict[str, Any], principal: EdgePrincipal = Depen
         raise HTTPException(400, "Unsupported event schema")
     _enforce_edge_scope(principal, envelope)
     return store.ingest_event(envelope)
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/crm/status")
+def crm_status(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    return {"configured":crm_client.configured,"base_url":crm_client.base_url,
+            "mapping_count":len(store.list_crm_person_mappings(tenant_id,principal.shop_id))}
+
+@app.get("/portal/v1/tenants/{tenant_id}/crm/breaks")
+def crm_breaks(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
+    try: return {"items":crm_client.my_breaks()}
+    except httpx.HTTPError as exc: raise HTTPException(502,f"SnapKey CRM break lookup failed: {exc}") from exc
+
+@app.get("/portal/v1/tenants/{tenant_id}/crm/person-mappings")
+def crm_person_mappings(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    return {"items":store.list_crm_person_mappings(tenant_id,principal.shop_id)}
+
+@app.put("/portal/v1/tenants/{tenant_id}/crm/person-mappings/{local_person_id}")
+def crm_person_mapping(tenant_id: str, local_person_id: str, request: CrmPersonMappingRequest,
+                       principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    if request.local_person_id != local_person_id: raise HTTPException(400,"local_person_id does not match path")
+    if not request.crm_user_id.strip(): raise HTTPException(400,"crm_user_id is required")
+    return {"mapping":store.upsert_crm_person_mapping({
+        "tenant_id":tenant_id,"shop_id":principal.shop_id,"local_person_id":local_person_id,
+        "crm_user_id":request.crm_user_id.strip(),"employee_code":(request.employee_code or "").strip() or None,
+        "break_master_id":(request.break_master_id or "").strip() or None,
+    })}
+
+@app.post("/portal/v1/tenants/{tenant_id}/crm/test-break-start/{local_person_id}")
+def crm_test_break_start(tenant_id: str, local_person_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    mapping=store.crm_person_mapping(tenant_id,principal.shop_id,local_person_id)
+    if not mapping: raise HTTPException(404,"CRM person mapping not found")
+    if not mapping.get("break_master_id"): raise HTTPException(400,"No CRM breakMasterId is mapped")
+    if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
+    try: return {"result":crm_client.start_break(mapping["crm_user_id"],mapping["break_master_id"])}
+    except httpx.HTTPError as exc: raise HTTPException(502,f"SnapKey CRM start-break failed: {exc}") from exc
+
+@app.post("/portal/v1/tenants/{tenant_id}/crm/test-break-end/{local_person_id}")
+def crm_test_break_end(tenant_id: str, local_person_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    mapping=store.crm_person_mapping(tenant_id,principal.shop_id,local_person_id)
+    if not mapping: raise HTTPException(404,"CRM person mapping not found")
+    if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
+    try: return {"result":crm_client.end_break(mapping["crm_user_id"])}
+    except httpx.HTTPError as exc: raise HTTPException(502,f"SnapKey CRM end-break failed: {exc}") from exc
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/summary")
