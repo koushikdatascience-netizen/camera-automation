@@ -528,6 +528,17 @@
             }
         }
 
+        .operator-camera-tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; margin-bottom:18px; }
+        .operator-camera-tile { display:flex; justify-content:space-between; align-items:center; gap:10px; min-height:74px; padding:13px 14px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink); text-align:left; cursor:pointer; }
+        .operator-camera-tile:hover { border-color:#e3b526; background:var(--brand-soft); }
+        .operator-camera-tile strong,.operator-camera-tile small { display:block; margin:0; }
+        .operator-camera-tile .live-status.online { color:var(--success); }
+        .operator-camera-tile .live-status.offline { color:var(--danger); }
+        .operator-records-toolbar { display:flex; justify-content:space-between; align-items:end; gap:12px; flex-wrap:wrap; }
+        .operator-records-toolbar .form-control { min-width:190px; }
+        #operator-records-table .btn { min-height:30px; padding:6px 9px; text-decoration:none; display:inline-flex; align-items:center; }
+        @media (max-width:650px){ .operator-records-toolbar{align-items:stretch}.operator-records-toolbar .live-toolbar-actions{width:100%}.operator-records-toolbar .form-control{min-width:0;flex:1} }
+
         /* Camera Eye professional live workspace */
         .live-toolbar { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
         .live-toolbar-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
@@ -1227,6 +1238,7 @@
 
         // DOM Elements
         const sections = {
+            overview: document.getElementById('overview-section'),
             system: document.getElementById('system-section'),
             live: document.getElementById('live-section'),
             cameras: document.getElementById('cameras-section'),
@@ -1251,6 +1263,7 @@
                 // Show selected section
                 const sectionId = link.getAttribute('data-section');
                 Object.values(sections).forEach(section => section.classList.remove('active'));
+                if (!sections[sectionId]) return;
                 sections[sectionId].classList.add('active');
 
                 // Load section data
@@ -1307,6 +1320,9 @@
                 liveActivityTimer = null;
             }
             switch(sectionId) {
+                case 'overview':
+                    loadOperatorOverview();
+                    break;
                 case 'system':
                     loadSystemStatus();
                     break;
@@ -1332,6 +1348,92 @@
                     loadUnknownPersons();
                     break;
             }
+        }
+
+        let operatorRecordMode = 'attendance';
+        let operatorCameras = [];
+
+        function openOperatorSection(sectionId) {
+            const link = document.querySelector(`nav a[data-section="${sectionId}"]`);
+            if (link) { link.click(); return; }
+            Object.values(sections).forEach(section => section?.classList.remove('active'));
+            sections[sectionId]?.classList.add('active');
+            loadSectionData(sectionId);
+        }
+        function operatorCameraName(cameraId) {
+            return operatorCameras.find(camera => camera.camera_id === cameraId)?.name || cameraId || '-';
+        }
+        function formatOperatorDuration(arrival, exit) {
+            if (!arrival) return '-';
+            if (!exit) return 'Present';
+            const ms = new Date(exit).getTime() - new Date(arrival).getTime();
+            if (!Number.isFinite(ms) || ms < 0) return '-';
+            const minutes = Math.floor(ms / 60000), hours = Math.floor(minutes / 60);
+            return hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
+        }
+        function renderOperatorCameraTiles() {
+            const tiles=document.getElementById('operator-camera-tiles');
+            const online=operatorCameras.filter(camera=>camera.status?.online).length;
+            document.getElementById('overview-summary').textContent=`${operatorCameras.length} cameras · ${online} online`;
+            tiles.innerHTML=operatorCameras.length?operatorCameras.map(camera=>{
+                const isOnline=!!camera.status?.online;
+                return `<button class="operator-camera-tile" type="button" data-camera-id="${escapeHtmlLocal(camera.camera_id)}"><span><strong>${escapeHtmlLocal(camera.name||camera.camera_id)}</strong><small>${escapeHtmlLocal(camera.camera_role||'GENERAL')}</small></span><span class="live-status ${isOnline?'online':'offline'}">${isOnline?'LIVE':'OFFLINE'}</span></button>`;
+            }).join(''):'<div class="activity-empty">No cameras configured. Open Camera Setup to add one.</div>';
+            tiles.querySelectorAll('[data-camera-id]').forEach(button=>button.addEventListener('click',()=>{selectedLiveCameraId=button.dataset.cameraId;openOperatorSection('live');}));
+        }
+        function populateOperatorCameraFilter() {
+            const select=document.getElementById('operator-camera-filter'), selected=select.value;
+            select.innerHTML='<option value="">All cameras</option>'+operatorCameras.map(camera=>`<option value="${escapeHtmlLocal(camera.camera_id)}">${escapeHtmlLocal(camera.name||camera.camera_id)}</option>`).join('');
+            if(operatorCameras.some(camera=>camera.camera_id===selected))select.value=selected;
+        }
+        function operatorEvidenceLink(url,label) {
+            return `<a class="btn btn-secondary" href="${url}" target="_blank" rel="noopener">${label}</a>`;
+        }
+        async function loadOperatorRecords() {
+            const body=document.getElementById('operator-records-body'),head=document.getElementById('operator-records-head'),status=document.getElementById('operator-records-status');
+            const cameraId=document.getElementById('operator-camera-filter').value;
+            status.textContent='Loading records...';
+            try {
+                if(operatorRecordMode==='attendance'){
+                    const params=new URLSearchParams({limit:'100'});if(cameraId)params.set('camera_id',cameraId);
+                    const response=await fetch(`${API_BASE}/attendance?${params}`);if(!response.ok)throw new Error('Attendance records unavailable');
+                    const data=await response.json();
+                    head.innerHTML='<tr><th>Person</th><th>Camera</th><th>Time in</th><th>Time out</th><th>Duration</th><th>Evidence</th></tr>';
+                    body.innerHTML=(data.items||[]).length?data.items.map(item=>{
+                        const evidence=[item.arrival_snapshot?operatorEvidenceLink(`${API_BASE}/attendance/${encodeURIComponent(item.id)}/snapshots/arrival`,'Entry'):'',item.exit_snapshot?operatorEvidenceLink(`${API_BASE}/attendance/${encodeURIComponent(item.id)}/snapshots/exit`,'Exit'):''].filter(Boolean).join(' ');
+                        return `<tr><td><strong>${escapeHtmlLocal(item.full_name||item.person_id||'-')}</strong><small>${escapeHtmlLocal(item.employee_code||'')}</small></td><td>${escapeHtmlLocal(operatorCameraName(item.arrival_camera||item.exit_camera))}</td><td>${escapeHtmlLocal(formatDateTime(item.arrival_time))}</td><td>${escapeHtmlLocal(item.exit_time?formatDateTime(item.exit_time):'Present')}</td><td>${escapeHtmlLocal(formatOperatorDuration(item.arrival_time,item.exit_time))}</td><td>${evidence||'-'}</td></tr>`;
+                    }).join(''):'<tr><td colspan="6">No attendance records yet.</td></tr>';
+                    status.textContent=`${(data.items||[]).length} attendance record(s)`;
+                } else {
+                    const [securityResponse,unknownResponse]=await Promise.all([fetch(`${API_BASE}/security-alerts?limit=100`),fetch(`${API_BASE}/unknown-incidents?limit=100`)]);
+                    if(!securityResponse.ok||!unknownResponse.ok)throw new Error('Alert records unavailable');
+                    const security=await securityResponse.json(),unknown=await unknownResponse.json();
+                    let records=[...(security.items||[]).map(item=>({...item,recordType:'security',stamp:item.event_time})),...(unknown.items||[]).map(item=>({...item,recordType:'unknown',stamp:item.confirmed_unknown_at||item.first_seen}))];
+                    if(cameraId)records=records.filter(item=>item.camera_id===cameraId);
+                    records.sort((a,b)=>new Date(b.stamp||0)-new Date(a.stamp||0));
+                    head.innerHTML='<tr><th>Alert</th><th>Camera</th><th>Time</th><th>Status</th><th>Evidence</th></tr>';
+                    body.innerHTML=records.length?records.slice(0,100).map(item=>{
+                        const label=item.recordType==='unknown'?'Unknown person':(item.object_label||item.alert_type||'Security alert');
+                        const hasEvidence=item.recordType==='unknown'?(item.best_face_snapshot||item.best_person_snapshot):item.snapshot_path;
+                        const evidenceUrl=item.recordType==='unknown'?`${API_BASE}/unknown-incidents/${encodeURIComponent(item.id)}/snapshot`:`${API_BASE}/security-alerts/${encodeURIComponent(item.id)}/snapshot`;
+                        return `<tr><td><strong>${escapeHtmlLocal(label)}</strong></td><td>${escapeHtmlLocal(operatorCameraName(item.camera_id))}</td><td>${escapeHtmlLocal(formatDateTime(item.stamp))}</td><td>${escapeHtmlLocal(item.status||'OPEN')}</td><td>${hasEvidence?operatorEvidenceLink(evidenceUrl,'Snapshot'):'-'}</td></tr>`;
+                    }).join(''):'<tr><td colspan="5">No alerts yet.</td></tr>';
+                    status.textContent=`${records.length} alert record(s)`;
+                }
+            } catch(error){body.innerHTML=`<tr><td colspan="6">${escapeHtmlLocal(error.message)}</td></tr>`;status.textContent=error.message;}
+        }
+        async function loadOperatorOverview() {
+            try {
+                const response=await fetch(`${API_BASE}/cameras`);if(!response.ok)throw new Error('Camera status unavailable');
+                const data=await response.json();operatorCameras=data.items||[];renderOperatorCameraTiles();populateOperatorCameraFilter();await loadOperatorRecords();
+            } catch(error){document.getElementById('overview-summary').textContent=error.message;document.getElementById('operator-camera-tiles').innerHTML=`<div class="activity-empty">${escapeHtmlLocal(error.message)}</div>`;}
+        }
+        document.getElementById('overview-refresh')?.addEventListener('click',loadOperatorOverview);
+        document.getElementById('operator-camera-filter')?.addEventListener('change',loadOperatorRecords);
+        document.getElementById('operator-manage-people')?.addEventListener('click',()=>openOperatorSection('personnel'));
+        document.getElementById('people-back')?.addEventListener('click',()=>openOperatorSection('overview'));
+        for(const [id,mode] of [['operator-attendance-tab','attendance'],['operator-alerts-tab','alerts']]){
+            document.getElementById(id)?.addEventListener('click',()=>{operatorRecordMode=mode;document.getElementById('operator-attendance-tab').setAttribute('aria-selected',String(mode==='attendance'));document.getElementById('operator-alerts-tab').setAttribute('aria-selected',String(mode==='alerts'));loadOperatorRecords();});
         }
 
         // System Status
@@ -1484,6 +1586,9 @@
                 recognizedCameraId = selectedLiveCameraId;
                 document.getElementById('focus-person-name').textContent = 'No recognition yet';
                 document.getElementById('focus-person-time').textContent = '';
+                document.getElementById('focus-time-in').textContent = '-';
+                document.getElementById('focus-time-out').textContent = '-';
+                document.getElementById('focus-duration').textContent = '-';
                 document.getElementById('focus-person-photo').hidden = true;
                 document.getElementById('focus-person-photo').removeAttribute('src');
                 document.getElementById('focus-control-message').textContent = '';
@@ -1560,7 +1665,7 @@
             if (!sections.live.classList.contains('active')) return;
             const list = document.getElementById('live-activity-list');
             try {
-                const endpoints = liveActivity === 'attendance' ? ['person-events'] : ['security-alerts', 'unknown-incidents'];
+                const endpoints = liveActivity === 'attendance' ? ['attendance?limit=50'] : ['security-alerts?limit=50', 'unknown-incidents?limit=50'];
                 const responses = await Promise.all(endpoints.map(endpoint => fetch(`${API_BASE}/${endpoint}`)));
                 if (responses.some(response => !response.ok)) throw new Error('Recent activity unavailable');
                 const bodies = await Promise.all(responses.map(response => response.json()));
@@ -1569,8 +1674,11 @@
                 if (liveActivity === 'attendance' && liveView === 'focus') {
                     const cameraId = selectedLiveCameraId;
                     const latest = records.find(item => item.person_id && item.full_name);
-                    document.getElementById('focus-person-name').textContent = latest?.full_name || 'No recognition yet';
-                    document.getElementById('focus-person-time').textContent = latest?.event_time ? `${latest.event_type || 'Seen'} · ${new Date(latest.event_time).toLocaleString()}` : '';
+                    document.getElementById('focus-person-name').textContent = latest?.full_name || 'No attendance yet';
+                    document.getElementById('focus-person-time').textContent = latest?.arrival_time ? `Arrived · ${new Date(latest.arrival_time).toLocaleString()}` : '';
+                    document.getElementById('focus-time-in').textContent = latest?.arrival_time ? formatDateTime(latest.arrival_time) : '-';
+                    document.getElementById('focus-time-out').textContent = latest?.exit_time ? formatDateTime(latest.exit_time) : (latest ? 'Present' : '-');
+                    document.getElementById('focus-duration').textContent = latest ? formatOperatorDuration(latest.arrival_time, latest.exit_time) : '-';
                     const photo = document.getElementById('focus-person-photo');
                     photo.hidden = true;
                     photo.removeAttribute('src');
@@ -1586,11 +1694,11 @@
                         }
                     }
                 }
-                records.sort((a,b) => new Date(b.event_time || b.confirmed_unknown_at || b.first_seen || b.detected_at || b.created_at || 0) - new Date(a.event_time || a.confirmed_unknown_at || a.first_seen || a.detected_at || a.created_at || 0));
+                records.sort((a,b) => new Date(b.arrival_time || b.event_time || b.confirmed_unknown_at || b.first_seen || b.detected_at || b.created_at || 0) - new Date(a.arrival_time || a.event_time || a.confirmed_unknown_at || a.first_seen || a.detected_at || a.created_at || 0));
                 records = records.slice(0, 12);
                 list.innerHTML = records.length ? records.map(item => {
-                    const label = liveActivity === 'attendance' ? `${item.full_name || item.person_id || 'Unidentified person'} · ${item.event_type || 'Event'}` : `${item.object_label || (item.kind === 'unknown-incidents' ? 'Unknown person' : 'Security alert')} · ${item.status || 'Open'}`;
-                    const stamp = item.event_time || item.confirmed_unknown_at || item.first_seen || item.detected_at || item.created_at;
+                    const label = liveActivity === 'attendance' ? `${item.full_name || item.person_id || 'Unidentified person'} · ${item.exit_time ? 'Exited' : 'Present'}` : `${item.object_label || (item.kind === 'unknown-incidents' ? 'Unknown person' : 'Security alert')} · ${item.status || 'Open'}`;
+                    const stamp = item.arrival_time || item.event_time || item.confirmed_unknown_at || item.first_seen || item.detected_at || item.created_at;
                     const time = stamp && !Number.isNaN(new Date(stamp).getTime()) ? new Date(stamp).toLocaleString() : '-';
                     return `<div class="activity-row"><div><strong>${escapeHtmlLocal(label)}</strong><small>${escapeHtmlLocal(item.camera_id || '-')}</small></div><time>${escapeHtmlLocal(time)}</time></div>`;
                 }).join('') : `<div class="activity-empty">No ${liveActivity === 'attendance' ? 'attendance events' : 'alerts'} for ${liveView === 'focus' ? 'this camera' : 'these cameras'} yet.</div>`;
@@ -2750,8 +2858,7 @@
         }
 
         // Initialize
-        loadSystemStatus();
-        loadLiveCameras();
+        loadOperatorOverview();
         setInterval(refreshUnknownAlert, 5000);
         setInterval(() => {
             if (sections.security.classList.contains('active')) {
