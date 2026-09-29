@@ -547,7 +547,7 @@
         .feature-pills { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
         .feature-pill { background:var(--cream-alt); border:1px solid var(--line); border-radius:999px; padding:4px 8px; font-size:10px; font-weight:700; }
         .camera-wall-empty { padding:44px 20px; text-align:center; border:1px dashed var(--line); border-radius:12px; color:var(--muted); background:var(--cream-alt); }
-        @media (max-width:900px){ .live-grid,.live-grid.dense{grid-template-columns:1fr}.live-tile{min-height:180px} }
+        @media (max-width:900px){ .live-grid,.live-grid.dense{grid-template-columns:1fr}.live-tile{min-height:180px}.edge-overview-grid{grid-template-columns:1fr !important} }
     </style>
 </head>
 <body>
@@ -628,7 +628,18 @@
                 </div>
             </div>
 
-            <div class="activation-panel">
+
+            <div style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px;margin:20px 0" class="edge-overview-grid">
+                <div class="camera-card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><h3 style="margin:0">Camera Health</h3><small>Current status of cameras connected to this Edge PC.</small></div><button class="btn btn-primary" type="button" id="overview-open-live">Open Live Cameras</button></div>
+                    <div id="edge-overview-cameras" style="margin-top:10px">Loading cameras...</div>
+                </div>
+                <div class="camera-card">
+                    <h3 style="margin:0">Edge Health</h3><small>Cloud sync and local processing status.</small>
+                    <div id="edge-overview-health" style="margin-top:14px">Loading...</div>
+                </div>
+            </div>
+\n            <div class="activation-panel">
                 <h3>Cloud Activation</h3>
                 <form id="activation-form">
                     <div class="form-group">
@@ -1263,6 +1274,13 @@
                 document.getElementById('camera-count').textContent = camerasData.items.length;
 
                 document.getElementById('online-cameras').textContent = camerasData.items.filter(camera => camera.status && camera.status.online).length;
+                const overview=document.getElementById('edge-overview-cameras');
+                if(overview){
+                    overview.innerHTML=(camerasData.items||[]).length?(camerasData.items||[]).slice(0,5).map(camera=>{
+                        const online=!!camera.status?.online;
+                        return `<div style="display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)"><div><strong>${escapeHtmlLocal(camera.name||camera.camera_id)}</strong><small>${escapeHtmlLocal(camera.camera_role||'GENERAL')}</small></div><span class="${online?'status-ok':'status-error'}">● ${online?'Online':'Offline'}</span></div>`;
+                    }).join(''):'<small>No cameras configured yet.</small>';
+                }
 
                 // Load personnel count
                 const personnelResponse = await fetch(`${API_BASE}/personnel`);
@@ -1278,6 +1296,8 @@
                 document.getElementById('license-status').textContent = edgeData.license.active ? `${edgeData.license.mode} (${edgeData.license.plan})` : 'Activation required';
                 document.getElementById('license-status').className = edgeData.license.active ? 'status-ok' : 'status-error';
                 document.getElementById('machine-code').textContent = edgeData.license.machine_code;
+                const health=document.getElementById('edge-overview-health');
+                if(health) health.innerHTML=`<div style="display:grid;gap:8px"><div><strong>Cloud Sync</strong><small>${edgeData.cloud_sync_allowed?'Connected and allowed':'Not currently allowed'}</small></div><div><strong>AI Runtime</strong><small>${escapeHtmlLocal(edgeData.runtime?.inference_backend||'AUTO')} · ${escapeHtmlLocal(edgeData.runtime?.profile||'auto')}</small></div><div><strong>License</strong><small>${edgeData.license.active?'Active':'Action required'}</small></div></div>`;
 
                 await refreshUnknownAlert();
 
@@ -1387,6 +1407,9 @@
         function escapeHtmlLocal(value) {
             const node=document.createElement('div'); node.textContent=String(value ?? ''); return node.innerHTML;
         }
+        document.getElementById('overview-open-live')?.addEventListener('click', () => {
+            const link=document.querySelector('nav a[data-section="live"]'); if(link) link.click();
+        });
         document.getElementById('live-refresh-btn')?.addEventListener('click', loadLiveCameras);
         document.getElementById('live-overlay-btn')?.addEventListener('click', event => {
             liveAiOverlay=!liveAiOverlay;
