@@ -195,7 +195,9 @@ def _native_session(user: dict[str, Any]) -> dict[str, Any]:
         "displayName":user["display_name"],"role":user["role"]}
 
 @app.post("/auth/register")
-def register_portal_user(payload: PortalRegisterRequest):
+def register_portal_user(payload: PortalRegisterRequest, request: Request):
+    if os.getenv("SNAPKEY_ENV", "production").lower() != "development" and not _crm_integration_key_valid(request.headers.get("X-CRM-Integration-Key")):
+        raise HTTPException(403, "Account provisioning requires the trusted CRM backend")
     if not _edge_activation_code_valid(payload.activation_code):
         raise HTTPException(401, "Invalid Camera Eye activation code")
     email=payload.email.strip().lower(); password=payload.password
@@ -295,7 +297,7 @@ def activate_edge(payload: EdgeActivationRequest):
         company_code = one_time.get("company_code")
         company = _slug(company_code or shop)
         tenant_id = str(one_time["tenant_id"])
-    elif _edge_activation_code_valid(payload.activation_code):
+    elif os.getenv("SNAPKEY_ENV", "production").lower() == "development" and _edge_activation_code_valid(payload.activation_code):
         # Backward-compatible installer/dev activation. Production onboarding should use a one-time portal code.
         shop = _slug(payload.shop_code)
         company_code = payload.company_code
@@ -306,7 +308,6 @@ def activate_edge(payload: EdgeActivationRequest):
     site_id = f"site-{shop}"
     edge_id = f"edge-{shop}-{_token_digest(machine)[:8]}"
     token = secrets.token_urlsafe(32)
-    store.provision_edge_credential(_token_digest(token), tenant_id, company_code, shop, site_id, edge_id)
     license_data = _issue_license_payload(
         tenant_id=tenant_id,
         site_id=site_id,
@@ -315,6 +316,7 @@ def activate_edge(payload: EdgeActivationRequest):
         days=int(os.getenv("SNAPKEY_DEFAULT_LICENSE_DAYS", "30")),
         grace_days=int(os.getenv("SNAPKEY_DEFAULT_LICENSE_GRACE_DAYS", "7")),
     )
+    store.provision_edge_credential(_token_digest(token), tenant_id, company_code, shop, site_id, edge_id)
     return {
         "edge": {
             "tenant_id": tenant_id,
@@ -395,7 +397,7 @@ def portal_login():
 
 @app.get("/portal/{page_name}", include_in_schema=False)
 def portal_page(page_name: str):
-    allowed = {"index.html", "cameras.html", "personnel.html", "attendance.html"}
+    allowed = {"index.html", "cameras.html", "personnel.html", "attendance.html", "live.html", "alerts.html"}
     if page_name not in allowed:
         raise HTTPException(404, "Portal page not found")
     return FileResponse(PORTAL_STATIC_DIR / page_name)
@@ -424,6 +426,11 @@ def _portal_scope(tenant_id: str, principal: PortalPrincipal) -> None:
         raise HTTPException(403,"Portal session is not authorized for this tenant")
 
 
+def _portal_admin(principal: PortalPrincipal) -> None:
+    if principal.role.upper() not in {'OWNER','ADMIN','SUPERADMIN'}:
+        raise HTTPException(403,'Administrator access is required')
+
+
 def _portal_camera_view(camera: dict[str, Any]) -> dict[str, Any]:
     """Return browser-safe camera metadata without exposing connection credentials."""
     view = dict(camera)
@@ -442,13 +449,25 @@ def portal_cameras(tenant_id: str, shop_id: str | None = None, edge_id: str | No
 
 @app.put("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
 def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConfig, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id,principal)
     if request.shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
     if request.tenant_id != tenant_id or request.camera_id != camera_id:
         raise HTTPException(400, "Camera scope does not match request path")
-    if request.source_type not in {"rtsp", "file", "webcam"}:
+    if request.source_type not in {"rtsp", "file", "webcam", "dshow"}:
         raise HTTPException(400, "Unsupported camera source type")
     payload = request.model_dump()
+    settings = dict(request.settings)
+    settings['tracking_mode'] = 'track' if settings.get('tracking_mode') == 'track' else 'detect'
+    try:
+        quality = settings.get('tracking_quality', 65)
+        quality = {'performance':55, 'balanced':65, 'high':85}.get(str(quality),quality)
+        settings['tracking_quality'] = max(35,min(95,int(quality)))
+        settings['tracking_fps'] = max(1,min(12,float(settings.get('tracking_fps',3))))
+        settings['tracking_imgsz'] = max(256,min(640,int(settings.get('tracking_imgsz',settings.get('max_frame_width',384)))))
+    except (ValueError,TypeError,OverflowError):
+        raise HTTPException(422,'Invalid camera performance settings')
+    payload['settings'] = settings
     if request.source == "__KEEP_EXISTING__":
         existing = next((
             camera for camera in store.list_cameras(tenant_id, shop_id=principal.shop_id, edge_id=request.edge_id)
@@ -464,8 +483,13 @@ def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConf
 
 @app.delete("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
 def delete_portal_camera(tenant_id: str, camera_id: str, shop_id: str, edge_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id,principal)
     if shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
+    existing = store.get_camera(tenant_id, shop_id, edge_id, camera_id)
+    if existing:
+        store.create_edge_command({"tenant_id": tenant_id, "shop_id": shop_id, "edge_id": edge_id,
+            "command_type": "CAMERA_DELETE", "request": {"camera_id": camera_id}})
     if not store.delete_camera(tenant_id, shop_id, edge_id, camera_id):
         raise HTTPException(404, "Camera not found")
     return {"deleted": True}
@@ -481,6 +505,7 @@ class EdgeCommandRequest(BaseModel):
 
 @app.post("/portal/v1/tenants/{tenant_id}/edge-commands")
 def create_portal_edge_command(tenant_id: str, request: EdgeCommandRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id,principal)
     if request.shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
     if request.tenant_id != tenant_id:
@@ -559,7 +584,10 @@ async def upload_edge_event_evidence(
         raise HTTPException(413, "Evidence image exceeds 5 MB")
     suffix = { "image/png": ".png", "image/webp": ".webp" }.get(content_type, ".jpg")
     root = Path(os.getenv("SNAPKEY_EVIDENCE_ROOT", "/app/data/evidence"))
-    target_dir = root / str(principal.tenant_id) / str(principal.shop_id) / str(principal.edge_id)
+    root = root.resolve()
+    target_dir = (root / str(principal.tenant_id) / str(principal.shop_id) / str(principal.edge_id)).resolve()
+    if not target_dir.is_relative_to(root):
+        raise HTTPException(403, 'Invalid evidence scope')
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{safe_event_id}{suffix}"
     target.write_bytes(data)
@@ -657,6 +685,7 @@ def portal_personnel(tenant_id: str, principal: PortalPrincipal = Depends(requir
 
 @app.post("/portal/v1/tenants/{tenant_id}/personnel")
 def create_portal_person(tenant_id: str, request: CloudPersonCreate, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id,principal)
     role=request.role.strip().upper()
     if role not in {"OWNER","MANAGER","WORKER"}: raise HTTPException(400,"Role must be OWNER, MANAGER, or WORKER")
@@ -670,6 +699,7 @@ def create_portal_person(tenant_id: str, request: CloudPersonCreate, principal: 
 
 @app.patch("/portal/v1/tenants/{tenant_id}/personnel/{person_id}")
 def patch_portal_person(tenant_id: str, person_id: str, request: CloudPersonPatch, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id,principal)
     item=store.update_cloud_person(tenant_id,principal.shop_id,person_id,request.model_dump(exclude_unset=True))
     if not item: raise HTTPException(404,"Person not found")
@@ -677,6 +707,7 @@ def patch_portal_person(tenant_id: str, person_id: str, request: CloudPersonPatc
 
 @app.delete("/portal/v1/tenants/{tenant_id}/personnel/{person_id}")
 def deactivate_portal_person(tenant_id: str, person_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id,principal)
     item=store.update_cloud_person(tenant_id,principal.shop_id,person_id,{"active":False})
     if not item: raise HTTPException(404,"Person not found")
@@ -684,6 +715,7 @@ def deactivate_portal_person(tenant_id: str, person_id: str, principal: PortalPr
 
 @app.post("/portal/v1/tenants/{tenant_id}/personnel/{person_id}/faces")
 async def enroll_portal_face(tenant_id: str, person_id: str, file: UploadFile=File(...), principal: PortalPrincipal=Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id,principal)
     if not store.get_cloud_person(tenant_id,principal.shop_id,person_id): raise HTTPException(404,"Person not found")
     if (file.content_type or "").lower() not in {"image/jpeg","image/jpg","image/png","image/webp"}: raise HTTPException(415,"Unsupported image type")
@@ -713,7 +745,7 @@ def portal_face_image(tenant_id: str,person_id: str,face_id: str,principal: Port
 def portal_attendance(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id,principal)
     people={str(p["id"]):p for p in store.list_cloud_people(tenant_id,principal.shop_id)}
-    raw=[e for e in store.list_events(tenant_id,limit=500) if str(e.get("shop_id") or e.get("site_id") or "")==str(principal.shop_id)]
+    raw=store.list_events(tenant_id,limit=500,shop_id=principal.shop_id)
     sessions={}; person_events=[]
     for event in raw:
         event_type=str(event.get("event_type") or "")
@@ -765,6 +797,7 @@ def crm_person_mappings(tenant_id: str, principal: PortalPrincipal = Depends(req
 @app.put("/portal/v1/tenants/{tenant_id}/crm/person-mappings/{local_person_id}")
 def crm_person_mapping(tenant_id: str, local_person_id: str, request: CrmPersonMappingRequest,
                        principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id, principal)
     if request.local_person_id != local_person_id: raise HTTPException(400,"local_person_id does not match path")
     if not request.crm_user_id.strip(): raise HTTPException(400,"crm_user_id is required")
@@ -776,6 +809,7 @@ def crm_person_mapping(tenant_id: str, local_person_id: str, request: CrmPersonM
 
 @app.post("/portal/v1/tenants/{tenant_id}/crm/test-break-start/{local_person_id}")
 def crm_test_break_start(tenant_id: str, local_person_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id, principal)
     mapping=store.crm_person_mapping(tenant_id,principal.shop_id,local_person_id)
     if not mapping: raise HTTPException(404,"CRM person mapping not found")
@@ -786,6 +820,7 @@ def crm_test_break_start(tenant_id: str, local_person_id: str, principal: Portal
 
 @app.post("/portal/v1/tenants/{tenant_id}/crm/test-break-end/{local_person_id}")
 def crm_test_break_end(tenant_id: str, local_person_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
     _portal_scope(tenant_id, principal)
     mapping=store.crm_person_mapping(tenant_id,principal.shop_id,local_person_id)
     if not mapping: raise HTTPException(404,"CRM person mapping not found")
@@ -804,7 +839,7 @@ def tenant_summary(tenant_id: str, principal: PortalPrincipal = Depends(require_
 def tenant_events(tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100,
                   principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
-    items = store.list_events(tenant_id, site_id=site_id, event_type=event_type, limit=limit)
+    items = store.list_events(tenant_id, site_id=site_id, event_type=event_type, limit=limit, shop_id=principal.shop_id)
     # Backward-compatible storage implementations may not accept shop_id yet, so enforce
     # the authenticated shop boundary before returning any event to the browser.
     return {"items": [item for item in items if str(item.get("shop_id") or item.get("site_id") or "") == str(principal.shop_id)]}
@@ -814,6 +849,25 @@ def tenant_events(tenant_id: str, site_id: str | None = None, event_type: str | 
 def portal_edges(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
     return {"items": store.list_edges(tenant_id, shop_id=principal.shop_id)}
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/events/{event_id}/evidence")
+def portal_event_evidence(tenant_id: str, event_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    event = store.get_event(tenant_id, principal.shop_id, event_id)
+    if not event:
+        raise HTTPException(404, "Event not found")
+    envelope = event["payload"]
+    evidence = (envelope.get("payload", envelope).get("metadata") or {}).get("cloud_evidence") or {}
+    evidence_id = evidence.get("evidence_id")
+    if not evidence_id:
+        raise HTTPException(404, "Snapshot not available")
+    root = Path(os.getenv("SNAPKEY_EVIDENCE_ROOT", "/app/data/evidence")).resolve()
+    allowed = (root / tenant_id / principal.shop_id / event["edge_id"]).resolve()
+    path = (root / evidence_id).resolve()
+    if not allowed.is_relative_to(root) or not path.is_relative_to(allowed) or not path.is_file():
+        raise HTTPException(404, "Snapshot not available")
+    return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
 
 @app.post("/portal/v1/licenses/issue")

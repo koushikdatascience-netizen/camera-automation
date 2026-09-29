@@ -125,9 +125,12 @@ class PortalStore:
             ).rowcount > 0
         return {"ok": True, "event_id": event_id, "tenant_id": tenant_id, "site_id": site_id, "inserted": bool(inserted)}
 
-    def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100, shop_id: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM edge_events WHERE tenant_id=?"
         args: list[Any] = [tenant_id]
+        if shop_id:
+            query += " AND shop_id=?"
+            args.append(shop_id)
         if site_id:
             query += " AND site_id=?"
             args.append(site_id)
@@ -139,6 +142,11 @@ class PortalStore:
         with self._conn() as conn:
             rows = conn.execute(query, args).fetchall()
             return [dict(row) | {"payload": json.loads(row["payload_json"])} for row in rows]
+
+    def get_event(self, tenant_id: str, shop_id: str, event_id: str):
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM edge_events WHERE tenant_id=? AND shop_id=? AND id=?", (tenant_id, shop_id, event_id)).fetchone()
+            return dict(row) | {"payload": json.loads(row["payload_json"])} if row else None
 
     def tenant_summary(self, tenant_id: str, shop_id: str | None = None) -> dict[str, Any]:
         with self._conn() as conn:
@@ -300,6 +308,9 @@ class PortalStore:
 
     def claim_edge_commands(self, tenant_id: str, shop_id: str, edge_id: str, limit: int = 10) -> list[dict[str, Any]]:
         with self._lock,self._conn() as conn:
+            from datetime import timedelta
+            cutoff=(datetime.now(timezone.utc)-timedelta(minutes=2)).isoformat()
+            conn.execute("UPDATE edge_commands SET status='PENDING' WHERE tenant_id=? AND shop_id=? AND edge_id=? AND status='CLAIMED' AND claimed_at<?", (tenant_id,shop_id,edge_id,cutoff))
             rows=conn.execute("""SELECT * FROM edge_commands WHERE tenant_id=? AND shop_id=? AND edge_id=? AND status='PENDING'
                 ORDER BY created_at LIMIT ?""",(tenant_id,shop_id,edge_id,max(1,min(20,int(limit))))).fetchall()
             result=[]

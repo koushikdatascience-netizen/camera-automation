@@ -562,7 +562,8 @@
             </div>
             <nav>
                 <a href="#" class="active" data-section="system">System Status</a>
-                <a href="#" data-section="live">Live Cameras</a>\n                <a href="#" data-section="cameras">Camera Setup</a>
+                <a href="#" data-section="live">Live Cameras</a>
+                <a href="#" data-section="cameras">Camera Setup</a>
                 <a href="#" data-section="personnel">Personnel</a>
                 <a href="#" data-section="attendance">Attendance</a>
                 <a href="#" data-section="objectSecurity">Object Security Test</a>
@@ -639,7 +640,7 @@
                     <div id="edge-overview-health" style="margin-top:14px">Loading...</div>
                 </div>
             </div>
-\n            <div class="activation-panel">
+            <div class="activation-panel">
                 <h3>Cloud Activation</h3>
                 <form id="activation-form">
                     <div class="form-group">
@@ -1211,7 +1212,7 @@
                     if (!response.ok) {
                         throw new Error(typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail || body));
                     }
-                    message.textContent = `Activated: ${body.edge.edge_id}. Cloud sync is ready.`;
+                    message.textContent = body.sync?.blocked ? `Activated: ${body.edge.edge_id}. Sync blocked: ${body.sync.message}` : `Activated: ${body.edge.edge_id}. Cloud sync configured; check Cloud Sync status for delivery.`;
                     message.className = 'activation-message status-ok';
                     document.getElementById('activation-code').value = '';
                     await loadSystemStatus();
@@ -1227,6 +1228,11 @@
 
         // Load section data
         function loadSectionData(sectionId) {
+            if (sectionId !== 'live') {
+                document.querySelectorAll('#live-camera-grid img').forEach(img => img.removeAttribute('src'));
+                clearInterval(liveRefreshTimer);
+                liveRefreshTimer = null;
+            }
             switch(sectionId) {
                 case 'system':
                     loadSystemStatus();
@@ -1371,9 +1377,10 @@
 
 
         let liveAiOverlay = true;
+        let liveRefreshTimer = null;
         function liveStreamUrl(cameraId) {
             const endpoint = liveAiOverlay ? 'tracking-stream' : 'stream';
-            return `${API_BASE}/cameras/${encodeURIComponent(cameraId)}/${endpoint}?t=${Date.now()}`;
+            return `${API_BASE}/cameras/${encodeURIComponent(cameraId)}/${endpoint}`;
         }
         async function loadLiveCameras() {
             const grid = document.getElementById('live-camera-grid');
@@ -1382,6 +1389,10 @@
                 const response = await fetch(`${API_BASE}/cameras`);
                 const data = await response.json();
                 const cameras = data.items || [];
+                const signature = JSON.stringify(cameras.map(c => [c.camera_id,c.name,c.camera_role,!!c.status?.online,liveAiOverlay]));
+                if (grid.dataset.signature === signature && grid.querySelector('img[src]')) return;
+                grid.dataset.signature = signature;
+                if (!liveRefreshTimer) liveRefreshTimer = setInterval(loadLiveCameras, 5000);
                 const online = cameras.filter(camera => camera.status && camera.status.online).length;
                 document.getElementById('live-camera-summary').textContent = `${cameras.length} cameras · ${online} online`;
                 if (!cameras.length) {
@@ -1405,7 +1416,7 @@
             }
         }
         function escapeHtmlLocal(value) {
-            const node=document.createElement('div'); node.textContent=String(value ?? ''); return node.innerHTML;
+            const node=document.createElement('div'); node.textContent=String(value ?? ''); return node.innerHTML.replaceAll('"','&quot;').replaceAll("'",'&#39;');
         }
         document.getElementById('overview-open-live')?.addEventListener('click', () => {
             const link=document.querySelector('nav a[data-section="live"]'); if(link) link.click();
@@ -1508,7 +1519,8 @@
 
                     const deleteBtn = document.createElement('button');
                     deleteBtn.className = 'btn btn-danger';
-                    deleteBtn.textContent = 'DELETE';\n                    deleteBtn.classList.add('danger-menu');
+                    deleteBtn.textContent = 'DELETE';
+                    deleteBtn.classList.add('danger-menu');
                     deleteBtn.addEventListener('click', () => deleteCamera(camera.camera_id));
 
                     cameraActions.appendChild(startBtn);
@@ -1570,7 +1582,7 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ rtsp_url: rtspUrl })
+                    body: JSON.stringify({ rtsp_url: rtspUrl, camera_id: editingCameraId || undefined })
                 });
 
                 const result = await response.json();
@@ -1591,7 +1603,12 @@
 
                     // Show preview container
                     document.getElementById('preview-container').style.display = 'block';
-                    document.getElementById('camera-preview').src = `${API_BASE}/cameras/test/snapshot?url=` + encodeURIComponent(rtspUrl) + '&t=' + Date.now();
+                    const previewResponse = await fetch(`${API_BASE}/cameras/test/snapshot`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rtsp_url:rtspUrl,camera_id:editingCameraId||undefined})});
+                    if (previewResponse.ok) {
+                        const preview=document.getElementById('camera-preview');
+                        if(preview.src.startsWith('blob:'))URL.revokeObjectURL(preview.src);
+                        preview.src=URL.createObjectURL(await previewResponse.blob());
+                    }
                 } else {
                     testResult.className = 'test-result test-failure';
                     const attempts = (result.attempts || [])
@@ -1599,7 +1616,7 @@
                         .join('<br>');
                     testResult.innerHTML = `
                         <strong>Connection Failed:</strong> ${result.message}<br>
-                        Source: ${result.source || rtspUrl}
+                        Source: ${escapeHtmlLocal(result.source || 'Camera source hidden')}
                         ${attempts ? '<br><br>' + attempts : ''}
                     `;
                     document.getElementById('preview-container').style.display = 'none';
@@ -1621,9 +1638,9 @@
             const cameraData = {
                 camera_id: document.getElementById('camera-id').value.trim(),
                 name: document.getElementById('camera-name').value.trim(),
-                source_type: /^\d+$/.test(document.getElementById('rtsp-url').value.trim()) ? 'webcam' : 'rtsp',
+                source_type: editingCameraId && document.getElementById('rtsp-url').value === document.getElementById('rtsp-url').dataset.storedSource ? document.getElementById('rtsp-url').dataset.sourceType : (/^\d+$/.test(document.getElementById('rtsp-url').value.trim()) ? 'webcam' : 'rtsp'),
                 rtsp_url: document.getElementById('rtsp-url').value.trim(),
-                enabled: true,
+                enabled: !editingCameraId || document.getElementById('camera-id').dataset.enabled !== 'false',
                 camera_role: document.getElementById('camera-role').value,
                 camera_zone: document.getElementById('camera-zone').value,
                 crowd_threshold: Number(document.getElementById('crowd-threshold').value || 10),
@@ -1720,6 +1737,9 @@
                 document.getElementById('camera-id').disabled = true;
                 document.getElementById('camera-name').value = fullCamera.name || '';
                 document.getElementById('rtsp-url').value = fullCamera.rtsp_url || '';
+                document.getElementById('rtsp-url').dataset.storedSource = fullCamera.rtsp_url || '';
+                document.getElementById('rtsp-url').dataset.sourceType = fullCamera.source_type || 'rtsp';
+                document.getElementById('camera-id').dataset.enabled = String(fullCamera.enabled !== false);
                 document.getElementById('camera-role').value = fullCamera.camera_role || 'GENERAL';
                 document.getElementById('camera-zone').value = fullCamera.camera_zone || 'inside';
                 document.getElementById('crowd-threshold').value = fullCamera.crowd_threshold || 10;

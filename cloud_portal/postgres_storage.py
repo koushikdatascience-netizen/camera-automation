@@ -159,14 +159,23 @@ class PostgresPortalStore:
                 "event_time":envelope.get("event_time"),"received":now,"payload":json.dumps(envelope)}).rowcount > 0
         return {"ok":True,"event_id":event_id,"tenant_id":tenant_id,"site_id":site_id,"inserted":bool(inserted)}
 
-    def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100):
+    def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100, shop_id: str | None = None):
         clauses=["tenant_id=:tenant"]; params={"tenant":tenant_id,"limit":max(1,min(500,int(limit)))}
+        if shop_id: clauses.append("shop_id=:shop"); params["shop"]=shop_id
         if site_id: clauses.append("site_id=:site"); params["site"]=site_id
         if event_type: clauses.append("event_type=:event_type"); params["event_type"]=event_type
         query="SELECT * FROM edge_events WHERE "+" AND ".join(clauses)+" ORDER BY event_time DESC LIMIT :limit"
         with self._conn() as conn:
             rows=conn.execute(text(query),params).mappings().all()
             return [dict(r) | {"payload": r["payload_json"] if isinstance(r["payload_json"],dict) else json.loads(r["payload_json"])} for r in rows]
+
+    def get_event(self, tenant_id: str, shop_id: str, event_id: str):
+        with self._conn() as conn:
+            row = conn.execute(text("SELECT * FROM edge_events WHERE tenant_id=:t AND shop_id=:s AND id=:id"), {"t": tenant_id, "s": shop_id, "id": event_id}).mappings().first()
+            if not row:
+                return None
+            payload = row["payload_json"]
+            return dict(row) | {"payload": payload if isinstance(payload, dict) else json.loads(payload)}
 
     def tenant_summary(self, tenant_id: str, shop_id: str | None = None):
         with self._conn() as conn:
@@ -352,6 +361,7 @@ class PostgresPortalStore:
 
     def claim_edge_commands(self, tenant_id: str, shop_id: str, edge_id: str, limit: int = 10) -> list[dict[str, Any]]:
         with self._conn() as conn:
+            conn.execute(text("UPDATE edge_commands SET status='PENDING' WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge AND status='CLAIMED' AND claimed_at < NOW() - INTERVAL '2 minutes'"), {"tenant": tenant_id, "shop": shop_id, "edge": edge_id})
             rows=conn.execute(text("""UPDATE edge_commands SET status='CLAIMED',claimed_at=:now
                 WHERE id IN (SELECT id FROM edge_commands WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge
                 AND status='PENDING' ORDER BY created_at LIMIT :limit FOR UPDATE SKIP LOCKED)

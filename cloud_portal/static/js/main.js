@@ -336,15 +336,22 @@
       container.querySelectorAll(".test-existing-camera").forEach(button=>button.addEventListener("click",()=>testCameraConnection({cameraId:button.dataset.id,edgeId:button.dataset.edgeId,sourceType:button.dataset.sourceType,button})));
       container.querySelectorAll(".adopt-local-camera").forEach(button=>button.addEventListener("click",()=>adoptLocalCamera(localOnly.find(x=>x.camera_id===button.dataset.id))));
       container.querySelectorAll(".edit-camera").forEach(button=>button.addEventListener("click",()=>editCamera(items.find(x=>x.camera_id===button.dataset.id))));
-      container.querySelectorAll(".delete-camera").forEach(button=>button.addEventListener("click",()=>deleteCamera(button.dataset.id)));
+      container.querySelectorAll(".delete-camera").forEach(button=>button.addEventListener("click",()=>deleteCamera(button.dataset.id,items.find(x=>x.camera_id===button.dataset.id)?.edge_id)));
     }catch(error){container.innerHTML="<p>"+escapeHtml(error.message)+"</p>";}
   }
 
-  function escapeHtml(value){const div=document.createElement("div");div.textContent=String(value??"");return div.innerHTML;}
+  function escapeHtml(value){const div=document.createElement("div");div.textContent=String(value??"");return div.innerHTML.replaceAll('"','&quot;').replaceAll("'",'&#39;');}
 
   function editCamera(camera){
     document.getElementById("camera-name").value=camera.name||"";
     document.getElementById("camera-id").value=camera.camera_id||"";
+    document.getElementById("camera-id").readOnly=true;
+    document.getElementById("camera-id").dataset.enabled=String(camera.enabled !== false);
+    const checks=Array.from(document.querySelectorAll(".feature-card input[type=checkbox]"));
+    const flags=camera.features||{}, settings=camera.settings||{};
+    [!!flags.attendance,!!flags.face_recognition,settings.tracking_mode==='track',!!flags.unknown_detection,!!flags.object_security].forEach((value,index)=>{if(checks[index])checks[index].checked=value;});
+    document.getElementById("frame-skip").value=Math.max(1,Math.round(30/Number(settings.tracking_fps||15)));
+    document.getElementById("max-width").value=settings.tracking_imgsz||settings.max_frame_width||640;
     const editSource=document.getElementById("camera-source");
     editSource.value="";
     editSource.dataset.edgeLocalCamera="";
@@ -375,10 +382,11 @@
     window.scrollTo({top:0,behavior:"smooth"});
   }
 
-  async function deleteCamera(cameraId){
+  async function deleteCamera(cameraId,edgeId){
     if(!confirm("Delete camera "+cameraId+"?")) return;
     try{
       const scope=requireScope(["tenant_id","shop_id","edge_id"]);
+      if(edgeId) scope.edge_id=edgeId;
       const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras/"+encodeURIComponent(cameraId)+"?shop_id="+encodeURIComponent(scope.shop_id)+"&edge_id="+encodeURIComponent(scope.edge_id),{method:"DELETE"});
       const body=await response.json(); if(!response.ok) throw new Error(body.detail||"Unable to delete camera.");
       showMessage("Camera deleted from cloud configuration."); await loadConfiguredCameras();
@@ -404,12 +412,12 @@
         company_code: scope.company_code || null,
         camera_id: cameraId,
         name,
-        source_type: sourceType(source),
+        source_type: document.getElementById("source-type").value||sourceType(source),
         source,
         camera_role: roleValue.toLowerCase() === "general" ? "GENERAL" : "ENTRANCE_EXIT",
         camera_zone: document.getElementById("camera-zone").value.trim() || null,
         crowd_threshold: Number(document.getElementById("crowd-threshold").value || 10),
-        enabled: true,
+        enabled: document.getElementById("camera-id").dataset.enabled !== 'false',
         // These keys intentionally match CameraFeatures/apply_cloud_camera on the edge.
         // UI-only labels must never silently create feature names the edge ignores.
         features: {
@@ -422,8 +430,8 @@
         settings: {
           // Person Tracking is a runtime mode, not an unrelated detection feature.
           tracking_fps: Math.max(1, Math.round(30 / Math.max(1, Number(document.getElementById("frame-skip").value || 2)))),
-          max_frame_width: Number(document.getElementById("max-width").value || 960),
-          tracking_quality: "balanced",
+          tracking_imgsz: Number(document.getElementById("max-width").value || 640),
+          tracking_quality: 65,
           tracking_mode: checks[2]?.checked ? "track" : "detect"
         }
       };
@@ -442,6 +450,8 @@
   }
 
   function resetCameraForm() {
+    document.getElementById("camera-id").readOnly=false;
+    delete document.getElementById("camera-id").dataset.enabled;
     ["camera-name", "camera-id", "camera-source", "camera-zone"].forEach(id => {
       const node = document.getElementById(id);
       if (node) node.value = "";
@@ -611,5 +621,47 @@
   }
   function wireAttendancePage(){if(!document.getElementById("attendance-records-body"))return;loadAttendance().catch(error=>showMessage(error.message,true));setInterval(()=>loadAttendance().catch(()=>{}),15000);}
 
-  bootstrapCrmSession().then(()=>{loadSystemStatus();wireEdgeSetup();wireCameraPage();wireCloudLivePage();wirePersonnelPage();wireAttendancePage();}).catch(error=>showMessage(error.message,true));
+  async function loadAlerts(){
+    const body=document.getElementById('alerts-body'); if(!body)return;
+    const scope=requireScope(['tenant_id']);
+    const response=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/events?limit=500');
+    const data=await response.json(); if(!response.ok)throw new Error(data.detail||'Unable to load alerts.');
+    const items=(data.items||[]).filter(e=>/ALERT|UNKNOWN|INCIDENT|SHOPLIFTING/.test(e.event_type||''));
+    body.replaceChildren();
+    for(const event of items){
+      const payload=event.payload?.payload||event.payload||{}, metadata=payload.metadata||{};
+      const row=document.createElement('tr');
+      for(const text of [new Date(event.event_time).toLocaleString(),event.camera_id||'',String(event.event_type||'').replaceAll('_',' '),payload.full_name||metadata.object_label||payload.object_label||'Unknown']){
+        const cell=document.createElement('td');cell.textContent=text;row.appendChild(cell);
+      }
+      const evidence=document.createElement('td');
+      evidence.textContent=metadata.cloud_evidence?'Synced':'Unavailable';
+      if(metadata.cloud_evidence){
+        const button=document.createElement('button');button.className='btn btn-light';button.textContent='View snapshot';
+        button.addEventListener('click',async()=>{
+          try{
+            const response=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/events/'+encodeURIComponent(event.id)+'/evidence');
+            if(!response.ok)throw new Error('Snapshot unavailable.');
+            const url=URL.createObjectURL(await response.blob());const dialog=document.createElement('dialog');
+            const image=document.createElement('img');image.src=url;image.alt='Alert snapshot';image.style.maxWidth='min(80vw,960px)';image.style.maxHeight='75vh';
+            const close=document.createElement('button');close.className='btn btn-light';close.textContent='Close';close.addEventListener('click',()=>dialog.close());
+            dialog.append(image,close);dialog.addEventListener('close',()=>{URL.revokeObjectURL(url);dialog.remove();});document.body.appendChild(dialog);dialog.showModal();
+          }catch(error){showMessage(error.message,true);}
+        });
+        evidence.replaceChildren(button);
+      }
+      row.appendChild(evidence);body.appendChild(row);
+    }
+    if(!items.length){const row=body.insertRow();const cell=row.insertCell();cell.colSpan=5;cell.textContent='No alerts received from this shop.';}
+  }
+  function wireAlertsPage(){
+    if(!document.getElementById('alerts-body'))return;
+    const refresh=()=>loadAlerts().catch(error=>showMessage(error.message,true));
+    document.getElementById('refresh-alerts').addEventListener('click',refresh);refresh();setInterval(refresh,15000);
+  }
+  document.querySelectorAll('.nav-menu').forEach(nav=>{
+    if(nav.querySelector('a[href="/portal/alerts.html"]'))return;
+    const link=document.createElement('a');link.className='nav-item';link.href='/portal/alerts.html';link.textContent='Alerts';nav.appendChild(link);
+  });
+  bootstrapCrmSession().then(()=>{loadSystemStatus();wireEdgeSetup();wireCameraPage();wireCloudLivePage();wirePersonnelPage();wireAttendancePage();wireAlertsPage();}).catch(error=>showMessage(error.message,true));
 })();
