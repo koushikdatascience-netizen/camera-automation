@@ -12,9 +12,9 @@ from camera_service.camera.sources import VideoSource
 from camera_service.object_security.alerts import ObjectSecurityAlerter
 
 class CameraWorker:
-    def __init__(self,app_config,camera_config,store,face_service,attendance_engine,tracker=None):
+    def __init__(self,app_config,camera_config,store,face_service,attendance_engine,tracker=None,status_callback=None):
         self.app=app_config; self.camera=camera_config; self.store=store; self.face=face_service; self.attendance=attendance_engine; self.identity=IdentityResolutionEngine(app_config.recognition); self.stop_event=threading.Event(); self.source=VideoSource(camera_config.source,camera_config.source_type)
-        self.tracker=tracker
+        self.tracker=tracker; self.status_callback=status_callback; self.frames_received=0; self.ai_frames=0; self.started_at=time.monotonic(); self.last_status_at=0.0; self.reconnect_count=0
         if self.tracker is None:
             try: self.tracker=UltralyticsByteTracker(app_config.yolo_model)
             except Exception: self.tracker=CentroidTracker()
@@ -72,15 +72,44 @@ class CameraWorker:
         if hasattr(self.tracker,'track_frame'): tracks=self.tracker.track_frame(frame)
         else: tracks=self.tracker.update([])
         self.process_tracks(frame,tracks); return True
+    def _status(self, **changes):
+        if self.status_callback:
+            self.status_callback(self.camera.camera_id, **changes)
+
     def run(self):
+        self._status(state="STARTING", online=False, last_error=None)
         while not self.stop_event.is_set():
             try:
-                if not self.source.cap and not self.source.open(): time.sleep(2); continue
+                if not self.source.cap and not self.source.open():
+                    self.reconnect_count += 1
+                    self._status(state="RECONNECTING", online=False, reconnect_count=self.reconnect_count, last_error="Camera source failed to open")
+                    self.stop_event.wait(2)
+                    continue
                 ok,frame=self.source.read()
                 if not ok:
-                    self.source.close(); self.tracker.reset(); time.sleep(1); continue
+                    self.reconnect_count += 1
+                    self._status(state="RECONNECTING", online=False, reconnect_count=self.reconnect_count, last_error="Camera frame read failed")
+                    self.source.close(); self.tracker.reset(); self.stop_event.wait(1); continue
+                self.frames_received += 1
                 tracks=self.tracker.track_frame(frame) if hasattr(self.tracker,'track_frame') else self.tracker.update([])
                 self.process_tracks(frame,tracks)
-            except Exception:
-                self.source.close(); time.sleep(1)
+                self.ai_frames += 1
+                now=time.monotonic()
+                if now-self.last_status_at >= 1.0:
+                    elapsed=max(0.001,now-self.started_at)
+                    self._status(
+                        state="ONLINE", online=True,
+                        last_frame_at=datetime.now(timezone.utc).isoformat(),
+                        capture_fps=self.frames_received/elapsed,
+                        ai_fps=self.ai_frames/elapsed,
+                        frames_received=self.frames_received,
+                        reconnect_count=self.reconnect_count,
+                        last_error=None,
+                    )
+                    self.last_status_at=now
+            except Exception as exc:
+                self.reconnect_count += 1
+                self._status(state="DEGRADED", online=False, reconnect_count=self.reconnect_count, last_error=str(exc))
+                self.source.close(); self.stop_event.wait(1)
+        self._status(state="STOPPED", online=False)
     def stop(self): self.stop_event.set(); self.source.close()
