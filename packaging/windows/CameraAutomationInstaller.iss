@@ -16,8 +16,12 @@ OutputBaseFilename=MadhushalaCameraAISetup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+CloseApplications=yes
+CloseApplicationsFilter=SnapKeyVisionAI.exe
+RestartApplications=no
+AppMutex=Global\SnapKeyVisionAI
 PrivilegesRequired=admin
 SetupIconFile=..\..\assets\brand\app.ico
 WizardImageFile=..\..\assets\brand\installer-wizard.bmp
@@ -47,3 +51,6 @@ Name: "launchafterinstall"; Description: "Launch Madhushala Camera AI after inst
 
 [Run]
 Filename: "{app}\START_MADHUSHALA_CAMERA_AI.bat"; Description: "Launch Madhushala Camera AI"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Tasks: launchafterinstall
+
+[Registry]
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SnapKeyVisionAI"; ValueData: """{app}\{#MyAppExeName}"" --background"; Flags: uninsdeletevalue
