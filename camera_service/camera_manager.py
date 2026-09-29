@@ -10,6 +10,7 @@ import numpy as np
 import time
 import sys
 import subprocess
+from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, Field
 from enum import Enum
 from camera_service.models import IdentitySeen, LineCrossingEvent
@@ -161,6 +162,12 @@ class CameraManager:
         """Mask password in RTSP URL for security"""
         if not rtsp_url:
             return rtsp_url
+        if "://" in rtsp_url:
+            parsed = urlsplit(rtsp_url)
+            netloc = parsed.netloc.split('@')[-1]
+            if parsed.username:
+                netloc = f"{parsed.username}:*****@{netloc}"
+            return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
         # Pattern: rtsp://username:password@host:port/path
         pattern = r'rtsp://([^:]+):([^@]+)@'
         match = re.search(pattern, rtsp_url)
@@ -176,6 +183,8 @@ class CameraManager:
         if not camera_id:
             raise ValueError("camera_id is required")
         camera_data = {**camera_data, 'camera_id': camera_id}
+        if any(camera.rtsp_url == str(camera_data.get('rtsp_url','')).strip() for camera in self.list_cameras()):
+            raise ValueError('Camera source is already saved; configure the existing camera')
 
         # Validate and create camera config
         features = camera_data.get('features', {})
@@ -246,6 +255,10 @@ class CameraManager:
             "shoplifting", "shoplifting_detection", "object_security",
         }
         local_features = {key: bool(value) for key, value in features.items() if key in supported_features}
+        if 'unknown_detection' in local_features:
+            local_features['unknown_person_detection'] = local_features['unknown_detection']
+        if 'shoplifting' in local_features:
+            local_features['shoplifting_detection'] = local_features['shoplifting']
         payload = {
             "camera_id": camera_id,
             "name": camera_data.get("name") or camera_id,
@@ -256,14 +269,20 @@ class CameraManager:
             "camera_zone": self._normalize_cloud_zone(camera_data.get("camera_zone")),
             "crowd_threshold": camera_data.get("crowd_threshold", 10),
             "tracking_fps": settings.get("tracking_fps", os.environ.get("SNAPKEY_PROFILE_TRACKING_FPS", 3.0)),
-            "tracking_imgsz": settings.get("max_frame_width", settings.get("tracking_imgsz", os.environ.get("SNAPKEY_PROFILE_TRACKING_IMGSZ", 384))),
-            "tracking_quality": settings.get("tracking_quality", os.environ.get("SNAPKEY_PROFILE_TRACKING_QUALITY", 65)),
+            "tracking_imgsz": settings.get("tracking_imgsz", settings.get("max_frame_width", os.environ.get("SNAPKEY_PROFILE_TRACKING_IMGSZ", 384))),
+            "tracking_quality": {"performance": 55, "balanced": 65, "high": 85}.get(str(settings.get("tracking_quality")), settings.get("tracking_quality", 65)),
             "tracking_mode": settings.get("tracking_mode", os.environ.get("SNAPKEY_PROFILE_TRACKING_MODE", "detect")),
             "features": local_features,
         }
         existing = self.get_camera(camera_id)
         if existing:
+            payload['features'] = {**existing.features.model_dump(), **local_features}
+            candidate = CameraConfig(**{**existing.model_dump(), **payload})
+            if candidate.model_dump() == existing.model_dump():
+                return existing
             return self.update_camera(camera_id, payload)
+        if any(camera.rtsp_url == source for camera in self.list_cameras()):
+            raise ValueError("Camera source is already saved; configure the existing camera")
         return self.create_camera(payload)
 
     @staticmethod
@@ -526,7 +545,7 @@ class CameraManager:
 
     def _save_event_snapshot(self, frame, camera_id: str, prefix: str) -> Optional[str]:
         try:
-            root = Path("data/evidence") / camera_id
+            root = Path(self.db_path).parent / "evidence" / camera_id
             root.mkdir(parents=True, exist_ok=True)
             path = root / f"{prefix}_{int(time.time() * 1000)}.jpg"
             cv2.imwrite(str(path), frame)
@@ -565,7 +584,7 @@ class CameraManager:
 
     def _write_security_clip(self, clip: dict, frames: list, store=None):
         try:
-            root = Path("data/evidence") / clip["camera_id"]
+            root = Path(self.db_path).parent / "evidence" / clip["camera_id"]
             root.mkdir(parents=True, exist_ok=True)
             path = root / f"security_clip_{int(time.time() * 1000)}.mp4"
             h, w = frames[0].shape[:2]
@@ -640,12 +659,13 @@ class CameraManager:
             use_router = router_setting not in {"0", "false", "no", "off"}
 
             if use_router:
-                backend = self._inference_backends.get(model_path)
+                model_key = (model_path, getattr(camera_config, "camera_id", "preview"))
+                backend = self._inference_backends.get(model_key)
                 if backend is None:
                     router, capability = build_runtime_router(model_path)
                     backend = select_runtime_backend(router)
-                    self._runtime_routers[model_path] = router
-                    self._inference_backends[model_path] = backend
+                    self._runtime_routers[model_key] = router
+                    self._inference_backends[model_key] = backend
                     if stream_state is not None:
                         stream_state["inference_capability"] = capability
                 camera_id_for_scope = getattr(camera_config, "camera_id", None) or "camera-unknown"
@@ -656,15 +676,21 @@ class CameraManager:
                     edge_id=os.environ.get("SNAPKEY_EDGE_ID", "legacy-edge"),
                     camera_id=camera_id_for_scope,
                 )
-                normalized = backend.infer(
-                    frame,
-                    scope=scope,
-                    frame_id=f"{camera_id_for_scope}-{time.time_ns()}",
-                    tracking=(mode == "track"),
-                    imgsz=imgsz,
-                    conf=0.20,
-                    max_det=40,
-                )
+                inference_args = dict(scope=scope, frame_id=f"{camera_id_for_scope}-{time.time_ns()}",
+                    tracking=(mode == "track"), imgsz=imgsz, conf=0.20, max_det=40)
+                try:
+                    normalized = backend.infer(frame, **inference_args)
+                except Exception:
+                    from camera_service.domain.inference import BackendType
+                    router = self._runtime_routers.get(model_key)
+                    fallback_allowed = os.environ.get('SNAPKEY_INFERENCE_ALLOW_FALLBACK','1').lower() not in {'0','false','no','off'}
+                    if not fallback_allowed or router is None or getattr(backend,'backend_type',None) == BackendType.LOCAL_CPU:
+                        raise
+                    fallback = router.get(BackendType.LOCAL_CPU)
+                    normalized = fallback.infer(frame, **inference_args)
+                    self._inference_backends[model_key] = fallback
+                    if stream_state is not None:
+                        stream_state['fallback_reason'] = 'Remote/GPU inference failed; local CPU monitoring continues'
                 names = {}
                 class_ids = {}
                 xyxy, confs, classes, track_ids = [], [], [], []
@@ -676,23 +702,17 @@ class CameraManager:
                     confs.append(detection.confidence)
                     classes.append(class_id)
                     track_ids.append(detection.track_id)
-                if mode != "track":
-                    track_ids = list(range(1, len(xyxy) + 1))
-                elif any(track_id is None for track_id in track_ids):
-                    track_ids = [
-                        track_id if track_id is not None else index
-                        for index, track_id in enumerate(track_ids, start=1)
-                    ]
                 if stream_state is not None:
                     stream_state["inference_backend"] = normalized.backend_type.value
                     stream_state["inference_latency_ms"] = normalized.inference_latency_ms
             else:
-                model = self._tracking_models.get(model_path)
+                model_key = (model_path, getattr(camera_config, "camera_id", "preview"))
+                model = self._tracking_models.get(model_key)
                 if model is None:
                     from ultralytics import YOLO
 
                     model = YOLO(model_path)
-                    self._tracking_models[model_path] = model
+                    self._tracking_models[model_key] = model
 
                 try:
                     if mode == "track":
@@ -753,7 +773,7 @@ class CameraManager:
                 xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else []
                 confs = boxes.conf.cpu().tolist() if boxes.conf is not None else []
                 classes = boxes.cls.int().cpu().tolist() if boxes.cls is not None else []
-                track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else list(range(1, len(xyxy) + 1))
+                track_ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [None] * len(xyxy)
             active_known_tracks = set()
             now = time.monotonic()
             camera_id = camera_config.camera_id if camera_config is not None else None
@@ -842,6 +862,7 @@ class CameraManager:
                             direction=direction,
                             timestamp=datetime.now(timezone.utc),
                             bbox=(float(x1), float(y1), float(x2), float(y2)),
+                            snapshot_path=self._save_event_snapshot(frame, camera_id, direction.lower()),
                         ))
 
                 if (
@@ -861,26 +882,32 @@ class CameraManager:
 
                     roi = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
                     if should_check_face and roi.size:
-                        faces = face_service.detect(roi)
+                        try:
+                            faces = face_service.detect(roi)
+                        except Exception:
+                            faces = []
+                            if stream_state is not None:
+                                stream_state["face_error"] = "Face recognition is unavailable"
                         if faces:
                             best = max(faces, key=lambda face: face_service.quality(face, roi.shape))
-                            if face_service.quality(best, roi.shape) >= recognition_config.minimum_face_quality:
+                            if best.get("embedding") is not None and face_service.quality(best, roi.shape) >= recognition_config.minimum_face_quality:
                                 match, score = face_service.recognize(best.get("embedding"), recognition_config.known_threshold)
                                 if match:
                                     active_known_tracks.add(str(track_id))
-                                    snapshot_path = self._save_event_snapshot(roi, camera_id, "known")
+                                    snapshot_path = None
                                     recognized_name = match["full_name"]
                                     recognized_text = f"{recognized_name} {score:.2f}"
-                                    attendance_engine.on_identity(IdentitySeen(
-                                        store_id=attendance_engine.store_id,
-                                        camera_id=camera_id,
-                                        track_id=str(track_id),
-                                        person_id=match["person_id"],
-                                        timestamp=datetime.now(timezone.utc),
-                                        confidence=score,
-                                        bbox=(float(x1), float(y1), float(x2), float(y2)),
-                                        snapshot_path=snapshot_path,
-                                    ))
+                                    if camera_config.features.attendance and track_id is not None:
+                                        attendance_engine.on_identity(IdentitySeen(
+                                            store_id=attendance_engine.store_id,
+                                            camera_id=camera_id,
+                                            track_id=str(track_id),
+                                            person_id=match["person_id"],
+                                            timestamp=datetime.now(timezone.utc),
+                                            confidence=score,
+                                            bbox=(float(x1), float(y1), float(x2), float(y2)),
+                                            snapshot_path=snapshot_path,
+                                        ))
                                     self._track_identity_cache[cache_key] = {
                                         "checked_at": now,
                                         "person_id": match["person_id"],
@@ -888,11 +915,9 @@ class CameraManager:
                                         "name": recognized_name,
                                         "score": score,
                                     }
-                                elif camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
+                                elif (camera_config.features.unknown_detection or camera_config.features.unknown_person_detection) and camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
                                     snapshot_path = self._save_event_snapshot(roi, camera_id, "unknown")
                                     store.add_person_event(None, getattr(attendance_engine, "store_id", "store-1"), camera_id, "UNKNOWN_INSIDE_ALERT", datetime.now(timezone.utc), {"track_id": track_id, "score": score, "snapshot_path": snapshot_path})
-                                    if camera_config is not None and camera_config.camera_role.value in {"GENERAL", "SECURITY"}:
-                                        self._security_alerter.alarm_beep(f"unknown:{camera_id}:{track_id}", True, 1250, 180, 3.0)
                                     self._track_identity_cache[cache_key] = {
                                         "checked_at": now,
                                         "person_id": None,
@@ -913,6 +938,13 @@ class CameraManager:
                                 "text": None,
                                 "score": 0.0,
                             }
+
+                    cached_identity = self._track_identity_cache.get(cache_key) or {}
+                    recognized_text = cached_identity.get('text')
+                    if (recognized_text and recognized_text.lower().startswith('unknown')
+                        and camera_zone == 'inside' and camera_config.features.unknown_enabled
+                        and camera_config.camera_role.value in {'GENERAL','SECURITY'}):
+                        self._security_alerter.alarm_beep(f'unknown:{camera_id}',True,1250,180,3.0)
 
                 track_text = f" ID {track_id}" if track_id is not None else ""
                 text = recognized_text or f"{label}{track_text} {conf:.2f}"
@@ -963,7 +995,7 @@ class CameraManager:
             ):
                 try:
                     valid_security_detections = []
-                    security_key = f"object-security:{object_security_model_path}"
+                    security_key = (f"object-security:{object_security_model_path}", camera_id)
                     security_model = self._tracking_models.get(security_key)
                     if security_model is None:
                         from ultralytics import YOLO
@@ -1128,7 +1160,7 @@ class CameraManager:
                 }
             cv2.putText(
                 frame,
-                f"Tracking unavailable: {exc}",
+                "Tracking temporarily unavailable",
                 (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -1271,7 +1303,11 @@ class CameraManager:
                         cap.release()
                 return fallback or cv2.VideoCapture(device_index), attempts
             return cv2.VideoCapture(device_index), attempts
-        cap = cv2.VideoCapture(source_text)
+        if source_text.lower().startswith(("rtsp://", "http://", "https://")):
+            cap = cv2.VideoCapture(source_text, cv2.CAP_FFMPEG, [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000])
+        else:
+            cap = cv2.VideoCapture(source_text)
         attempts.append({
             "backend": "DEFAULT",
             "opened": bool(cap.isOpened()),
@@ -1286,7 +1322,7 @@ class CameraManager:
         result = {
             'success': False,
             'message': '',
-            'source': source_text,
+            'source': self._mask_rtsp_password(source_text),
             'attempts': [],
             'resolution': None,
             'fps': 0,
@@ -1295,6 +1331,7 @@ class CameraManager:
         }
 
         start_time = time.time()
+        cap = None
 
         try:
             if self._is_dshow_source(source_text):
@@ -1393,7 +1430,10 @@ class CameraManager:
             })
 
         except Exception as e:
-            result['message'] = f'Connection error: {str(e)}'
+            result['message'] = 'Camera connection failed'
+        finally:
+            if cap is not None:
+                cap.release()
 
         return result
 
@@ -1407,7 +1447,7 @@ class CameraManager:
             if not row:
                 return None
 
-            return CameraStatus(
+            status = CameraStatus(
                 camera_id=row['camera_id'],
                 name="",  # Will be populated from camera config
                 state=CameraState(row['state']),
@@ -1420,6 +1460,12 @@ class CameraManager:
                 reconnect_count=row['reconnect_count'],
                 last_error=row['last_error']
             )
+            if status.online:
+                stamp = datetime.fromisoformat(status.last_frame_at) if status.last_frame_at else None
+                if stamp is None or (datetime.now(timezone.utc) - stamp).total_seconds() > 10:
+                    status.online = False
+                    status.state = CameraState.OFFLINE
+            return status
 
     def update_camera_status(self, camera_id: str, status: CameraStatus | None = None, **changes):
         """Update camera runtime status from probes, streams, or background workers."""
@@ -1529,7 +1575,7 @@ class CameraManager:
         finally:
             cap.release()
 
-    def iter_tracking_mjpeg(self, camera_config: CameraConfig, model_path: str, face_service=None, recognition_config=None, attendance_engine=None, store=None, object_security_model_path: str | None = None, object_security_confidence: float = 0.55):
+    def iter_tracking_mjpeg(self, camera_config: CameraConfig, model_path: str, face_service=None, recognition_config=None, attendance_engine=None, store=None, object_security_model_path: str | None = None, object_security_confidence: float = 0.55, stop_event=None, publish_callback=None):
         """Yield MJPEG frames from a latest-frame pipeline.
 
         Capture, AI, and browser streaming run independently so slow CPU
@@ -1553,7 +1599,7 @@ class CameraManager:
                 "error": None,
             },
         }
-        stop_event = threading.Event()
+        stop_event = stop_event or threading.Event()
         frame_lock = threading.Lock()
         result_lock = threading.Lock()
         capture_state = {
@@ -1563,6 +1609,8 @@ class CameraManager:
             "stream_seq": 0,
             "frames_received": 0,
             "frames_dropped": 0,
+            "last_frame_at": None,
+            "ai_frames": 0,
             "stopped": False,
             "error": None,
         }
@@ -1580,6 +1628,7 @@ class CameraManager:
                 capture_state["latest_frame"] = prepared
                 capture_state["latest_seq"] += 1
                 capture_state["frames_received"] += 1
+                capture_state["last_frame_at"] = datetime.now(timezone.utc).isoformat()
 
         def capture_worker():
             try:
@@ -1599,10 +1648,12 @@ class CameraManager:
                         if not ok or frame is None:
                             break
                         publish_frame(frame)
+                        if camera_config.source_type == "file":
+                            stop_event.wait(1.0 / display_fps)
                 finally:
                     cap.release()
             except Exception as exc:
-                capture_state["error"] = str(exc)
+                capture_state["error"] = f"Camera capture failed ({type(exc).__name__})"
             finally:
                 capture_state["stopped"] = True
 
@@ -1643,9 +1694,10 @@ class CameraManager:
                         object_security_confidence,
                     )
                     with result_lock:
+                        capture_state["ai_frames"] += 1
                         result_state["annotated_frame"] = ai_frame.copy()
                         result_state["updated_at"] = time.monotonic()
-                        result_state["error"] = None
+                        result_state["error"] = stream_state.get("latest_summary", {}).get("error")
                 except Exception as exc:
                     with result_lock:
                         result_state["error"] = str(exc)
@@ -1663,6 +1715,8 @@ class CameraManager:
         ai_thread = threading.Thread(target=ai_worker, name=f"ai-{camera_config.camera_id}", daemon=True)
         capture_thread.start()
         ai_thread.start()
+        runtime_started = time.monotonic()
+        last_status_at = 0.0
 
         try:
             deadline = time.monotonic() + 5.0
@@ -1700,7 +1754,20 @@ class CameraManager:
                         cached_annotated = result_state["annotated_frame"]
                         cached_age = time.monotonic() - result_state["updated_at"] if result_state["updated_at"] else 999.0
                         ai_error = result_state["error"]
+                    if stopped:
+                        break
+                    if time.monotonic() - last_status_at >= 1:
+                        elapsed_runtime = max(1, time.monotonic() - runtime_started)
+                        self.update_camera_status(camera_config.camera_id, state="DEGRADED" if ai_error else "ONLINE",
+                            online=True, last_frame_at=capture_state["last_frame_at"],
+                            capture_fps=capture_state["frames_received"]/elapsed_runtime,
+                            ai_fps=capture_state["ai_frames"]/elapsed_runtime,
+                            frames_received=capture_state["frames_received"], frames_dropped=capture_state["frames_dropped"],
+                            last_error="AI inference unavailable" if ai_error else stream_state.get("face_error"))
+                        last_status_at = time.monotonic()
 
+                    if cached_age > 3.0:
+                        stream_state["latest_overlays"] = []
                     if stream_state.get("latest_overlays"):
                         annotated = self._draw_tracking_demo_overlay(frame, camera_config, stream_state, attendance_engine, store)
                     elif cached_annotated is not None and cached_age <= 3.0:
@@ -1710,7 +1777,7 @@ class CameraManager:
                         if ai_error:
                             cv2.putText(
                                 annotated,
-                                f"AI: {ai_error[:44]}",
+                                "AI temporarily unavailable",
                                 (20, max(56, min(annotated.shape[0] - 20, 62))),
                                 cv2.FONT_HERSHEY_SIMPLEX,
                                 0.55,
@@ -1722,6 +1789,10 @@ class CameraManager:
                     quality = max(35, min(int(getattr(camera_config, "tracking_quality", profile_quality) or profile_quality), profile_quality, 95))
                     ok, encoded = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
                     if ok and encoded is not None:
+                        if publish_callback:
+                            raw_ok, raw_encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                            if raw_ok:
+                                publish_callback(raw_encoded.tobytes(), encoded.tobytes())
                         yield (
                             b"--frame\r\n"
                             b"Content-Type: image/jpeg\r\n\r\n"
@@ -1740,4 +1811,16 @@ class CameraManager:
             if capture_thread is not current_thread:
                 capture_thread.join(timeout=1.0)
             if ai_thread is not current_thread:
-                ai_thread.join(timeout=1.0)
+                ai_thread.join()
+            for cache in (self._tracking_models, self._inference_backends, self._runtime_routers):
+                for key in list(cache):
+                    if isinstance(key, tuple) and key[1] == camera_config.camera_id:
+                        cache.pop(key, None)
+            for cache in (self._track_identity_cache, self._attendance_line_detectors):
+                for key in list(cache):
+                    if key.startswith(camera_config.camera_id + ':'):
+                        cache.pop(key, None)
+            self._full_frame_face_cache.pop(camera_config.camera_id, None)
+            for track_id in self._stream_active_tracks.pop(camera_config.camera_id, set()):
+                if attendance_engine is not None:
+                    attendance_engine.on_track_lost(camera_config.camera_id, track_id)

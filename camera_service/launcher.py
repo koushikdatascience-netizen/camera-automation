@@ -29,9 +29,8 @@ def configure_frozen_ca_bundle() -> None:
 
 configure_frozen_ca_bundle()
 
-from camera_service.api import app
-
 _LOG_STREAM = None
+_INSTANCE_HANDLE = None
 
 
 def _runtime_log_dir() -> Path:
@@ -118,6 +117,21 @@ def main() -> None:
         open_browser(setup_url)
         return
 
+    global _INSTANCE_HANDLE
+    if os.name == "nt" and getattr(sys, "frozen", False):
+        import ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateMutexW.restype = ctypes.c_void_p
+        _INSTANCE_HANDLE = kernel.CreateMutexW(None, False, "Global\\SnapKeyVisionAI")
+        if not _INSTANCE_HANDLE:
+            raise OSError("Could not create application instance lock")
+        if ctypes.get_last_error() == 183:
+            if not args.background and not args.no_browser:
+                open_browser(setup_url)
+            return
+
+    from camera_service.api import app
+
     print(f"Starting SnapKey Vision AI on http://{host}:{port}")
 
     auto_open_browser = env_bool("AUTO_OPEN_BROWSER", True) and not args.background and not args.no_browser
@@ -137,6 +151,8 @@ def main() -> None:
         log_level=log_level,
     )
 
+
+ensure_console_streams()
 
 if __name__ == "__main__":
     main()

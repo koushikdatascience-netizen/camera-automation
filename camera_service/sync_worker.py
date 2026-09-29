@@ -5,6 +5,8 @@ import threading
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from camera_service.camera.onvif import probe_onvif, select_profile
 
 
@@ -19,10 +21,19 @@ def _safe_camera_test_result(result: dict[str, Any], *, source_was_secret: bool)
 
 
 def _redact_source(source: str) -> str:
-    if "://" not in source or "@" not in source:
+    if "://" not in source:
         return source
-    scheme, rest = source.split("://", 1)
-    return f"{scheme}://***@{rest.split('@', 1)[1]}"
+    parsed = urlsplit(source)
+    host = parsed.netloc.split('@')[-1]
+    return urlunsplit((parsed.scheme, f"***@{host}" if '@' in parsed.netloc else host, parsed.path, '', ''))
+
+
+def _redact_result(value):
+    if isinstance(value, dict):
+        return {key:_redact_result(item) for key,item in value.items()}
+    if isinstance(value, list):
+        return [_redact_result(item) for item in value]
+    return _redact_source(value) if isinstance(value,str) else value
 
 
 @dataclass
@@ -74,7 +85,10 @@ class EdgeSyncWorker:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            self.run_once()
+            try:
+                self.run_once()
+            except Exception:
+                self._remember(SyncRunResult(enabled=True, failed=1, message="Sync attempt failed; retrying automatically."))
             delay = min(5.0, max(2.0, float(getattr(self.sync_config, "interval_seconds", 15.0))))
             self._stop.wait(delay)
 
@@ -89,6 +103,10 @@ class EdgeSyncWorker:
             if not license_status.active:
                 result = SyncRunResult(enabled=True, blocked=True, message=license_status.reason)
                 self._remember(result, {"license": license_status.model_dump()})
+                return result
+            if hasattr(license_status,'allows_feature') and not license_status.allows_feature('cloud_sync'):
+                result = SyncRunResult(enabled=True,blocked=True,message='Cloud sync is not enabled for this license.')
+                self._remember(result)
                 return result
 
             synced = 0
@@ -160,9 +178,14 @@ class EdgeSyncWorker:
                         or metadata.get("person_path")
                         or metadata.get("face_path")
                     )
-                    if snapshot_path:
+                    if snapshot_path and Path(snapshot_path).is_file():
                         evidence = self.cloud_client.upload_event_evidence(str(event.get("event_id") or row["id"]), snapshot_path)
                         event["metadata"] = {**metadata, "cloud_evidence": evidence}
+                    elif snapshot_path:
+                        event["metadata"] = {**metadata, "evidence_unavailable": True}
+                    if event.get('metadata'):
+                        event['metadata'] = {key:value for key,value in event['metadata'].items()
+                            if key not in {'snapshot_path','person_path','face_path','clip_path'}}
                     self.cloud_client.post_event(self.edge_config, event)
                     self.store.mark_event_synced(row["id"])
                     synced += 1
@@ -230,11 +253,20 @@ class EdgeSyncWorker:
     def _execute_command(self, command: dict[str, Any]) -> dict[str, Any]:
         command_type=str(command.get("command_type") or "")
         request=command.get("request") or {}
+        if command_type == "CAMERA_DELETE":
+            camera_id = str(request.get("camera_id") or "")
+            if self.camera_manager is None:
+                raise RuntimeError("Camera manager is unavailable")
+            self.camera_manager.delete_camera(camera_id)
+            self.camera_manager.delete_camera_status(camera_id)
+            if self.camera_supervisor is not None:
+                self.camera_supervisor.reconcile()
+            return {"deleted": True, "camera_id": camera_id}
         if command_type=="ONVIF_PROBE":
             result=probe_onvif(str(request.get("host") or ""),int(request.get("port") or 80),
                                str(request.get("username") or ""),str(request.get("password") or ""))
             result["recommended_profile"]=select_profile(result.get("profiles") or [],str(request.get("purpose") or "ai"))
-            return result
+            return _redact_result(result)
         if command_type=="CAMERA_TEST":
             if self.camera_manager is None: raise RuntimeError("camera manager is unavailable")
             camera_id=str(request.get("camera_id") or "").strip()
@@ -251,7 +283,11 @@ class EdgeSyncWorker:
                 source=str(request.get("source") or "").strip()
             if not source:
                 raise RuntimeError("Camera source is required")
-            result=self.camera_manager.test_rtsp_connection(source)
+            runtime = self.camera_manager.get_camera_status(camera_id) if camera_id and hasattr(self.camera_manager, "get_camera_status") else None
+            if runtime and runtime.online:
+                result = {"success": True, "message": "Camera runtime is receiving frames", "frames_received": runtime.frames_received, "fps": runtime.capture_fps}
+            else:
+                result=self.camera_manager.test_rtsp_connection(source)
             if not isinstance(result,dict):
                 result={"connected":bool(result)}
             result=_safe_camera_test_result(result, source_was_secret=source_was_secret)

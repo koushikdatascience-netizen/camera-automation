@@ -103,6 +103,7 @@ class UltralyticsCPUBackend:
         self._model_factory = model_factory
         self._model: Any = None
         self.last_error: str | None = None
+        self.fallback_reason: str | None = None
 
     def _load(self) -> Any:
         if self._model is not None:
@@ -112,7 +113,7 @@ class UltralyticsCPUBackend:
                 self._model = self._model_factory(self.model_path)
             else:
                 from ultralytics import YOLO
-                self._model = YOLO(self.model_path)
+                self._model = YOLO(self.model_path, task="detect")
             self.last_error = None
             return self._model
         except Exception as exc:
@@ -120,6 +121,35 @@ class UltralyticsCPUBackend:
             raise
 
     def infer(
+        self, frame: Any, **kwargs: Any,
+    ) -> InferenceResult:
+        try:
+            return self._infer_once(frame, **kwargs)
+        except Exception as exc:
+            original = Path(self.model_path)
+            if self._model_factory or original.suffix.lower() == ".pt":
+                self.last_error = type(exc).__name__
+                raise
+            stem = original.stem.replace("_openvino_model", "")
+            root = original.parent
+            if original.suffix.lower() == ".xml":
+                root = original.parent.parent
+            candidates = [root / (stem + ".onnx"), root / (stem + ".pt")]
+            self.fallback_reason = f"Exported runtime failed ({type(exc).__name__}); using validated fallback"
+            for candidate in candidates:
+                if candidate == original or not candidate.is_file():
+                    continue
+                self.model_path = str(candidate)
+                self._model = None
+                try:
+                    return self._infer_once(frame, **kwargs)
+                except Exception as fallback_error:
+                    self.last_error = type(fallback_error).__name__
+            self.model_path = str(original)
+            self._model = None
+            raise
+
+    def _infer_once(
         self,
         frame: Any,
         *,
@@ -171,4 +201,5 @@ class UltralyticsCPUBackend:
             "ready": self.last_error is None,
             "model_path": self.model_path,
             "last_error": self.last_error,
+            "fallback_reason": self.fallback_reason,
         }

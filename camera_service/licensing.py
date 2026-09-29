@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import socket
+import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -128,11 +129,13 @@ class LicenseManager:
         self._validate_signed_license(license_payload, signature)
         path = self.cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"license": license_payload, "signature": signature}, indent=2), encoding="utf-8")
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"license": license_payload, "signature": signature}, indent=2), encoding="utf-8")
+        temporary.replace(path)
         return self.status()
 
     def status(self) -> LicenseStatus:
-        if not self.edge.activation_required:
+        if not self.edge.activation_required and not getattr(sys, "frozen", False):
             return LicenseStatus(
                 active=True,
                 mode="demo-local",
@@ -147,7 +150,10 @@ class LicenseManager:
                 source="config",
             )
 
-        cached = self._read_cached_license()
+        try:
+            cached = self._read_cached_license()
+        except (OSError, ValueError, TypeError):
+            return self._limited("License cache is unreadable. Reactivate this edge from the portal.")
         if cached:
             payload, signature = cached
             try:
@@ -170,7 +176,7 @@ class LicenseManager:
         if not public_key:
             raise ValueError("license public key is not configured")
         verify_license_signature(payload, signature, public_key)
-        if payload.get("machine_code") and payload["machine_code"] != self.machine_code():
+        if payload.get("machine_code") != self.machine_code():
             raise ValueError("license is for a different machine")
         if payload.get("tenant_id") != self.edge.tenant_id or payload.get("site_id") != self.edge.site_id:
             raise ValueError("license tenant/site does not match this edge")

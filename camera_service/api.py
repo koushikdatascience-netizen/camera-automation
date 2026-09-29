@@ -2,7 +2,9 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import cv2, numpy as np
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query, Form, Request
+from fastapi.responses import JSONResponse
+from urllib.parse import urlsplit
 from camera_service.config import load_config, save_edge_activation
 from camera_service.models import PersonnelCreate, PersonnelPatch
 from camera_service.storage import SQLiteStore
@@ -95,19 +97,89 @@ def get_face_service():
         face_service=FaceService(store)
     return face_service
 
-if _should_initialize_face_service():
-    face_service=get_face_service()
-supervisor=CameraSupervisor(config,store,face_service,attendance_engine,camera_manager=camera_manager)
+_face_init_lock = threading.Lock()
+
+
+class _DeferredFaceService:
+    def detect(self, frame):
+        try:
+            return face_service.detect(frame) if face_service is not None else []
+        except Exception:
+            return []
+    def quality(self, face, shape):
+        try:
+            return face_service.quality(face, shape) if face_service is not None else 0
+        except Exception:
+            return 0
+    def recognize(self, embedding, threshold):
+        try:
+            return face_service.recognize(embedding, threshold) if face_service is not None else (None, 0)
+        except Exception:
+            return (None, 0)
+
+
+def _initialize_background_face():
+    if not _face_init_lock.acquire(blocking=False):
+        return
+    try:
+        get_face_service()
+    except Exception:
+        pass
+    finally:
+        _face_init_lock.release()
+
+
+def _shared_pipeline(camera, stop_event, publish):
+    needs_face = _camera_needs_face(camera)
+    if needs_face and face_service is None:
+        threading.Thread(target=_initialize_background_face, name="face-initializer", daemon=True).start()
+    security_path = object_security_registry.active_model_path("scissors") if camera.features.object_security else None
+    return camera_manager.iter_tracking_mjpeg(camera, config.yolo_model,
+        _DeferredFaceService() if needs_face else None, config.recognition, attendance_engine, store,
+        str(security_path) if security_path else None, max(0.55, float(config.object_security.inference.confidence or 0.55)),
+        stop_event=stop_event, publish_callback=publish)
+
+
+def _camera_runtime_allowed(camera):
+    try:
+        _enforce_runtime_license({'tracking'} | _camera_feature_names(camera.features))
+        enabled = sorted(c.camera_id for c in camera_manager.list_cameras() if c.enabled)
+        if camera.camera_id not in enabled[:license_manager.status().max_cameras]:
+            return False
+        return True
+    except HTTPException:
+        return False
+
+
+supervisor=CameraSupervisor(config,store,face_service,attendance_engine,camera_manager=camera_manager,
+                            pipeline=_shared_pipeline, allowed=_camera_runtime_allowed)
 sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,license_manager,camera_manager=camera_manager,camera_supervisor=supervisor)
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
+    store.configure_event_scope(config.edge.tenant_id, config.edge.company_code, config.edge.shop_id, config.edge.edge_id)
+    for camera in config.cameras:
+        if camera.enabled and not camera_manager.get_camera(camera.camera_id):
+            camera_manager.create_camera({**camera.model_dump(), 'rtsp_url': camera.source})
     supervisor.start(); sync_worker.start()
     try:
         yield
     finally:
         sync_worker.shutdown(); supervisor.shutdown()
 app=FastAPI(title='SnapKey Vision AI',lifespan=lifespan)
+
+
+@app.middleware("http")
+async def protect_local_origin(request: Request, call_next):
+    if request.client and request.client.host not in {'127.0.0.1','::1','testclient'}:
+        return JSONResponse({'detail':'Local service requires a loopback connection'}, status_code=403)
+    hostname = urlsplit("//" + request.headers.get("host", "")).hostname
+    if hostname not in {"localhost", "127.0.0.1", "::1", "testserver"}:
+        return JSONResponse({"detail": "Invalid local service host"}, status_code=403)
+    origin = request.headers.get("origin")
+    if origin and origin != str(request.base_url).rstrip('/'):
+        return JSONResponse({"detail": "Cross-origin local API access is denied"}, status_code=403)
+    return await call_next(request)
 
 def get_store(): return store
 
@@ -359,12 +431,21 @@ def health():
             'person_model_reason': person_model_selection.get('reason'),
             'person_model_diagnostic_disabled': person_model_selection.get('diagnostic_disabled', []),
             'person_model_hardware': person_model_selection.get('hardware'),
+            'active_backends': [{
+                'camera_id': key[1], 'backend': getattr(getattr(backend,'backend_type',None),'value','UNKNOWN'),
+                'model': Path(getattr(backend,'model_path',config.yolo_model)).name,
+                'fallback_reason': getattr(backend,'fallback_reason',None),
+            } for key,backend in list(camera_manager._inference_backends.items()) if isinstance(key,tuple)],
+            'face_recognition_ready': face_service is not None and getattr(face_service,'_app',None) is not None,
             'tracking_fps_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_FPS'),
             'tracking_imgsz_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_IMGSZ'),
             'tracking_quality_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_QUALITY'),
         },
         'cameras':len(camera_manager.list_cameras()),
         'online_cameras':sum(1 for status in statuses if status and status.online),
+        'camera_workers':supervisor.status(),
+        'cloud_sync':sync_worker.status(),
+        'license':{'active':license_manager.status().active,'mode':license_manager.status().mode},
         'object_security_enabled':config.object_security.enabled or config.features.object_security,
         'object_security_ready':bool(active_model and active_model.get("has_model")),
         'object_security_model_loaded':object_security_detector._model is not None,
@@ -385,10 +466,10 @@ def ready():
 def edge_status():
     license_status = license_manager.status()
     return {
-        'edge': config.edge.model_dump(),
+        'edge': config.edge.model_dump(exclude={'activation_token'}),
         'license': license_status.model_dump(),
         'cloud_sync_enabled': cloud_client.enabled(),
-        'cloud_sync_allowed': cloud_client.enabled() and license_status.active,
+        'cloud_sync_allowed': cloud_client.enabled() and license_status.active and license_status.allows_feature('cloud_sync'),
         'cloud_sync_worker': sync_worker.status(),
         'runtime': {
             'profile': config.runtime.profile,
@@ -429,6 +510,7 @@ class EdgeActivationRequest(BaseModel):
 def install_license(request: LicenseInstallRequest):
     try:
         status = license_manager.install_signed_license(request.license, request.signature)
+        return status.model_dump()
     except Exception as exc:
         raise HTTPException(400, str(exc))
 
@@ -451,6 +533,12 @@ def activate_edge(request: EdgeActivationRequest):
         )
         response.raise_for_status()
         activation = response.json()
+        candidate_edge = config.edge.model_copy(update={**activation["edge"],
+            "activation_required": True, "license_public_key": activation["license_public_key"]})
+        candidate_manager = LicenseManager(candidate_edge)
+        candidate_manager._validate_signed_license(activation["license"], activation["signature"])
+        if not candidate_manager._status_from_payload(activation["license"]).active:
+            raise ValueError("Activation returned an expired license")
         config_path = save_edge_activation(activation)
         config = load_config()
         cloud_client.config = config.cloud_sync
@@ -458,6 +546,7 @@ def activate_edge(request: EdgeActivationRequest):
         sync_worker.edge_config = config.edge
         sync_worker.sync_config = config.cloud_sync
         license_status = license_manager.install_signed_license(activation["license"], activation["signature"])
+        store.configure_event_scope(config.edge.tenant_id, config.edge.company_code, config.edge.shop_id, config.edge.edge_id)
         sync_result = sync_worker.run_once()
         return {
             "ok": True,
@@ -474,11 +563,9 @@ def activate_edge(request: EdgeActivationRequest):
             "sync": sync_result.model_dump(),
         }
     except requests.HTTPError as exc:
-        detail = exc.response.text if exc.response is not None else str(exc)
-        raise HTTPException(400, detail)
+        raise HTTPException(400, "Cloud activation was rejected. Verify the one-time code and server configuration.")
     except Exception as exc:
         raise HTTPException(400, str(exc))
-    return status.model_dump()
 
 @app.get('/api/v1/alerts/preview')
 def alert_preview():
@@ -628,7 +715,7 @@ def get_camera(camera_id: str, include_secret: bool = False):
     camera = camera_manager.get_camera(camera_id)
     if not camera:
         raise HTTPException(404, 'Camera not found')
-    rtsp_url = camera.rtsp_url if include_secret else camera_manager._mask_rtsp_password(camera.rtsp_url)
+    rtsp_url = camera_manager._mask_rtsp_password(camera.rtsp_url)
     return {
         **camera.model_dump(),
         'rtsp_url': rtsp_url
@@ -640,6 +727,8 @@ def update_camera(camera_id: str, updates: dict):
     if not existing:
         raise HTTPException(404, 'Camera not found')
     _enforce_camera_license(_merged_camera_features(existing, updates), creating=False)
+    if updates.get('rtsp_url') == camera_manager._mask_rtsp_password(existing.rtsp_url):
+        updates.pop('rtsp_url', None)
     camera = camera_manager.update_camera(camera_id, updates)
     if not camera:
         raise HTTPException(404, 'Camera not found')
@@ -658,9 +747,19 @@ def delete_camera(camera_id: str):
 # RTSP Test Connection API
 class RTSPTestRequest(BaseModel):
     rtsp_url: str
+    camera_id: str | None = None
 
 @app.post('/api/v1/cameras/test')
 def test_rtsp_connection(request: RTSPTestRequest):
+    if request.camera_id:
+        camera = camera_manager.get_camera(request.camera_id)
+        if not camera:
+            raise HTTPException(404, 'Camera not found')
+        status = camera_manager.get_camera_status(request.camera_id)
+        if status and status.online:
+            return {'success':True,'message':'Camera runtime is receiving frames','source':camera_manager._mask_rtsp_password(camera.rtsp_url),
+                'fps':status.capture_fps,'frames_received':status.frames_received,'connection_ms':0}
+        return camera_manager.test_rtsp_connection(camera.rtsp_url)
     result = camera_manager.test_rtsp_connection(request.rtsp_url)
     return result
 
@@ -670,6 +769,14 @@ def test_rtsp_snapshot(url: str = Query(...)):
     if not snapshot:
         raise HTTPException(404, 'No snapshot available')
     return Response(content=snapshot, media_type='image/jpeg')
+
+@app.post('/api/v1/cameras/test/snapshot')
+def test_camera_snapshot(request: dict):
+    camera_id = request.get('camera_id')
+    snapshot = supervisor.snapshot(camera_id) if camera_id else camera_manager.read_rtsp_snapshot(str(request.get('rtsp_url') or ''))
+    if not snapshot:
+        raise HTTPException(404, 'No snapshot available')
+    return Response(content=snapshot, media_type='image/jpeg', headers={'Cache-Control':'no-store'})
 
 # Camera Status API
 @app.get('/api/v1/cameras/{camera_id}/status')
@@ -686,30 +793,17 @@ def start_camera(camera_id: str):
     if not camera:
         raise HTTPException(404, 'Camera not found')
     _enforce_runtime_license(_camera_feature_names(camera.features))
-    result = camera_manager.test_rtsp_connection(camera.rtsp_url)
-    state = CameraState.ONLINE if result.get('success') else CameraState.DEGRADED
-    camera_manager.update_camera_status(camera_id, CameraStatus(
-        camera_id=camera_id,
-        name=camera.name,
-        state=state,
-        online=bool(result.get('success')),
-        capture_fps=float(result.get('fps') or 0),
-        frames_received=int(result.get('frames_received') or 0),
-        last_error=None if result.get('success') else result.get('message', 'Unable to open stream'),
-    ))
-    return {'status': state.value.lower(), 'camera_id': camera_id, 'diagnostics': result}
+    camera_manager.update_camera(camera_id, {'enabled': True})
+    supervisor.reconcile()
+    return {'status': 'starting', 'camera_id': camera_id}
 
 @app.post('/api/v1/cameras/{camera_id}/stop')
 def stop_camera(camera_id: str):
     camera = camera_manager.get_camera(camera_id)
     if not camera:
         raise HTTPException(404, 'Camera not found')
-    camera_manager.update_camera_status(camera_id, CameraStatus(
-        camera_id=camera_id,
-        name=camera.name,
-        state=CameraState.STOPPED,
-        online=False,
-    ))
+    camera_manager.update_camera(camera_id, {'enabled': False})
+    supervisor.reconcile()
     return {'status': 'stopping', 'camera_id': camera_id}
 
 @app.post('/api/v1/cameras/{camera_id}/restart')
@@ -722,7 +816,7 @@ def restart_camera(camera_id: str):
 # Camera Snapshot API
 @app.get('/api/v1/cameras/{camera_id}/snapshot')
 def get_camera_snapshot(camera_id: str):
-    snapshot = camera_manager.get_camera_snapshot(camera_id)
+    snapshot = supervisor.snapshot(camera_id)
     if not snapshot:
         raise HTTPException(404, 'No snapshot available')
     return Response(content=snapshot, media_type='image/jpeg')
@@ -733,7 +827,7 @@ def stream_camera(camera_id: str):
     if not camera:
         raise HTTPException(404, 'Camera not found')
     return StreamingResponse(
-        camera_manager.iter_rtsp_mjpeg(camera.rtsp_url),
+        supervisor.stream(camera_id, overlay=False),
         media_type='multipart/x-mixed-replace; boundary=frame',
     )
 
@@ -743,14 +837,8 @@ def stream_camera_tracking(camera_id: str):
     if not camera:
         raise HTTPException(404, 'Camera not found')
     _enforce_runtime_license({"tracking"} | _camera_feature_names(camera.features))
-    active_face_service = get_face_service() if _camera_needs_face(camera) else None
-    security_model_path = None
-    if camera.features.object_security or camera.features.shoplifting_enabled:
-        active_security_model = object_security_registry.active_model_path("scissors")
-        security_model_path = str(active_security_model) if active_security_model else None
-    security_confidence=max(0.55,float(config.object_security.inference.confidence or 0.55))
     return StreamingResponse(
-        camera_manager.iter_tracking_mjpeg(camera, config.yolo_model, active_face_service, config.recognition, attendance_engine, store, security_model_path, security_confidence),
+        supervisor.stream(camera_id, overlay=True),
         media_type='multipart/x-mixed-replace; boundary=frame',
     )
 
