@@ -71,7 +71,14 @@ class PersonModelRegistry:
             return [value]
         return [root / value for root in self._roots()]
 
+    @staticmethod
+    def _diagnostic_disabled() -> set[str]:
+        """Test-only runtime exclusions; never moves/deletes model artifacts."""
+        raw = os.environ.get("SNAPKEY_PERSON_DIAGNOSTIC_DISABLE", "")
+        return {item.strip().upper() for item in raw.split(",") if item.strip().upper() in {"OPENVINO", "ONNX", "PYTORCH"}}
+
     def resolve(self) -> dict[str, Any]:
+        disabled = self._diagnostic_disabled()
         override = os.environ.get("SNAPKEY_PERSON_MODEL", "").strip()
         if override:
             path = Path(override)
@@ -95,7 +102,7 @@ class PersonModelRegistry:
 
         seen = set()
         for runtime in order:
-            if runtime in seen or runtime not in artifacts:
+            if runtime in seen or runtime not in artifacts or runtime in disabled:
                 continue
             seen.add(runtime)
             if runtime == "OPENVINO" and not self.hardware.get("openvino"):
@@ -127,6 +134,7 @@ class PersonModelRegistry:
             "runtime": runtime,
             "path": str(path.resolve()),
             "reason": reason,
+            "diagnostic_disabled": sorted(self._diagnostic_disabled()),
             "hardware": self.hardware,
         }
         return self.selection
