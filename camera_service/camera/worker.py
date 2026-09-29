@@ -1,5 +1,5 @@
 from __future__ import annotations
-import time, threading
+import time, threading, os
 from datetime import datetime, timezone
 from pathlib import Path
 import cv2
@@ -13,12 +13,23 @@ from camera_service.object_security.alerts import ObjectSecurityAlerter
 
 class CameraWorker:
     def __init__(self,app_config,camera_config,store,face_service,attendance_engine,tracker=None,status_callback=None):
-        self.app=app_config; self.camera=camera_config; self.store=store; self.face=face_service; self.attendance=attendance_engine; self.identity=IdentityResolutionEngine(app_config.recognition); self.stop_event=threading.Event(); self.source=VideoSource(camera_config.source,camera_config.source_type)
+        self.app=app_config; self.camera=camera_config; self.store=store; self.face=face_service; self.attendance=attendance_engine; self.identity=IdentityResolutionEngine(app_config.recognition); self.stop_event=threading.Event(); self.source=VideoSource(camera_config.rtsp_url,camera_config.source_type)
         self.tracker=tracker; self.status_callback=status_callback; self.frames_received=0; self.ai_frames=0; self.started_at=time.monotonic(); self.last_status_at=0.0; self.reconnect_count=0
         if self.tracker is None:
             try: self.tracker=UltralyticsByteTracker(app_config.yolo_model)
             except Exception: self.tracker=CentroidTracker()
-        self.line=LineCrossingDetector(camera_config.attendance_line) if camera_config.attendance_line else None
+        attendance_line=getattr(camera_config,"attendance_line",None)
+        if attendance_line is None and camera_config.features.attendance and str(getattr(camera_config.camera_role,"value",camera_config.camera_role))=="ENTRANCE_EXIT":
+            from types import SimpleNamespace
+            # Persisted/cloud CameraConfig does not yet carry line coordinates.
+            # Use the same default horizontal entrance gate as the live tracking path.
+            line_y=int(os.environ.get("SNAPKEY_ATTENDANCE_LINE_Y_PX","264"))
+            attendance_line=SimpleNamespace(
+                x1=0,y1=line_y,x2=10000,y2=line_y,
+                inside_side=os.environ.get("SNAPKEY_ATTENDANCE_INSIDE_SIDE","positive"),
+                min_crossing_displacement_px=float(os.environ.get("SNAPKEY_ATTENDANCE_MIN_CROSSING_PX","12")),
+            )
+        self.line=LineCrossingDetector(attendance_line) if attendance_line else None
         self.last_tracks=set(); self.last_face_attempt={}
         self.alerter=ObjectSecurityAlerter()
     def process_tracks(self,frame,tracks,ts=None):
