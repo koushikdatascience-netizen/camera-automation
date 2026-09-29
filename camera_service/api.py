@@ -43,7 +43,7 @@ object_security_alerter=ObjectSecurityAlerter()
 cloud_client=CloudSyncClient(config.cloud_sync)
 alert_dispatcher=AlertDispatcher(config.alerts)
 license_manager=LicenseManager(config.edge)
-sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,license_manager,camera_manager=camera_manager)
+sync_worker=None
 
 def _seed_packaged_object_security_model():
     if not getattr(sys, "frozen", False):
@@ -84,7 +84,8 @@ def get_face_service():
 
 if _should_initialize_face_service():
     face_service=get_face_service()
-supervisor=CameraSupervisor(config,store,face_service,attendance_engine)
+supervisor=CameraSupervisor(config,store,face_service,attendance_engine,camera_manager=camera_manager)
+sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,license_manager,camera_manager=camera_manager,camera_supervisor=supervisor)
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
