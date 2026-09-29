@@ -284,27 +284,6 @@ def create_crm_portal_session(payload: CrmPortalSessionRequest, request: Request
     launch=(base or "")+"/portal?sessionId="+quote(session_id)+"#session="+quote(token)
     return {"sessionId":session_id,"expiresAt":expires.isoformat(),"launchUrl":launch}
 
-@app.post("/portal/v1/tenants/{tenant_id}/edge-activation-codes")
-def create_edge_activation_code(tenant_id: str, payload: EdgeActivationCodeRequest, principal: PortalPrincipal = Depends(require_portal_session)):
-    _portal_scope(tenant_id, principal)
-    if principal.role.upper() not in {"OWNER", "ADMIN", "SUPERADMIN"}:
-        raise HTTPException(403, "Only an owner or administrator can set up a new edge device")
-    raw = secrets.token_urlsafe(9).replace("-", "").replace("_", "").upper()[:12]
-    code = "CE-" + "-".join(raw[i:i+4] for i in range(0, len(raw), 4))
-    now = datetime.now(timezone.utc)
-    expires = now + timedelta(minutes=payload.expires_minutes)
-    store.create_edge_activation_code({
-        "code_hash": _token_digest(code),
-        "tenant_id": principal.tenant_id,
-        "company_code": principal.company_code,
-        "shop_id": principal.shop_id,
-        "created_by": principal.user_id,
-        "created_at": now.isoformat(),
-        "expires_at": expires.isoformat(),
-    })
-    return {"activationCode": code, "expiresAt": expires.isoformat(), "shopCode": principal.shop_id}
-
-
 @app.post("/edge/v1/activate")
 def activate_edge(payload: EdgeActivationRequest):
     machine = payload.machine_code.strip()
@@ -372,6 +351,27 @@ def require_portal_session(authorization: str | None = Header(default=None)) -> 
 def portal_session_status(principal: PortalPrincipal = Depends(require_portal_session)):
     return {"sessionId":principal.session_id,"tenantId":principal.tenant_id,"companyCode":principal.company_code,
         "shopCode":principal.shop_id,"userId":principal.user_id,"displayName":principal.display_name,"role":principal.role}
+
+
+@app.post("/portal/v1/tenants/{tenant_id}/edge-activation-codes")
+def create_edge_activation_code(tenant_id: str, payload: EdgeActivationCodeRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    if principal.role.upper() not in {"OWNER", "ADMIN", "SUPERADMIN"}:
+        raise HTTPException(403, "Only an owner or administrator can set up a new edge device")
+    raw = secrets.token_urlsafe(9).replace("-", "").replace("_", "").upper()[:12]
+    code = "CE-" + "-".join(raw[i:i+4] for i in range(0, len(raw), 4))
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=payload.expires_minutes)
+    store.create_edge_activation_code({
+        "code_hash": _token_digest(code),
+        "tenant_id": principal.tenant_id,
+        "company_code": principal.company_code,
+        "shop_id": principal.shop_id,
+        "created_by": principal.user_id,
+        "created_at": now.isoformat(),
+        "expires_at": expires.isoformat(),
+    })
+    return {"activationCode": code, "expiresAt": expires.isoformat(), "shopCode": principal.shop_id}
 
 
 @app.get("/health")
