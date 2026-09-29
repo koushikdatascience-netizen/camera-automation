@@ -357,6 +357,7 @@ def health():
             'model': config.yolo_model,
             'person_model_runtime': person_model_selection.get('runtime'),
             'person_model_reason': person_model_selection.get('reason'),
+            'person_model_diagnostic_disabled': person_model_selection.get('diagnostic_disabled', []),
             'person_model_hardware': person_model_selection.get('hardware'),
             'tracking_fps_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_FPS'),
             'tracking_imgsz_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_IMGSZ'),
