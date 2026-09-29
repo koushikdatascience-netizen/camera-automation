@@ -402,16 +402,16 @@
         features: {
           attendance: !!checks[0]?.checked,
           face_recognition: !!checks[1]?.checked,
-          unknown_detection: !!checks[2]?.checked,
-          shoplifting: !!checks[3]?.checked,
+          unknown_detection: !!checks[3]?.checked,
+          shoplifting: false,
           object_security: !!checks[4]?.checked
         },
         settings: {
-          // Keep the portal contract aligned with CameraManager.apply_cloud_camera.
+          // Person Tracking is a runtime mode, not an unrelated detection feature.
           tracking_fps: Math.max(1, Math.round(30 / Math.max(1, Number(document.getElementById("frame-skip").value || 2)))),
           max_frame_width: Number(document.getElementById("max-width").value || 960),
           tracking_quality: "balanced",
-          tracking_mode: "auto"
+          tracking_mode: checks[2]?.checked ? "track" : "detect"
         }
       };
       const response = await authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras/" + encodeURIComponent(cameraId), {
@@ -461,6 +461,42 @@
       if(!visible) document.getElementById("profile-group").style.display="none";
     });
     loadConfiguredCameras();
+  }
+
+
+  async function loadCloudLiveCameras(){
+    const grid=document.getElementById("cloud-live-grid"); if(!grid)return;
+    try{
+      const scope=requireScope(["tenant_id","shop_id"]);
+      const edgeResponse=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edges");
+      const edgeBody=await edgeResponse.json(); if(!edgeResponse.ok)throw new Error(edgeBody.detail||"Unable to load edge devices.");
+      const edges=edgeBody.items||[]; const selected=selectActiveEdge(edges,scope.edge_id); rememberActiveEdge(selected);
+      const inventory=selected?.status?.cameras||[];
+      const cameraUrl="/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id)+(selected?.edge_id?"&edge_id="+encodeURIComponent(selected.edge_id):"");
+      const cameraResponse=await authFetch(cameraUrl); const cameraBody=await cameraResponse.json(); if(!cameraResponse.ok)throw new Error(cameraBody.detail||"Unable to load cameras.");
+      const configured=cameraBody.items||[]; const byId=new Map(configured.map(x=>[x.camera_id,x]));
+      inventory.forEach(x=>{if(!byId.has(x.camera_id))byId.set(x.camera_id,x);});
+      const cameras=[...byId.values()];
+      const onlineCount=inventory.filter(x=>x.online).length;
+      setText("cloud-live-summary",cameras.length+" cameras · "+onlineCount+" online");
+      const edgeState=document.getElementById("live-edge-state");
+      if(edgeState) edgeState.textContent=(selected&&edgeOnline(selected))?"● Edge Online":"● Edge Offline";
+      if(!cameras.length){grid.innerHTML="<div class='camera-panel' style='padding:36px;text-align:center'>No cameras configured for this shop.</div>";return;}
+      grid.innerHTML=cameras.map(camera=>{
+        const runtime=inventory.find(x=>x.camera_id===camera.camera_id); const online=!!runtime?.online;
+        const features=camera.features||{};
+        const pills=[features.face_recognition?"Face":null,(camera.settings?.tracking_mode==="track"||camera.tracking_mode==="track")?"Tracking":null,features.object_security?"Object Security":null].filter(Boolean);
+        return "<article class='cloud-camera-tile'><div class='cloud-camera-visual'><div class='cloud-camera-overlay'><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><span class='"+(online?"camera-state-online":"camera-state-offline")+"'>● "+(online?"ONLINE":"OFFLINE")+"</span></div><div><strong>Secure live stream</strong><br><small>"+(online?"Edge connected · WebRTC relay pending":"Camera is not currently online")+"</small></div></div><div class='cloud-camera-meta'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><div class='camera-feature-pills'>"+pills.map(x=>"<span class='camera-feature-pill'>"+x+"</span>").join("")+"</div></div><a class='btn btn-light' href='/portal/cameras.html'>Settings</a></div></article>";
+      }).join("");
+    }catch(error){grid.innerHTML="<div class='camera-panel' style='padding:28px'>"+escapeHtml(error.message)+"</div>";}
+  }
+  function wireCloudLivePage(){
+    if(!document.getElementById("cloud-live-grid"))return;
+    document.getElementById("refresh-cloud-live")?.addEventListener("click",loadCloudLiveCameras);
+    document.querySelectorAll("[data-grid]").forEach(button=>button.addEventListener("click",()=>{
+      const grid=document.getElementById("cloud-live-grid"); const mode=button.dataset.grid; grid.className="professional-live-grid"+(mode==="1"?" cols-1":mode==="3"?" cols-3":"");
+    }));
+    loadCloudLiveCameras(); setInterval(()=>loadCloudLiveCameras().catch(()=>{}),15000);
   }
 
   function renderPersonnel(items){
@@ -562,5 +598,5 @@
   }
   function wireAttendancePage(){if(!document.getElementById("attendance-records-body"))return;loadAttendance().catch(error=>showMessage(error.message,true));setInterval(()=>loadAttendance().catch(()=>{}),15000);}
 
-  bootstrapCrmSession().then(()=>{loadSystemStatus();wireEdgeSetup();wireCameraPage();wirePersonnelPage();wireAttendancePage();}).catch(error=>showMessage(error.message,true));
+  bootstrapCrmSession().then(()=>{loadSystemStatus();wireEdgeSetup();wireCameraPage();wireCloudLivePage();wirePersonnelPage();wireAttendancePage();}).catch(error=>showMessage(error.message,true));
 })();
