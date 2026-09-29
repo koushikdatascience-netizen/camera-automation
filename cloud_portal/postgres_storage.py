@@ -41,6 +41,8 @@ class PostgresPortalStore:
             """ALTER TABLE edge_heartbeats ADD COLUMN IF NOT EXISTS company_code TEXT""",
             """ALTER TABLE edge_heartbeats ADD COLUMN IF NOT EXISTS shop_id TEXT""",
             """CREATE TABLE IF NOT EXISTS edge_credentials(token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS edge_activation_codes(code_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, created_by TEXT, created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL, consumed_at TIMESTAMPTZ, consumed_machine_code TEXT)""",
+            """CREATE INDEX IF NOT EXISTS idx_edge_activation_scope ON edge_activation_codes(tenant_id,shop_id,created_at DESC)""",
             """DROP INDEX IF EXISTS idx_edge_credentials_identity""",
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_credentials_active_identity ON edge_credentials(tenant_id,shop_id,site_id,edge_id) WHERE enabled=TRUE""",
             """CREATE TABLE IF NOT EXISTS edge_events(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TIMESTAMPTZ NOT NULL, received_at TIMESTAMPTZ NOT NULL, payload_json JSONB NOT NULL)""",
@@ -95,6 +97,25 @@ class PostgresPortalStore:
     @staticmethod
     def now():
         return datetime.now(timezone.utc)
+
+    def create_edge_activation_code(self, item: dict[str, Any]) -> None:
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO edge_activation_codes(code_hash,tenant_id,company_code,shop_id,created_by,created_at,expires_at)
+                VALUES(:hash,:tenant,:company,:shop,:created_by,:created_at,:expires_at)"""), {
+                "hash": item["code_hash"], "tenant": item["tenant_id"], "company": item.get("company_code"),
+                "shop": item["shop_id"], "created_by": item.get("created_by"),
+                "created_at": item["created_at"], "expires_at": item["expires_at"],
+            })
+
+    def consume_edge_activation_code(self, code_hash: str, machine_code: str) -> dict[str, Any] | None:
+        now = self.now()
+        with self._conn() as conn:
+            row = conn.execute(text("""UPDATE edge_activation_codes
+                SET consumed_at=:now,consumed_machine_code=:machine
+                WHERE code_hash=:hash AND consumed_at IS NULL AND expires_at>:now
+                RETURNING tenant_id,company_code,shop_id,expires_at"""),
+                {"hash": code_hash, "machine": machine_code, "now": now}).mappings().first()
+        return dict(row) if row else None
 
     def resolve_edge_credential(self, token_hash: str) -> dict[str, Any] | None:
         with self._conn() as conn:
