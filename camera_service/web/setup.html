@@ -524,6 +524,30 @@
                 padding: 16px;
             }
         }
+
+        /* Camera Eye professional live workspace */
+        .live-toolbar { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+        .live-toolbar-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .live-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+        .live-grid.single { grid-template-columns:1fr; }
+        .live-grid.dense { grid-template-columns:repeat(3,minmax(0,1fr)); }
+        .live-tile { position:relative; overflow:hidden; min-height:250px; border:1px solid var(--line); border-radius:12px; background:#111827; box-shadow:0 8px 24px rgba(15,23,42,.10); }
+        .live-tile img { display:block; width:100%; aspect-ratio:16/9; object-fit:contain; background:#0b0f14; }
+        .live-tile-head { position:absolute; inset:0 0 auto 0; z-index:2; display:flex; justify-content:space-between; gap:8px; padding:12px; color:white; background:linear-gradient(180deg,rgba(0,0,0,.72),transparent); pointer-events:none; }
+        .live-tile-head strong { font-size:13px; }
+        .live-status { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:750; }
+        .live-status.online { color:#86efac; } .live-status.offline { color:#fca5a5; }
+        .live-tile-foot { display:flex; justify-content:space-between; gap:8px; align-items:center; padding:10px 12px; background:#fff; }
+        .live-tile-foot small { margin:0; }
+        .camera-card { border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:12px; background:#fff; box-shadow:0 5px 16px rgba(22,26,29,.04); }
+        .camera-card .camera-info h3 { margin:0 0 5px; }
+        .camera-card .camera-actions { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
+        .camera-card .danger-menu { opacity:.86; }
+        .camera-meta { color:var(--muted); font-size:12px; margin-top:3px; }
+        .feature-pills { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+        .feature-pill { background:var(--cream-alt); border:1px solid var(--line); border-radius:999px; padding:4px 8px; font-size:10px; font-weight:700; }
+        .camera-wall-empty { padding:44px 20px; text-align:center; border:1px dashed var(--line); border-radius:12px; color:var(--muted); background:var(--cream-alt); }
+        @media (max-width:900px){ .live-grid,.live-grid.dense{grid-template-columns:1fr}.live-tile{min-height:180px} }
     </style>
 </head>
 <body>
@@ -538,7 +562,7 @@
             </div>
             <nav>
                 <a href="#" class="active" data-section="system">System Status</a>
-                <a href="#" data-section="cameras">Cameras</a>
+                <a href="#" data-section="live">Live Cameras</a>\n                <a href="#" data-section="cameras">Camera Setup</a>
                 <a href="#" data-section="personnel">Personnel</a>
                 <a href="#" data-section="attendance">Attendance</a>
                 <a href="#" data-section="objectSecurity">Object Security Test</a>
@@ -616,6 +640,30 @@
                     <div id="activation-message" class="activation-message"></div>
                 </form>
             </div>
+        </div>
+
+
+        <!-- Live Cameras Section -->
+        <div id="live-section" class="main-content">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Live Cameras</h2>
+                    <small>Monitor every active camera from one screen. AI overlay uses the tracking stream.</small>
+                </div>
+                <div class="live-toolbar-actions">
+                    <button class="btn btn-secondary" id="live-refresh-btn" type="button">Refresh</button>
+                    <button class="btn btn-primary" id="live-overlay-btn" type="button">AI Overlay: On</button>
+                </div>
+            </div>
+            <div class="live-toolbar">
+                <div><strong id="live-camera-summary">Loading cameras...</strong><small>Click Full Screen on any camera for a focused view.</small></div>
+                <div class="live-toolbar-actions">
+                    <button class="btn btn-secondary live-layout-btn" data-layout="single" type="button">1</button>
+                    <button class="btn btn-secondary live-layout-btn" data-layout="grid" type="button">4</button>
+                    <button class="btn btn-secondary live-layout-btn" data-layout="dense" type="button">9</button>
+                </div>
+            </div>
+            <div id="live-camera-grid" class="live-grid"></div>
         </div>
 
         <!-- Cameras Section -->
@@ -1297,6 +1345,55 @@
             }
         }
 
+
+        let liveAiOverlay = true;
+        function liveStreamUrl(cameraId) {
+            const endpoint = liveAiOverlay ? 'tracking-stream' : 'stream';
+            return `${API_BASE}/cameras/${encodeURIComponent(cameraId)}/${endpoint}?t=${Date.now()}`;
+        }
+        async function loadLiveCameras() {
+            const grid = document.getElementById('live-camera-grid');
+            if (!grid) return;
+            try {
+                const response = await fetch(`${API_BASE}/cameras`);
+                const data = await response.json();
+                const cameras = data.items || [];
+                const online = cameras.filter(camera => camera.status && camera.status.online).length;
+                document.getElementById('live-camera-summary').textContent = `${cameras.length} cameras · ${online} online`;
+                if (!cameras.length) {
+                    grid.innerHTML = '<div class="camera-wall-empty">No cameras configured yet. Open Camera Setup to add your first camera.</div>';
+                    return;
+                }
+                grid.innerHTML = cameras.map(camera => {
+                    const isOnline = !!camera.status?.online;
+                    return `<article class="live-tile" data-camera-id="${escapeHtmlLocal(camera.camera_id)}">
+                        <div class="live-tile-head"><strong>${escapeHtmlLocal(camera.name || camera.camera_id)}</strong><span class="live-status ${isOnline?'online':'offline'}">● ${isOnline?'LIVE':'OFFLINE'}</span></div>
+                        ${isOnline ? `<img src="${liveStreamUrl(camera.camera_id)}" alt="${escapeHtmlLocal(camera.name || camera.camera_id)} live camera">` : '<div style="aspect-ratio:16/9;display:grid;place-items:center;color:#cbd5e1">Camera offline</div>'}
+                        <div class="live-tile-foot"><small>${escapeHtmlLocal(camera.camera_role || 'GENERAL')} · ${liveAiOverlay?'AI tracking overlay':'Clean stream'}</small><button class="btn btn-secondary live-fullscreen" type="button">Full Screen</button></div>
+                    </article>`;
+                }).join('');
+                grid.querySelectorAll('.live-fullscreen').forEach(button => button.addEventListener('click', () => {
+                    const tile = button.closest('.live-tile');
+                    if (tile?.requestFullscreen) tile.requestFullscreen();
+                }));
+            } catch (error) {
+                grid.innerHTML = `<div class="camera-wall-empty">Unable to load cameras: ${escapeHtmlLocal(error.message)}</div>`;
+            }
+        }
+        function escapeHtmlLocal(value) {
+            const node=document.createElement('div'); node.textContent=String(value ?? ''); return node.innerHTML;
+        }
+        document.getElementById('live-refresh-btn')?.addEventListener('click', loadLiveCameras);
+        document.getElementById('live-overlay-btn')?.addEventListener('click', event => {
+            liveAiOverlay=!liveAiOverlay;
+            event.currentTarget.textContent=`AI Overlay: ${liveAiOverlay?'On':'Off'}`;
+            loadLiveCameras();
+        });
+        document.querySelectorAll('.live-layout-btn').forEach(button => button.addEventListener('click', () => {
+            const grid=document.getElementById('live-camera-grid');
+            grid.className='live-grid'+(button.dataset.layout==='single'?' single':button.dataset.layout==='dense'?' dense':'');
+        }));
+
         // Camera Management
         async function loadCameras() {
             try {
@@ -1321,11 +1418,12 @@
                     cameraName.textContent = camera.name;
 
                     const cameraDetails = document.createElement('p');
-                    cameraDetails.textContent = `${camera.camera_id} | ${camera.camera_role} | ${camera.camera_zone || 'inside'} | crowd>${camera.crowd_threshold || 10} | ${camera.tracking_mode || 'detect'} ${camera.tracking_fps || 3}fps ${camera.tracking_imgsz || 384}px q${camera.tracking_quality || 65}`;
+                    cameraDetails.className = 'camera-meta';
+                    cameraDetails.textContent = `${camera.camera_id} · ${camera.camera_role} · ${camera.camera_zone || 'inside'}`;
 
                     const cameraUrl = document.createElement('p');
-                    cameraUrl.textContent = camera.rtsp_url;
-                    cameraUrl.style.fontFamily = 'monospace';
+                    cameraUrl.textContent = 'Camera source stored securely';
+                    cameraUrl.className = 'camera-meta';
                     cameraUrl.style.fontSize = '12px';
                     cameraUrl.style.color = '#666';
 
@@ -1364,26 +1462,26 @@
 
                     const streamBtn = document.createElement('button');
                     streamBtn.className = 'btn btn-primary';
-                    streamBtn.textContent = 'LIVE';
+                    streamBtn.textContent = 'VIEW LIVE';
                     streamBtn.addEventListener('click', () => {
                         window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/stream`, '_blank');
                     });
 
                     const trackingBtn = document.createElement('button');
                     trackingBtn.className = 'btn btn-primary';
-                    trackingBtn.textContent = 'TRACKING';
+                    trackingBtn.textContent = 'AI VIEW';
                     trackingBtn.addEventListener('click', () => {
                         window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/tracking-stream`, '_blank');
                     });
 
                     const editBtn = document.createElement('button');
                     editBtn.className = 'btn btn-secondary';
-                    editBtn.textContent = 'EDIT';
+                    editBtn.textContent = 'SETTINGS';
                     editBtn.addEventListener('click', () => editCamera(camera));
 
                     const deleteBtn = document.createElement('button');
                     deleteBtn.className = 'btn btn-danger';
-                    deleteBtn.textContent = 'DELETE';
+                    deleteBtn.textContent = 'DELETE';\n                    deleteBtn.classList.add('danger-menu');
                     deleteBtn.addEventListener('click', () => deleteCamera(camera.camera_id));
 
                     cameraActions.appendChild(startBtn);
