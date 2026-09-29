@@ -1337,3 +1337,6 @@ body {
 .cloud-camera-meta{padding:14px 15px;display:flex;justify-content:space-between;gap:12px;align-items:center}.camera-state-online{color:#23834a}.camera-state-offline{color:#b42318}
 .camera-feature-pills{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.camera-feature-pill{font-size:10px;font-weight:600;padding:4px 7px;border-radius:999px;background:var(--cream-alt);border:1px solid var(--border)}
 @media(max-width:900px){.professional-live-grid,.professional-live-grid.cols-3{grid-template-columns:1fr}}
+
+.overview-split{display:grid;grid-template-columns:1.35fr 1fr;gap:18px;margin:22px 0}.overview-camera-list,.overview-activity-list{padding:8px 20px 18px}.overview-camera-row,.overview-activity-row{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)}.overview-camera-row:last-child,.overview-activity-row:last-child{border-bottom:0}.overview-camera-row small,.overview-activity-row small{display:block;color:var(--muted);margin-top:2px}.overview-state{font-size:11px;font-weight:700;white-space:nowrap}
+@media(max-width:950px){.overview-split{grid-template-columns:1fr}}
