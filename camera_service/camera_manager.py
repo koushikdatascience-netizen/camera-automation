@@ -1421,8 +1421,24 @@ class CameraManager:
                 last_error=row['last_error']
             )
 
-    def update_camera_status(self, camera_id: str, status: CameraStatus):
-        """Update camera status"""
+    def update_camera_status(self, camera_id: str, status: CameraStatus | None = None, **changes):
+        """Update camera runtime status from probes, streams, or background workers."""
+        if status is None:
+            current = self.get_camera_status(camera_id)
+            camera = self.get_camera(camera_id)
+            status = current or CameraStatus(
+                camera_id=camera_id,
+                name=camera.name if camera else "",
+                state=CameraState.STOPPED,
+                online=False,
+            )
+            data=status.model_dump()
+            data.update(changes)
+            data["camera_id"]=camera_id
+            state=data.get("state")
+            if isinstance(state,str):
+                data["state"]=CameraState(state)
+            status=CameraStatus(**data)
         with self._lock, self._conn() as c:
             c.execute('''
                 INSERT OR REPLACE INTO camera_status
