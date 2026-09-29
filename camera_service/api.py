@@ -82,7 +82,12 @@ def _camera_needs_face(camera) -> bool:
 def _should_initialize_face_service() -> bool:
     if config.features.face_recognition or config.features.attendance or config.features.unknown_enabled:
         return True
-    return any(_camera_needs_face(camera) for camera in config.cameras if getattr(camera,'enabled',False))
+    configured = [camera for camera in config.cameras if getattr(camera, 'enabled', False)]
+    try:
+        persisted = [camera for camera in camera_manager.list_cameras() if getattr(camera, 'enabled', False)]
+    except Exception:
+        persisted = []
+    return any(_camera_needs_face(camera) for camera in configured + persisted)
 
 def get_face_service():
     global face_service
