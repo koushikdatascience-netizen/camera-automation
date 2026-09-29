@@ -21,6 +21,7 @@ from camera_service.object_security.alerts import ObjectSecurityAlerter
 from camera_service.object_security.confirmation import TemporalConfirmation
 from camera_service.object_security.roi import apply_roi, map_box_from_offset
 from camera_service.object_security.tiling import suppress_duplicates, tiles_for_shape
+from camera_service.person_model_registry import PersonModelRegistry
 from typing import Optional
 from pydantic import BaseModel
 import json
@@ -35,7 +36,14 @@ import socket
 import sys
 from pathlib import Path
 
-config=load_config(); store=SQLiteStore(config.database_path); face_service=None; attendance_engine=AttendanceEngine(store,config.store_id); supervisor=None
+config=load_config()
+person_model_registry=PersonModelRegistry(config)
+try:
+    person_model_selection=person_model_registry.resolve()
+    config.yolo_model=person_model_selection["path"]
+except Exception as exc:
+    person_model_selection={"runtime":"PYTORCH","path":config.yolo_model,"reason":"legacy_fallback","error":str(exc),"hardware":person_model_registry.hardware}
+store=SQLiteStore(config.database_path); face_service=None; attendance_engine=AttendanceEngine(store,config.store_id); supervisor=None
 camera_manager=CameraManager(config.database_path)
 object_security_registry=ObjectSecurityModelRegistry(config.object_security.model_storage_dir)
 object_security_detector=ObjectSecurityDetector()
@@ -342,6 +350,9 @@ def health():
             'profile': config.runtime.profile,
             'inference_backend': os.environ.get('SNAPKEY_INFERENCE_BACKEND', 'AUTO'),
             'model': config.yolo_model,
+            'person_model_runtime': person_model_selection.get('runtime'),
+            'person_model_reason': person_model_selection.get('reason'),
+            'person_model_hardware': person_model_selection.get('hardware'),
             'tracking_fps_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_FPS'),
             'tracking_imgsz_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_IMGSZ'),
             'tracking_quality_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_QUALITY'),
