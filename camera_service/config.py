@@ -124,7 +124,19 @@ class RuntimeProfile(BaseModel):
     object_security_imgsz: int = 512
     face_recheck_seconds: float = 3.0
 
+class PersonModelConfig(BaseModel):
+    model_id: str = "person-detection"
+    family: str = "yolo26"
+    version: str = "yolo26n"
+    storage_dir: str = "data/models/person_detection"
+    preferred_runtime: Literal["AUTO","OPENVINO","ONNX","PYTORCH"] = "AUTO"
+    openvino_artifact: str = "yolo26n_openvino_model"
+    onnx_artifact: str = "yolo26n.onnx"
+    pytorch_artifact: str = "yolo26n.pt"
+
+
 class RuntimeConfig(BaseModel):
+    person_model: PersonModelConfig = Field(default_factory=PersonModelConfig)
     profile: Literal["auto","low_power","balanced","performance","cloud_assist"] = "auto"
     inference_backend: Literal["AUTO","LOCAL_CPU","LOCAL_GPU","CLOUD_GPU"] = "AUTO"
     low_power: RuntimeProfile = Field(default_factory=lambda: RuntimeProfile(
@@ -246,13 +258,14 @@ def _resolve_loaded_config(config: AppConfig) -> AppConfig:
     config.database_path = _resolve_under_base(config.database_path, runtime_base)
     config.evidence_dir = _resolve_under_base(config.evidence_dir, runtime_base)
     config.object_security.model_storage_dir = _resolve_under_base(config.object_security.model_storage_dir, runtime_base)
+    config.runtime.person_model.storage_dir = _resolve_under_base(config.runtime.person_model.storage_dir, runtime_base)
     config.edge.license_cache_path = _resolve_under_base(config.edge.license_cache_path, runtime_base)
     Path(config.database_path).parent.mkdir(parents=True, exist_ok=True)
     Path(config.evidence_dir).mkdir(parents=True, exist_ok=True)
 
     profile = _selected_runtime_profile(config)
     model_override = os.environ.get("SNAPKEY_PERSON_MODEL", "").strip()
-    requested_model = model_override or profile.model or config.yolo_model
+    requested_model = model_override or profile.model or config.runtime.person_model.pytorch_artifact or config.yolo_model
     config.yolo_model = _resolve_model_path(requested_model)
     config.object_security.inference.imgsz = min(
         int(config.object_security.inference.imgsz or profile.object_security_imgsz),
