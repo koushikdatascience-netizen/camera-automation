@@ -607,27 +607,12 @@
             <div class="activation-panel">
                 <h3>Cloud Activation</h3>
                 <form id="activation-form">
-                    <div class="form-row">
-                        <div class="form-col">
-                            <div class="form-group">
-                                <label for="activation-company">Company Code</label>
-                                <input type="text" id="activation-company" class="form-control" placeholder="Example: MADHUSHALA" required>
-                            </div>
-                        </div>
-                        <div class="form-col">
-                            <div class="form-group">
-                                <label for="activation-shop">Shop Code</label>
-                                <input type="text" id="activation-shop" class="form-control" placeholder="Example: SHOP001" required>
-                            </div>
-                        </div>
-                        <div class="form-col">
-                            <div class="form-group">
-                                <label for="activation-code">Activation Code</label>
-                                <input type="password" id="activation-code" class="form-control" autocomplete="one-time-code" required>
-                            </div>
-                        </div>
+                    <div class="form-group">
+                        <label for="activation-code">One-Time Activation Code</label>
+                        <input type="text" id="activation-code" class="form-control" autocomplete="one-time-code" placeholder="CE-XXXX-XXXX-XXXX" required>
+                        <small>Generate this code from Camera Eye Cloud → System Status → Setup New Device. Company and shop are assigned automatically.</small>
                     </div>
-                    <button type="submit" class="btn btn-primary" id="activation-submit">Activate Cloud Sync</button>
+                    <button type="submit" class="btn btn-primary" id="activation-submit">Activate This PC</button>
                     <div id="activation-message" class="activation-message"></div>
                 </form>
             </div>
@@ -1157,9 +1142,9 @@
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            company_code: document.getElementById('activation-company').value,
-                            shop_code: document.getElementById('activation-shop').value,
-                            activation_code: document.getElementById('activation-code').value
+                            company_code: '',
+                            shop_code: '',
+                            activation_code: document.getElementById('activation-code').value.trim()
                         })
                     });
                     const body = await response.json();
@@ -1175,7 +1160,7 @@
                     message.className = 'activation-message status-error';
                 } finally {
                     submitButton.disabled = false;
-                    submitButton.textContent = 'Activate Cloud Sync';
+                    submitButton.textContent = 'Activate This PC';
                 }
             });
         }
