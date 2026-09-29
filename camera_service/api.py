@@ -403,8 +403,8 @@ class LicenseInstallRequest(BaseModel):
     signature: str
 
 class EdgeActivationRequest(BaseModel):
-    company_code: str
-    shop_code: str
+    company_code: str = ""
+    shop_code: str = ""
     activation_code: str
 
 @app.post('/api/v1/license/install')
