@@ -38,6 +38,7 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS edge_machines(id TEXT NOT NULL, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, last_seen_at TEXT NOT NULL, PRIMARY KEY(id, tenant_id, site_id));
                 CREATE TABLE IF NOT EXISTS edge_heartbeats(tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, received_at TEXT NOT NULL, status_json TEXT NOT NULL, PRIMARY KEY(tenant_id,site_id,edge_id));
                 CREATE TABLE IF NOT EXISTS edge_events(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, received_at TEXT NOT NULL, payload_json TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS edge_activation_codes(code_hash TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,created_by TEXT,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,consumed_at TEXT,consumed_machine_code TEXT);
                 CREATE TABLE IF NOT EXISTS camera_configs(tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, camera_id TEXT NOT NULL, name TEXT NOT NULL, source_type TEXT NOT NULL, source TEXT NOT NULL, camera_role TEXT NOT NULL, camera_zone TEXT, crowd_threshold INTEGER NOT NULL DEFAULT 10, enabled INTEGER NOT NULL DEFAULT 1, features_json TEXT NOT NULL, settings_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(tenant_id,shop_id,edge_id,camera_id));
                 CREATE TABLE IF NOT EXISTS edge_commands(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,edge_id TEXT NOT NULL,command_type TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL, result_json TEXT,created_at TEXT NOT NULL,claimed_at TEXT,completed_at TEXT);
                 CREATE TABLE IF NOT EXISTS portal_sessions(session_id TEXT PRIMARY KEY,token_hash TEXT UNIQUE NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,user_id TEXT,display_name TEXT,role TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL);
@@ -67,6 +68,23 @@ class PortalStore:
     @staticmethod
     def now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def create_edge_activation_code(self, item: dict[str, Any]) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute("""INSERT INTO edge_activation_codes(code_hash,tenant_id,company_code,shop_id,created_by,created_at,expires_at)
+                VALUES(?,?,?,?,?,?,?)""", (item["code_hash"], item["tenant_id"], item.get("company_code"),
+                item["shop_id"], item.get("created_by"), item["created_at"], item["expires_at"]))
+
+    def consume_edge_activation_code(self, code_hash: str, machine_code: str) -> dict[str, Any] | None:
+        now = self.now()
+        with self._lock, self._conn() as conn:
+            row = conn.execute("""SELECT tenant_id,company_code,shop_id,expires_at FROM edge_activation_codes
+                WHERE code_hash=? AND consumed_at IS NULL AND expires_at>?""", (code_hash, now)).fetchone()
+            if not row:
+                return None
+            conn.execute("UPDATE edge_activation_codes SET consumed_at=?,consumed_machine_code=? WHERE code_hash=?",
+                         (now, machine_code, code_hash))
+            return dict(row)
 
     def resolve_edge_credential(self, token_hash: str):
         return None
