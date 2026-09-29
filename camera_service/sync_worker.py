@@ -46,13 +46,14 @@ class SyncRunResult:
 class EdgeSyncWorker:
     """Best-effort local queue drain for cloud portal/mobile visibility."""
 
-    def __init__(self, store, cloud_client, edge_config, sync_config, license_manager, camera_manager=None):
+    def __init__(self, store, cloud_client, edge_config, sync_config, license_manager, camera_manager=None, camera_supervisor=None):
         self.store = store
         self.cloud_client = cloud_client
         self.edge_config = edge_config
         self.sync_config = sync_config
         self.license_manager = license_manager
         self.camera_manager = camera_manager
+        self.camera_supervisor = camera_supervisor
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -136,6 +137,8 @@ class EdgeSyncWorker:
                             camera_sync["applied"] += 1
                         except Exception:
                             camera_sync["failed"] += 1
+                    if self.camera_supervisor is not None:
+                        self.camera_supervisor.reconcile()
                 except Exception as exc:
                     camera_sync["error"] = str(exc)
             personnel_sync={"fetched":0,"applied":0,"failed":0}
