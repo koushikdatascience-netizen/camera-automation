@@ -16,7 +16,12 @@ class CameraWorker:
         self.app=app_config; self.camera=camera_config; self.store=store; self.face=face_service; self.attendance=attendance_engine; self.identity=IdentityResolutionEngine(app_config.recognition); self.stop_event=threading.Event(); self.source=VideoSource(camera_config.rtsp_url,camera_config.source_type)
         self.tracker=tracker; self.status_callback=status_callback; self.frames_received=0; self.ai_frames=0; self.started_at=time.monotonic(); self.last_status_at=0.0; self.reconnect_count=0
         if self.tracker is None:
-            try: self.tracker=UltralyticsByteTracker(app_config.yolo_model)
+            try:
+                self.tracker=UltralyticsByteTracker(
+                    app_config.yolo_model,
+                    imgsz=int(os.environ.get("SNAPKEY_PROFILE_TRACKING_IMGSZ","384") or 384),
+                    device=os.environ.get("SNAPKEY_ULTRALYTICS_DEVICE") or None,
+                )
             except Exception: self.tracker=CentroidTracker()
         attendance_line=getattr(camera_config,"attendance_line",None)
         if attendance_line is None and camera_config.features.attendance and str(getattr(camera_config.camera_role,"value",camera_config.camera_role))=="ENTRANCE_EXIT":
