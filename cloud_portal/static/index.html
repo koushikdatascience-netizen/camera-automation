@@ -184,11 +184,19 @@
 
 
       <div class="camera-panel" style="margin-bottom:24px">
-        <div class="panel-heading">
+        <div class="panel-heading" style="display:flex;justify-content:space-between;gap:16px;align-items:center">
           <div>
             <h2>Connected Edge Devices</h2>
             <p>Camera Eye PCs and their locally discovered cameras for this shop.</p>
           </div>
+          <button class="btn" id="setup-edge-btn" type="button">+ Setup New Device</button>
+        </div>
+        <div id="edge-setup-panel" style="display:none;margin:16px 0;padding:18px;border:1px solid #e5e7eb;border-radius:10px;background:#fffdf5">
+          <h3 style="margin:0 0 6px">Set up a Camera Eye PC</h3>
+          <p style="margin:0 0 14px">Generate a one-time code, then enter it in Camera Eye on the client PC. The code is scoped to this shop and expires automatically.</p>
+          <div id="edge-activation-result"></div>
+          <button class="btn" id="generate-edge-code-btn" type="button">Generate Activation Code</button>
+          <button class="btn btn-light" id="close-edge-setup-btn" type="button">Close</button>
         </div>
         <div id="edge-device-list"><p>Loading edge devices...</p></div>
       </div>
