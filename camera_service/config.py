@@ -116,7 +116,7 @@ class EvidenceConfig(BaseModel):
     post_event_seconds: int = 30
 
 class RuntimeProfile(BaseModel):
-    model: str = "yolo11n.pt"
+    model: str = "yolo26n.pt"
     tracking_fps: float = 2.0
     tracking_imgsz: int = 384
     tracking_quality: int = 60
@@ -128,11 +128,11 @@ class RuntimeConfig(BaseModel):
     profile: Literal["auto","low_power","balanced","performance","cloud_assist"] = "auto"
     inference_backend: Literal["AUTO","LOCAL_CPU","LOCAL_GPU","CLOUD_GPU"] = "AUTO"
     low_power: RuntimeProfile = Field(default_factory=lambda: RuntimeProfile(
-        model="yolo11n.pt", tracking_fps=1.0, tracking_imgsz=320, tracking_quality=45,
+        model="yolo26n.pt", tracking_fps=1.0, tracking_imgsz=320, tracking_quality=45,
         tracking_mode="detect", object_security_imgsz=416, face_recheck_seconds=5.0,
     ))
     balanced: RuntimeProfile = Field(default_factory=lambda: RuntimeProfile(
-        model="yolo11n.pt", tracking_fps=3.0, tracking_imgsz=384, tracking_quality=60,
+        model="yolo26n.pt", tracking_fps=3.0, tracking_imgsz=384, tracking_quality=60,
         tracking_mode="detect", object_security_imgsz=512, face_recheck_seconds=3.0,
     ))
     performance: RuntimeProfile = Field(default_factory=lambda: RuntimeProfile(
@@ -140,7 +140,7 @@ class RuntimeConfig(BaseModel):
         tracking_mode="track", object_security_imgsz=640, face_recheck_seconds=2.0,
     ))
     cloud_assist: RuntimeProfile = Field(default_factory=lambda: RuntimeProfile(
-        model="yolo11n.pt", tracking_fps=2.0, tracking_imgsz=384, tracking_quality=60,
+        model="yolo26n.pt", tracking_fps=2.0, tracking_imgsz=384, tracking_quality=60,
         tracking_mode="detect", object_security_imgsz=512, face_recheck_seconds=4.0,
     ))
 
@@ -228,10 +228,12 @@ def _resolve_model_path(value: str) -> str:
     if not model_path.is_absolute():
         candidates.append(bundle_base / model_path)
     candidates.extend([
-        bundle_base / "yolo11m.pt",
+        bundle_base / "yolo26n.pt",
         bundle_base / "yolo11n.pt",
-        Path("yolo11m.pt"),
+        bundle_base / "yolo11m.pt",
+        Path("yolo26n.pt"),
         Path("yolo11n.pt"),
+        Path("yolo11m.pt"),
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -249,9 +251,8 @@ def _resolve_loaded_config(config: AppConfig) -> AppConfig:
     Path(config.evidence_dir).mkdir(parents=True, exist_ok=True)
 
     profile = _selected_runtime_profile(config)
-    requested_model = config.yolo_model or profile.model
-    if Path(requested_model).name.lower() == "yolo11m.pt" and not Path(_resolve_model_path(requested_model)).exists():
-        requested_model = profile.model
+    model_override = os.environ.get("SNAPKEY_PERSON_MODEL", "").strip()
+    requested_model = model_override or profile.model or config.yolo_model
     config.yolo_model = _resolve_model_path(requested_model)
     config.object_security.inference.imgsz = min(
         int(config.object_security.inference.imgsz or profile.object_security_imgsz),
