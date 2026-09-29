@@ -19,6 +19,7 @@ datas = [
     ("../../assets/brand", "assets/brand"),
     ("../../config.example.yaml", "."),
     ("../../yolo11m.pt", "."),
+    ("../../yolo26n.pt", "."),
     (str(INSIGHTFACE_OBJECTS / "meanshape_68.pkl"), "objects"),
     (certifi.where(), "certifi"),
 ]
@@ -40,7 +41,7 @@ hiddenimports = [
     "uvicorn.lifespan.on",
 ]
 
-for package_name in ("insightface", "onnxruntime", "ultralytics", "torch"):
+for package_name in ("insightface", "onnxruntime", "openvino", "ultralytics", "torch"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
     datas += package_datas
     binaries += package_binaries
