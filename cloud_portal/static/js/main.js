@@ -184,6 +184,19 @@
       setText("database-status", "● Connected");
       setText("configured-cameras", (cameras.items || []).length + uniqueInventory.length);
       setText("online-cameras", inventory.filter(camera=>camera.online).length);
+      const overviewCameras=document.getElementById("overview-camera-list");
+      if(overviewCameras){
+        const configured=cameras.items||[];
+        overviewCameras.innerHTML=configured.length?configured.slice(0,6).map(camera=>{
+          const runtime=inventory.find(x=>x.camera_id===camera.camera_id); const online=!!runtime?.online;
+          return "<div class='overview-camera-row'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><small>"+escapeHtml(camera.camera_role||"GENERAL")+" · "+escapeHtml(camera.camera_zone||"Shop")+"</small></div><span class='overview-state "+(online?"camera-state-online":"camera-state-offline")+"'>● "+(online?"Online":"Offline")+"</span></div>";
+        }).join(""):"<p>No cameras configured yet.</p>";
+      }
+      const overviewActivity=document.getElementById("overview-activity-list");
+      if(overviewActivity){
+        const recent=(unknown.items||[]).slice(0,6);
+        overviewActivity.innerHTML=recent.length?recent.map(item=>"<div class='overview-activity-row'><div><strong>Unknown person</strong><small>"+escapeHtml(item.camera_id||"Camera")+" · "+fmtTime(item.event_time||item.detected_at)+"</small></div><span class='event-badge'>Alert</span></div>").join(""):"<p>No recent alerts. Camera Eye is monitoring normally.</p>";
+      }
       const today = new Date().toISOString().slice(0, 10);
       const todayUnknown = (unknown.items || []).filter(item => String(item.event_time || "").slice(0, 10) === today).length;
       setText("unknown-incidents", todayUnknown);
