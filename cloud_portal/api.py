@@ -60,6 +60,9 @@ class EdgeActivationRequest(BaseModel):
     machine_code: str
     device_name: str | None = None
 
+class EdgeActivationCodeRequest(BaseModel):
+    expires_minutes: int = Field(default=30, ge=5, le=1440)
+
 
 @dataclass(frozen=True)
 class EdgePrincipal:
@@ -281,20 +284,50 @@ def create_crm_portal_session(payload: CrmPortalSessionRequest, request: Request
     launch=(base or "")+"/portal?sessionId="+quote(session_id)+"#session="+quote(token)
     return {"sessionId":session_id,"expiresAt":expires.isoformat(),"launchUrl":launch}
 
+@app.post("/portal/v1/tenants/{tenant_id}/edge-activation-codes")
+def create_edge_activation_code(tenant_id: str, payload: EdgeActivationCodeRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    if principal.role.upper() not in {"OWNER", "ADMIN", "SUPERADMIN"}:
+        raise HTTPException(403, "Only an owner or administrator can set up a new edge device")
+    raw = secrets.token_urlsafe(9).replace("-", "").replace("_", "").upper()[:12]
+    code = "CE-" + "-".join(raw[i:i+4] for i in range(0, len(raw), 4))
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=payload.expires_minutes)
+    store.create_edge_activation_code({
+        "code_hash": _token_digest(code),
+        "tenant_id": principal.tenant_id,
+        "company_code": principal.company_code,
+        "shop_id": principal.shop_id,
+        "created_by": principal.user_id,
+        "created_at": now.isoformat(),
+        "expires_at": expires.isoformat(),
+    })
+    return {"activationCode": code, "expiresAt": expires.isoformat(), "shopCode": principal.shop_id}
+
+
 @app.post("/edge/v1/activate")
 def activate_edge(payload: EdgeActivationRequest):
-    if not _edge_activation_code_valid(payload.activation_code):
-        raise HTTPException(401, "Invalid activation code")
-    shop = _slug(payload.shop_code)
-    company = _slug(payload.company_code or shop)
     machine = payload.machine_code.strip()
     if not machine:
         raise HTTPException(400, "machine_code is required")
-    tenant_id = f"tenant-{company}"
+    one_time = store.consume_edge_activation_code(_token_digest(payload.activation_code.strip()), machine)
+    if one_time:
+        shop = str(one_time["shop_id"])
+        company_code = one_time.get("company_code")
+        company = _slug(company_code or shop)
+        tenant_id = str(one_time["tenant_id"])
+    elif _edge_activation_code_valid(payload.activation_code):
+        # Backward-compatible installer/dev activation. Production onboarding should use a one-time portal code.
+        shop = _slug(payload.shop_code)
+        company_code = payload.company_code
+        company = _slug(company_code or shop)
+        tenant_id = f"tenant-{company}"
+    else:
+        raise HTTPException(401, "Invalid or expired activation code")
     site_id = f"site-{shop}"
     edge_id = f"edge-{shop}-{_token_digest(machine)[:8]}"
     token = secrets.token_urlsafe(32)
-    store.provision_edge_credential(_token_digest(token), tenant_id, payload.company_code, shop, site_id, edge_id)
+    store.provision_edge_credential(_token_digest(token), tenant_id, company_code, shop, site_id, edge_id)
     license_data = _issue_license_payload(
         tenant_id=tenant_id,
         site_id=site_id,
@@ -306,7 +339,7 @@ def activate_edge(payload: EdgeActivationRequest):
     return {
         "edge": {
             "tenant_id": tenant_id,
-            "company_code": payload.company_code,
+            "company_code": company_code,
             "shop_id": shop,
             "site_id": site_id,
             "edge_id": edge_id,
