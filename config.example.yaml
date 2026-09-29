@@ -1,12 +1,13 @@
 store_id: client-shop-01
 database_path: data/camera_automation.db
 evidence_dir: data/evidence
+# Legacy fallback only; runtime profiles select the active person model.
 yolo_model: yolo11m.pt
 runtime:
   profile: auto
   inference_backend: AUTO
   low_power:
-    model: yolo11n.pt
+    model: yolo26n.pt
     tracking_fps: 1
     tracking_imgsz: 320
     tracking_quality: 45
@@ -14,7 +15,7 @@ runtime:
     object_security_imgsz: 416
     face_recheck_seconds: 5
   balanced:
-    model: yolo11n.pt
+    model: yolo26n.pt
     tracking_fps: 3
     tracking_imgsz: 384
     tracking_quality: 60
@@ -30,7 +31,7 @@ runtime:
     object_security_imgsz: 640
     face_recheck_seconds: 2
   cloud_assist:
-    model: yolo11n.pt
+    model: yolo26n.pt
     tracking_fps: 2
     tracking_imgsz: 384
     tracking_quality: 60
