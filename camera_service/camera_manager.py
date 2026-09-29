@@ -11,7 +11,7 @@ import time
 import sys
 import subprocess
 from urllib.parse import urlsplit, urlunsplit
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 from camera_service.models import IdentitySeen, LineCrossingEvent
 from camera_service.line_crossing import LineCrossingDetector
@@ -70,6 +70,12 @@ class CameraConfig(BaseModel):
     features: CameraFeatures = Field(default_factory=CameraFeatures)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @model_validator(mode='after')
+    def attendance_requires_tracks(self):
+        if self.features.attendance and self.camera_role == CameraRole.ENTRANCE_EXIT:
+            self.tracking_mode = 'track'
+        return self
 
 class CameraStatus(BaseModel):
     camera_id: str
@@ -378,6 +384,7 @@ class CameraManager:
             if 'features' in updates:
                 camera.features = CameraFeatures(**updates['features'])
 
+            camera = CameraConfig.model_validate(camera.model_dump())
             camera.updated_at = datetime.now(timezone.utc).isoformat()
 
             with self._conn() as c:

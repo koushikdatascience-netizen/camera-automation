@@ -592,7 +592,7 @@ def alert_preview():
 
 # Setup UI Route
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
 
 
 def _web_asset_dir() -> Path:
@@ -943,7 +943,26 @@ def end_person_break(person_id: str, body: BreakActionRequest, s=Depends(get_sto
 
 # Attendance APIs
 @app.get('/api/v1/attendance')
-def attendance(person_id:str|None=None,s=Depends(get_store)): return {'items':s.attendance(person_id)}
+def attendance(person_id:str|None=None,limit:int|None=Query(default=None,ge=1,le=1000),camera_id:str|None=None,s=Depends(get_store)):
+    return {'items':s.attendance(person_id,limit=limit,camera_id=camera_id)}
+
+def _saved_evidence(path_value, s, media_type='image/jpeg'):
+    if not path_value:
+        raise HTTPException(404,'Snapshot unavailable')
+    path=Path(path_value).resolve()
+    roots=(Path(config.evidence_dir).resolve(), (Path(s.path).parent/'evidence').resolve())
+    if not any(path.is_relative_to(root) for root in roots) or not path.is_file():
+        raise HTTPException(404,'Snapshot unavailable')
+    return FileResponse(path,media_type=media_type,headers={'Cache-Control':'no-store'})
+
+@app.get('/api/v1/attendance/{session_id}/snapshots/{side}')
+def attendance_snapshot(session_id:str,side:str,s=Depends(get_store)):
+    if side not in {'arrival','exit'}:
+        raise HTTPException(404,'Snapshot unavailable')
+    record=s.get_attendance_id(session_id)
+    if not record:
+        raise HTTPException(404,'Attendance record not found')
+    return _saved_evidence(record.get(f'{side}_snapshot'),s)
 
 @app.get('/api/v1/attendance/today')
 def attendance_today(s=Depends(get_store)): return {'items':s.attendance()}
@@ -1084,7 +1103,7 @@ def object_security_events(s=Depends(get_store)): return {'items':s.object_secur
 
 # Security Alert APIs
 @app.get('/api/v1/security-alerts')
-def security_alerts(s=Depends(get_store)): return {'items':s.security_alerts()}
+def security_alerts(limit:int|None=Query(default=None,ge=1,le=1000),s=Depends(get_store)): return {'items':s.security_alerts(limit=limit)}
 
 @app.get('/api/v1/security-alerts/{alert_id}')
 def security_alert(alert_id:str,s=Depends(get_store)):
@@ -1116,7 +1135,14 @@ def acknowledge_security_alert(alert_id:str,s=Depends(get_store)):
 
 # Unknown Incidents APIs
 @app.get('/api/v1/unknown-incidents')
-def unknowns(s=Depends(get_store)): return {'items':s.unknowns()}
+def unknowns(limit:int|None=Query(default=None,ge=1,le=1000),s=Depends(get_store)): return {'items':s.unknowns(limit=limit)}
+
+@app.get('/api/v1/unknown-incidents/{incident_id}/snapshot')
+def unknown_snapshot(incident_id:str,s=Depends(get_store)):
+    incident=s.unknown(incident_id)
+    if not incident:
+        raise HTTPException(404,'Incident not found')
+    return _saved_evidence(incident.get('best_face_snapshot') or incident.get('best_person_snapshot'),s)
 
 @app.get('/api/v1/unknown-incidents/{incident_id}')
 def unknown(incident_id:str,s=Depends(get_store)):

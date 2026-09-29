@@ -159,10 +159,14 @@ class SQLiteStore:
             return self.get_attendance_id(s['id']),True
     def get_attendance_id(self,sid):
         with self._conn() as c: r=c.execute("SELECT * FROM attendance_sessions WHERE id=?",(sid,)).fetchone(); return dict(r) if r else None
-    def attendance(self,person_id=None):
+    def attendance(self,person_id=None,limit=None,camera_id=None):
         q='''SELECT a.*,p.employee_code,p.full_name,p.role FROM attendance_sessions a JOIN personnel p ON p.id=a.person_id'''; args=[]
-        if person_id: q+=' WHERE a.person_id=?'; args.append(person_id)
+        filters=[]
+        if person_id: filters.append('a.person_id=?'); args.append(person_id)
+        if camera_id: filters.append('(a.arrival_camera=? OR a.exit_camera=?)'); args.extend([camera_id,camera_id])
+        if filters: q+=' WHERE '+' AND '.join(filters)
         q+=' ORDER BY a.arrival_time DESC'
+        if limit is not None: q+=' LIMIT ?'; args.append(int(limit))
         with self._conn() as c: return [dict(r) for r in c.execute(q,args)]
     def add_person_event(self,person_id,store_id,camera_id,event_type,ts,metadata=None):
         eid=str(uuid.uuid4())
@@ -189,8 +193,8 @@ class SQLiteStore:
                 payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path}}
                 self._enqueue_edge_event(c,iid,'UNKNOWN_INCIDENT',payload)
                 return iid,True
-    def unknowns(self):
-        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM unknown_incidents ORDER BY confirmed_unknown_at DESC")]
+    def unknowns(self,limit=None):
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM unknown_incidents ORDER BY confirmed_unknown_at DESC LIMIT ?",(limit if limit is not None else -1,))]
     def unknown(self,iid):
         with self._conn() as c: r=c.execute("SELECT * FROM unknown_incidents WHERE id=?",(iid,)).fetchone(); return dict(r) if r else None
     def acknowledge_unknown(self,iid):
@@ -203,8 +207,8 @@ class SQLiteStore:
             c.execute("INSERT INTO security_alerts(id,store_id,camera_id,alert_type,object_label,confidence,event_time,snapshot_path,clip_path,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)",(aid,store_id,camera_id,alert_type,object_label,confidence,event_time.isoformat(),snapshot_path,clip_path,json.dumps(metadata or {})))
             self._enqueue_edge_event(c,aid,alert_type,payload)
         return self.security_alert(aid)
-    def security_alerts(self):
-        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM security_alerts ORDER BY event_time DESC")]
+    def security_alerts(self,limit=None):
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM security_alerts ORDER BY event_time DESC LIMIT ?",(limit if limit is not None else -1,))]
     def security_alert(self,aid):
         with self._conn() as c: r=c.execute("SELECT * FROM security_alerts WHERE id=?",(aid,)).fetchone(); return dict(r) if r else None
     def update_security_alert_clip(self,aid,clip_path):

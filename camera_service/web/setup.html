@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SnapKey Vision AI</title>
     <style>
+        @font-face { font-family:Outfit; src:url('/static/fonts/outfit.woff2') format('woff2'); font-weight:100 900; font-display:swap; }
+        [hidden] { display:none !important; }
         :root {
             --ink: #202327;
             --muted: #686d74;
@@ -591,27 +593,35 @@
     <header>
         <div class="header-content">
             <div class="brand-lockup">
-                <div class="brand-mark">SK</div>
+                <img class="brand-mark" src="/static/snapkey.png" alt="SnapKey">
                 <div>
                     <h1>SnapKey Vision AI</h1>
-                    <div class="brand-subtitle">Edge security and retail intelligence</div>
+                    <div class="brand-subtitle">Camera intelligence</div>
                 </div>
             </div>
             <nav>
-                <a href="#" class="active" data-section="live">Live Cameras</a>
+                <a href="#" class="active" data-section="overview">Overview</a>
+                <a href="#" data-section="live">Live View</a>
                 <a href="#" data-section="cameras">Camera Setup</a>
                 <a href="#" data-section="system">System Status</a>
-                <a href="#" data-section="personnel">Personnel</a>
-                <a href="#" data-section="attendance">Attendance</a>
-                <a href="#" data-section="objectSecurity">Object Security Test</a>
-                <a href="#" data-section="security">Security Alerts</a>
-                <a href="#" data-section="unknown">Unknown Persons</a>
             </nav>
         </div>
     </header>
 
     <div class="container">
+        <div id="operator-notice" role="status" hidden></div>
         <div id="unknown-alert-banner" class="alert-banner"></div>
+
+        <section id="overview-section" class="main-content active">
+            <div class="section-header"><div><h2 class="section-title">Overview</h2><small id="overview-summary">Loading cameras...</small></div><button class="btn btn-secondary" id="overview-refresh" type="button">Refresh</button></div>
+            <div id="operator-camera-tiles" class="operator-camera-tiles"></div>
+            <div class="operator-records-toolbar">
+                <div class="activity-tabs" role="tablist" aria-label="Records"><button class="btn btn-secondary" id="operator-attendance-tab" role="tab" aria-selected="true" type="button">Attendance</button><button class="btn btn-secondary" id="operator-alerts-tab" role="tab" aria-selected="false" type="button">Alerts</button></div>
+                <div class="live-toolbar-actions"><select id="operator-camera-filter" class="form-control" aria-label="Filter by camera"><option value="">All cameras</option></select><button id="operator-manage-people" class="btn btn-secondary" type="button">Manage people</button></div>
+            </div>
+            <div class="table-container"><table id="operator-records-table"><thead id="operator-records-head"></thead><tbody id="operator-records-body"></tbody></table></div>
+            <small id="operator-records-status" role="status"></small>
+        </section>
 
         <!-- System Status Section -->
         <div id="system-section" class="main-content">
@@ -667,7 +677,8 @@
             </div>
 
 
-            <div style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px;margin:20px 0" class="edge-overview-grid">
+            <details class="operator-advanced"><summary>Device details</summary><div id="system-diagnostics-grid" class="system-status"></div></details>
+            <div hidden style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px;margin:20px 0" class="edge-overview-grid">
                 <div class="camera-card">
                     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><h3 style="margin:0">Camera Health</h3><small>Current status of cameras connected to this Edge PC.</small></div><button class="btn btn-primary" type="button" id="overview-open-live">Open Live Cameras</button></div>
                     <div id="edge-overview-cameras" style="margin-top:10px">Loading cameras...</div>
@@ -693,10 +704,10 @@
 
 
         <!-- Live Cameras Section -->
-        <div id="live-section" class="main-content active">
+        <div id="live-section" class="main-content">
             <div class="section-header">
                 <div>
-                    <h2 class="section-title">Live Cameras</h2>
+                    <h2 class="section-title">Live View</h2>
                 </div>
                 <div class="live-toolbar-actions">
                     <button class="btn btn-secondary" id="live-refresh-btn" type="button">Refresh</button>
@@ -705,7 +716,7 @@
             </div>
             <div class="live-toolbar">
                 <div><strong id="live-camera-summary">Loading cameras...</strong></div>
-                <div class="workspace-tabs" role="tablist" aria-label="Camera view">
+                <div class="workspace-tabs" role="tablist" aria-label="Camera view" hidden>
                     <button class="btn btn-secondary" id="live-focus-tab" type="button" role="tab" aria-selected="true">Focus</button>
                     <button class="btn btn-secondary" id="live-wall-tab" type="button" role="tab" aria-selected="false">Wall</button>
                 </div>
@@ -723,22 +734,23 @@
                     <div id="focus-camera-placeholder" class="focus-placeholder">Select an online camera</div>
                 </div>
                 <aside class="focus-detail">
-                    <h3>Camera details</h3>
-                    <dl><dt>Role</dt><dd id="focus-camera-role">-</dd><dt>Zone</dt><dd id="focus-camera-zone">-</dd><dt>Monitoring</dt><dd id="focus-camera-monitoring">-</dd><dt>Features</dt><dd id="focus-camera-features">-</dd></dl>
-                    <h3>Latest recognized</h3>
-                    <div class="recognized-person"><img id="focus-person-photo" alt="Enrolled person photo" hidden><div><strong id="focus-person-name">No recognition yet</strong><small id="focus-person-time"></small></div></div>
+                    <h3 id="focus-purpose">Attendance</h3>
+                    <dl><dt>Camera role</dt><dd id="focus-camera-role">-</dd><dt>Monitoring</dt><dd id="focus-camera-monitoring">-</dd></dl>
+                    <span id="focus-camera-zone" hidden></span><span id="focus-camera-features" hidden></span>
+                    <div class="recognized-person"><img id="focus-person-photo" alt="Latest attendance snapshot" hidden><div><strong id="focus-person-name">No attendance yet</strong><small id="focus-person-time"></small></div></div>
+                    <dl id="focus-attendance-details"><dt>Time in</dt><dd id="focus-time-in">-</dd><dt>Time out</dt><dd id="focus-time-out">-</dd><dt>Duration</dt><dd id="focus-duration">-</dd></dl>
                     <div class="camera-actions"><button class="btn btn-success" id="focus-camera-start" type="button">Start</button><button class="btn btn-secondary" id="focus-camera-stop" type="button">Stop</button><button class="btn btn-secondary" id="focus-camera-capture" type="button">Capture</button><button class="btn btn-secondary" id="focus-camera-settings" type="button">Settings</button><button class="btn btn-secondary" id="focus-camera-fullscreen" type="button">Full Screen</button></div>
                     <small id="focus-control-message" role="status"></small>
                 </aside>
             </div>
             <div id="live-wall-view" role="tabpanel" hidden><div id="live-camera-grid" class="live-grid"></div></div>
-            <div class="activity-band"><div class="activity-tabs" role="tablist" aria-label="Recent activity"><button class="btn btn-secondary" id="live-attendance-tab" type="button" role="tab" aria-selected="true">Attendance</button><button class="btn btn-secondary" id="live-alerts-tab" type="button" role="tab" aria-selected="false">Alerts</button></div><div id="live-activity-list" class="activity-list" aria-live="polite"></div></div>
+            <div class="activity-band" hidden><div class="activity-tabs" role="tablist" aria-label="Recent activity"><button class="btn btn-secondary" id="live-attendance-tab" type="button" role="tab" aria-selected="true">Attendance</button><button class="btn btn-secondary" id="live-alerts-tab" type="button" role="tab" aria-selected="false">Alerts</button></div><div id="live-activity-list" class="activity-list" aria-live="polite"></div></div>
         </div>
 
         <!-- Cameras Section -->
         <div id="cameras-section" class="main-content">
             <div class="section-header">
-                <h2 class="section-title">Camera Configuration</h2>
+                <h2 class="section-title">Camera Setup</h2>
                 <button class="btn btn-primary" id="add-camera-btn">Add Camera</button>
             </div>
 
@@ -752,7 +764,7 @@
                                 <input type="text" id="camera-name" class="form-control" required>
                             </div>
                         </div>
-                        <div class="form-col">
+                        <div class="form-col" hidden>
                             <div class="form-group">
                                 <label for="camera-id">Camera ID</label>
                                 <input type="text" id="camera-id" class="form-control" required>
@@ -763,19 +775,19 @@
                     <div class="form-group">
                         <label for="rtsp-url">Camera Source</label>
                         <input type="text" id="rtsp-url" class="form-control" placeholder="RTSP URL or webcam index, for example 0" required>
-                        <small>Use a Hikvision RTSP substream like rtsp://user:pass@ip:554/Streaming/Channels/102, 0/1 for OpenCV webcam, or dshow:USB Camera for Windows USB camera.</small>
                     </div>
 
                     <div class="form-group">
                         <label for="camera-role">Camera Role</label>
                         <select id="camera-role" class="form-control">
-                            <option value="ENTRANCE_EXIT">Entrance / Exit</option>
-                            <option value="GENERAL">General</option>
-                            <option value="SECURITY">Security</option>
-                            <option value="SHOPLIFTING">Shoplifting</option>
+                            <option value="ENTRANCE_EXIT">Attendance</option>
+                            <option value="SECURITY">Security / unknown persons</option>
+                            <option value="GENERAL">General monitoring</option>
+                            <option value="SHOPLIFTING">Object security</option>
                         </select>
                     </div>
 
+                    <details class="operator-advanced" id="camera-advanced"><summary>Advanced settings</summary>
                     <div class="form-row">
                         <div class="form-col">
                             <div class="form-group">
@@ -848,6 +860,7 @@
                         </div>
                     </div>
 
+                    </details>
                     <div class="form-group">
                         <button type="button" class="btn btn-secondary" id="test-connection-btn">
                             <span id="test-btn-text">TEST CONNECTION</span>
@@ -878,8 +891,8 @@
         <!-- Personnel Section -->
         <div id="personnel-section" class="main-content">
             <div class="section-header">
-                <h2 class="section-title">Personnel Management</h2>
-                <button class="btn btn-primary" id="add-person-btn">Add Person</button>
+                <h2 class="section-title">Manage People</h2>
+                <div class="live-toolbar-actions"><button class="btn btn-secondary" id="people-back" type="button">Back to overview</button><button class="btn btn-primary" id="add-person-btn">Add person</button></div>
             </div>
 
             <div id="person-form-panel" style="display: none;">
