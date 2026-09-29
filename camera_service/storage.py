@@ -29,7 +29,7 @@ class SQLiteStore:
             CREATE TABLE IF NOT EXISTS attendance_sessions(id TEXT PRIMARY KEY, person_id TEXT NOT NULL, store_id TEXT NOT NULL, arrival_time TEXT NOT NULL, exit_time TEXT, arrival_camera TEXT, exit_camera TEXT, arrival_confidence REAL, exit_confidence REAL, arrival_snapshot TEXT, exit_snapshot TEXT, status TEXT NOT NULL, FOREIGN KEY(person_id) REFERENCES personnel(id));
             CREATE INDEX IF NOT EXISTS idx_attendance_person_status ON attendance_sessions(person_id,store_id,status);
             CREATE TABLE IF NOT EXISTS person_events(id TEXT PRIMARY KEY, person_id TEXT, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, metadata_json TEXT);
-            CREATE TABLE IF NOT EXISTS edge_event_queue(id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at TEXT NOT NULL, synced_at TEXT);
+            CREATE TABLE IF NOT EXISTS edge_event_queue(id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at TEXT NOT NULL, next_attempt_at TEXT, claimed_at TEXT, synced_at TEXT);
             CREATE INDEX IF NOT EXISTS idx_edge_event_queue_status ON edge_event_queue(status,created_at);
             CREATE TABLE IF NOT EXISTS unknown_incidents(id TEXT PRIMARY KEY, store_id TEXT NOT NULL, camera_id TEXT NOT NULL, track_id TEXT NOT NULL, first_seen TEXT NOT NULL, confirmed_unknown_at TEXT NOT NULL, last_seen TEXT NOT NULL, recognition_attempts INTEGER NOT NULL, best_similarity REAL, best_face_snapshot TEXT, best_person_snapshot TEXT, clip_path TEXT, status TEXT NOT NULL DEFAULT 'OPEN', acknowledged_at TEXT);
             CREATE INDEX IF NOT EXISTS idx_unknown_active ON unknown_incidents(store_id,camera_id,track_id,status);
@@ -42,6 +42,8 @@ class SQLiteStore:
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','entry_confirmed','INTEGER NOT NULL DEFAULT 0')
+            self._ensure_column(c,'edge_event_queue','next_attempt_at','TEXT')
+            self._ensure_column(c,'edge_event_queue','claimed_at','TEXT')
     def _ensure_column(self,conn,table,column,definition):
         existing={row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in existing:
@@ -49,8 +51,51 @@ class SQLiteStore:
     @staticmethod
     def now(): return datetime.now(timezone.utc).isoformat()
     def _enqueue_edge_event(self,conn,event_id,event_type,payload):
-        payload={**payload,'schema_version':'local.event.v1'}
-        conn.execute("INSERT OR REPLACE INTO edge_event_queue(id,event_type,payload_json,status,attempts,last_error,created_at,synced_at) VALUES(?,?,?,'PENDING',0,NULL,?,NULL)",(event_id,event_type,json.dumps(payload),self.now()))
+        payload=self._scope_event_payload({**payload,'schema_version':'local.event.v1'})
+        conn.execute("INSERT OR IGNORE INTO edge_event_queue(id,event_type,payload_json,status,attempts,last_error,created_at,next_attempt_at,claimed_at,synced_at) VALUES(?,?,?,'PENDING',0,NULL,?,NULL,NULL,NULL)",(event_id,event_type,json.dumps(payload),self.now()))
+    def configure_event_scope(self, tenant_id, company_code, shop_id, edge_id):
+        self._event_scope={'tenant_id':str(tenant_id),'company_code':str(company_code) if company_code is not None else None,'shop_id':str(shop_id),'edge_id':str(edge_id)}
+
+    def _scope_event_payload(self,payload):
+        scope=getattr(self,'_event_scope',None)
+        if not scope:
+            return payload
+        camera_id=payload.get('camera_id')
+        return {**payload,'scope':{**scope,'camera_id':str(camera_id or 'system')}}
+
+    def apply_cloud_personnel(self, items):
+        """Idempotently mirror the shop-scoped cloud roster into local recognition tables."""
+        now=self.now(); seen=set()
+        with self._lock,self._conn() as c:
+            for item in items:
+                pid=str(item["person_id"]); seen.add(pid)
+                legacy=c.execute("SELECT id FROM personnel WHERE employee_code=? AND id<>?",(str(item["employee_code"]),pid)).fetchone()
+                if legacy:
+                    old_id=str(legacy["id"])
+                    c.execute("UPDATE face_profiles SET person_id=? WHERE person_id=?",(pid,old_id))
+                    c.execute("UPDATE attendance_sessions SET person_id=? WHERE person_id=?",(pid,old_id))
+                    c.execute("UPDATE person_events SET person_id=? WHERE person_id=?",(pid,old_id))
+                    c.execute("DELETE FROM personnel WHERE id=?",(old_id,))
+                c.execute("""INSERT INTO personnel(id,employee_code,full_name,role,phone,email,active,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee_code=excluded.employee_code,
+                    full_name=excluded.full_name,role=excluded.role,phone=excluded.phone,email=excluded.email,
+                    active=excluded.active,updated_at=excluded.updated_at""",
+                    (pid,str(item["employee_code"]),str(item["full_name"]),str(item["role"]),item.get("phone"),item.get("email"),
+                     1 if item.get("active",True) else 0,now,now))
+                cloud_face_ids=set()
+                for face in item.get("faces") or []:
+                    fid=str(face["face_id"]); cloud_face_ids.add(fid)
+                    c.execute("""INSERT INTO face_profiles(id,person_id,embedding_json,quality,created_at,image_path)
+                        VALUES(?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET person_id=excluded.person_id,
+                        embedding_json=excluded.embedding_json,quality=excluded.quality""",
+                        (fid,pid,json.dumps(face["embedding"]),float(face.get("quality") or 0),now))
+                # Once a person is cloud-managed, the cloud face set is authoritative.
+                existing=c.execute("SELECT id FROM face_profiles WHERE person_id=?",(pid,)).fetchall()
+                for row in existing:
+                    if row["id"] not in cloud_face_ids:
+                        c.execute("DELETE FROM face_profiles WHERE id=?",(row["id"],))
+        return {"applied":len(seen)}
+
     def create_person(self, d):
         pid=str(uuid.uuid4()); now=self.now()
         with self._lock,self._conn() as c: c.execute("INSERT INTO personnel VALUES(?,?,?,?,?,?,?,?,?)",(pid,d.employee_code,d.full_name,d.role.value,d.phone,d.email,1,now,now))
@@ -179,15 +224,18 @@ class SQLiteStore:
         with self._conn() as c:
             r=c.execute("SELECT * FROM object_security_events WHERE id=?",(eid,)).fetchone(); return dict(r) if r else None
     def queued_events(self,limit=50):
+        now=self.now()
         with self._conn() as c:
-            rows=c.execute("SELECT * FROM edge_event_queue WHERE status='PENDING' ORDER BY created_at LIMIT ?",(limit,)).fetchall()
+            rows=c.execute("SELECT * FROM edge_event_queue WHERE status='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=?) ORDER BY created_at LIMIT ?",(now,limit)).fetchall()
             return [dict(r) for r in rows]
     def mark_event_synced(self,event_id):
         with self._lock,self._conn() as c:
             c.execute("UPDATE edge_event_queue SET status='SYNCED',synced_at=?,last_error=NULL WHERE id=?",(self.now(),event_id))
-    def mark_event_failed(self,event_id,error):
+    def mark_event_failed(self,event_id,error,retry_after_seconds=0):
+        from datetime import timedelta
+        next_attempt=(datetime.now(timezone.utc)+timedelta(seconds=max(0,float(retry_after_seconds)))).isoformat()
         with self._lock,self._conn() as c:
-            c.execute("UPDATE edge_event_queue SET attempts=attempts+1,last_error=? WHERE id=?",(str(error)[:1000],event_id))
+            c.execute("UPDATE edge_event_queue SET attempts=attempts+1,last_error=?,next_attempt_at=? WHERE id=?",(str(error)[:1000],next_attempt,event_id))
     def event_queue_status(self):
         with self._conn() as c:
             rows=c.execute("SELECT status,COUNT(*) AS count FROM edge_event_queue GROUP BY status").fetchall()
