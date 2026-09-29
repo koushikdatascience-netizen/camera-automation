@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+from pathlib import Path
 
 
 class CentroidTracker:
@@ -34,6 +35,8 @@ class UltralyticsByteTracker:
         self.conf=float(conf)
         self.imgsz=int(imgsz) if imgsz else None
         self.device=device
+        suffix=Path(self.model_path).suffix.lower()
+        self.runtime=("OPENVINO" if Path(self.model_path).is_dir() or suffix==".xml" else "ONNX" if suffix==".onnx" else "PYTORCH")
 
     def track_frame(self,frame):
         kwargs={
@@ -44,7 +47,9 @@ class UltralyticsByteTracker:
             'verbose':False,
         }
         if self.imgsz: kwargs['imgsz']=self.imgsz
-        if self.device is not None: kwargs['device']=self.device
+        # Ultralytics exported CPU artifacts select their own execution provider.
+        # Passing torch device strings to ONNX/OpenVINO can be invalid.
+        if self.device is not None and self.runtime=="PYTORCH": kwargs['device']=self.device
         results=self.model.track(frame,**kwargs)
         out=[]
         if not results: return out
