@@ -35,7 +35,10 @@ async function json(url, body, headers={}) {
     await json('http://127.0.0.1:8099/api/v1/cameras',{camera_id:'video-1',name:'Video Test',source_type:'file',rtsp_url:path.join(root,'test.mp4'),tracking_mode:'track',features:{}});
     await json('http://127.0.0.1:8099/api/v1/cameras',{camera_id:'offline',name:'Offline Camera',rtsp_url:'0',enabled:false,features:{}});
     const session=await json('http://127.0.0.1:8100/crm/session',{tenantId:'test-tenant',shopCode:'test-shop',userId:'test-owner',role:'OWNER'}, {'X-CRM-Integration-Key':'isolated-browser-test-key'});
-    browser=await chromium.launch({headless:true});
+    browser=await chromium.launch({
+      headless: true,
+      executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+    });
     const page=await browser.newPage({viewport:{width:1440,height:1000}});
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto('http://127.0.0.1:8099/setup');
