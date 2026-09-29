@@ -5,7 +5,7 @@
 Use Python 3.11 repository virtual environment and Inno Setup 6. Build is manual; the release work does not run a long installer build automatically.
 
 Required source assets: `yolo26n.pt`, `yolo11m.pt`, `kaggle-model/scissors_yolo11m_960.pt`, brand assets, web assets and config.example.yaml. Offline face models `det_10g.onnx` and `w600k_r50.onnx` must exist in the build user's `.insightface/models/buffalo_l`. The spec fails if required face/scissors files are absent. Optional `yolo26n.onnx` and `yolo26n_openvino_model` are included when present. Models and generated build output are not committed by this release.
-The current checkout is missing the exact retrained scissors file. Restore that file from the original training artifact before running the build; `jewellery_tag_best.pt` has only a `jewellery_tag` class and is not a scissors model.
+The retrained scissors file has been placed at the required path on the build machine and class-checked as `scissors`. Keep this file in place for every build; `jewellery_tag_best.pt` has only a `jewellery_tag` class and is not a substitute. Models remain local build assets, not Git-tracked source.
 
 ```powershell
 cd "D:\Madhushala Software\Camera ai\camera-automation"

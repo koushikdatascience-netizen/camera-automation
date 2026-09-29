@@ -66,7 +66,7 @@
     </header>
 
 
-    <section class="content">
+    <section class="content overview-content">
 
       <div class="page-title">
         <h1>Camera Eye Overview</h1>
@@ -85,11 +85,11 @@
 
           <div class="status-value" id="application-status">
             <span class="status-dot"></span>
-            Online
+            Checking
           </div>
 
           <div class="status-description">
-            All services operational
+            Portal connection status
           </div>
 
         </div>
@@ -104,11 +104,11 @@
 
           <div class="status-value" id="database-status">
             <span class="status-dot"></span>
-            Connected
+            Checking
           </div>
 
           <div class="status-description">
-            Database connection healthy
+            Portal database status
           </div>
 
         </div>
@@ -140,7 +140,7 @@
           <div class="status-value" id="online-cameras">—</div>
 
           <div class="status-description">
-            No cameras currently online
+            Reporting from connected edge devices
           </div>
 
         </div>
@@ -156,7 +156,7 @@
           <div class="status-value" id="active-personnel">—</div>
 
           <div class="status-description">
-            No personnel currently active
+            Currently present at this shop
           </div>
 
         </div>
@@ -181,16 +181,14 @@
 
 
       
-      <div class="overview-split">
-        <section class="camera-panel">
-          <div class="panel-heading"><div><h2>Camera Health</h2><p>Current cameras for this shop.</p></div><a class="btn btn-light" href="/portal/live.html">Open Live Cameras</a></div>
-          <div id="overview-camera-list" class="overview-camera-list"><p>Loading cameras…</p></div>
-        </section>
-        <section class="camera-panel">
-          <div class="panel-heading"><div><h2>Recent Activity</h2><p>Latest Camera Eye events.</p></div></div>
-          <div id="overview-activity-list" class="overview-activity-list"><p>Loading activity…</p></div>
-        </section>
-      </div>
+      <section class="overview-workspace">
+        <div class="panel-heading"><div><h2>Shop Cameras</h2></div><a class="btn btn-light" href="/portal/cameras.html">Camera Setup</a></div>
+        <div id="overview-camera-list" class="overview-camera-list"><p>Loading cameras…</p></div>
+      </section>
+      <section class="overview-workspace overview-activity">
+        <div class="overview-tabs" role="tablist" aria-label="Shop activity"><button class="btn btn-light" id="overview-attendance-tab" type="button" role="tab" aria-selected="true">Attendance</button><button class="btn btn-light" id="overview-alerts-tab" type="button" role="tab" aria-selected="false">Alerts</button></div>
+        <div id="overview-activity-list" class="overview-activity-list"><p>Loading activity…</p></div>
+      </section>
 
       <div class="camera-panel" style="margin-bottom:24px">
         <div class="panel-heading" style="display:flex;justify-content:space-between;gap:16px;align-items:center">
@@ -210,19 +208,6 @@
         <div id="edge-device-list"><p>Loading edge devices...</p></div>
       </div>
 
-
-      <div class="health-banner">
-
-        <div>
-          <h2>Intelligent Monitoring. Safer Spaces.</h2>
-          <p>SnapKey Eye is actively monitoring your environment.</p>
-        </div>
-
-        <div class="health-badge">
-          ● System Healthy
-        </div>
-
-      </div>
 
     </section>
 

@@ -2,11 +2,11 @@
 
 Branch: `feat/camera-eye-live-view-ux`. PR: https://github.com/koushikdatascience-netizen/camera-automation/pull/2
 
-## Current Decision: BLOCKED Pending Installer And Site Validation
+## Current Decision: BLOCKED Pending Fresh Installer And Site Validation
 
 Source validation is not installer validation. Do not ship an old installer as this release.
 No production deployment or merge is authorized by this checklist.
-The current checkout does not contain `kaggle-model/scissors_yolo11m_960.pt`, which the spec now correctly requires. A different `jewellery_tag_best.pt` exists and its only trained class is `jewellery_tag`, not scissors. The exact retrained scissors model must be placed at the required path before building.
+The build machine now contains `kaggle-model/scissors_yolo11m_960.pt`; loading it confirmed the `scissors` class. The installer built before the latest operator UI changes is stale and must be rebuilt and installed for the pilot. A different `jewellery_tag_best.pt` exists and its only trained class is `jewellery_tag`, not scissors.
 
 ## Audit And Fixes
 

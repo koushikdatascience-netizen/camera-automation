@@ -158,23 +158,49 @@
     });
   }
 
+  let overviewActivityMode="attendance";
+  let overviewActivityData={attendance:[],alerts:[]};
+  function renderOverviewActivity(){
+    const list=document.getElementById("overview-activity-list");if(!list)return;
+    const items=overviewActivityData[overviewActivityMode]||[];
+    list.innerHTML=items.length?items.slice(0,8).map(item=>{
+      const label=overviewActivityMode==="attendance"?(item.full_name||"Unknown person")+" · "+String(item.event_type||"Event").replaceAll("_"," "):
+        String(item.event_type||"Alert").replaceAll("_"," ");
+      const detail=overviewActivityMode==="attendance"?(item.employee_code||item.camera_id||"-"):(item.camera_id||"Camera");
+      return "<div class='overview-activity-row'><div><strong>"+escapeHtml(label)+"</strong><small>"+escapeHtml(detail)+"</small></div><small>"+escapeHtml(fmtTime(item.event_time))+"</small></div>";
+    }).join(""):"<p>No "+(overviewActivityMode==="attendance"?"attendance records":"alerts")+" received from this shop yet.</p>";
+  }
+  function wireOverviewActivity(){
+    if(!document.getElementById("overview-activity-list"))return;
+    for(const [id,mode] of [["overview-attendance-tab","attendance"],["overview-alerts-tab","alerts"]]){
+      document.getElementById(id).addEventListener("click",()=>{
+        overviewActivityMode=mode;
+        document.getElementById("overview-attendance-tab").setAttribute("aria-selected",String(mode==="attendance"));
+        document.getElementById("overview-alerts-tab").setAttribute("aria-selected",String(mode==="alerts"));
+        renderOverviewActivity();
+      });
+    }
+    loadSystemStatus();setInterval(loadSystemStatus,15000);
+  }
   async function loadSystemStatus() {
     if (!document.getElementById("configured-cameras")) return;
     try {
       const scope = requireScope(["tenant_id"]);
-      const [healthResponse, summaryResponse, cameraResponse, unknownResponse, edgeResponse] = await Promise.all([
+      const [healthResponse, summaryResponse, cameraResponse, eventsResponse, edgeResponse, attendanceResponse] = await Promise.all([
         fetch("/health"),
         authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/summary"),
         authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras"),
-        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/events?event_type=UNKNOWN_PERSON&limit=500"),
-        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/edges")
+        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/events?limit=500"),
+        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/edges"),
+        authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/attendance")
       ]);
-      if (!healthResponse.ok || !summaryResponse.ok || !cameraResponse.ok || !unknownResponse.ok || !edgeResponse.ok) throw new Error("Portal API is unavailable or this session is not authorized.");
+      if (!healthResponse.ok || !summaryResponse.ok || !cameraResponse.ok || !eventsResponse.ok || !edgeResponse.ok || !attendanceResponse.ok) throw new Error("Portal API is unavailable or this session is not authorized.");
       const health = await healthResponse.json();
       await summaryResponse.json();
       const cameras = await cameraResponse.json();
-      const unknown = await unknownResponse.json();
+      const events = await eventsResponse.json();
       const edgesBody = await edgeResponse.json();
+      const attendance = await attendanceResponse.json();
       const edges=edgesBody.items||[];
       renderEdges(edges);
       const inventory=edges.flatMap(edge=>(edge.status?.cameras||[]).map(camera=>({...camera,edge_id:edge.edge_id})));
@@ -184,25 +210,23 @@
       setText("database-status", "● Connected");
       setText("configured-cameras", (cameras.items || []).length + uniqueInventory.length);
       setText("online-cameras", inventory.filter(camera=>camera.online).length);
+      setText("active-personnel", (attendance.presence || []).length);
       const overviewCameras=document.getElementById("overview-camera-list");
       if(overviewCameras){
-        const configured=cameras.items||[];
-        overviewCameras.innerHTML=configured.length?configured.slice(0,6).map(camera=>{
-          const runtime=inventory.find(x=>x.camera_id===camera.camera_id); const online=!!runtime?.online;
-          return "<div class='overview-camera-row'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><small>"+escapeHtml(camera.camera_role||"GENERAL")+" · "+escapeHtml(camera.camera_zone||"Shop")+"</small></div><span class='overview-state "+(online?"camera-state-online":"camera-state-offline")+"'>● "+(online?"Online":"Offline")+"</span></div>";
-        }).join(""):"<p>No cameras configured yet.</p>";
+        const configured=[...(cameras.items||[]),...uniqueInventory];
+        overviewCameras.innerHTML=configured.length?configured.map(camera=>{
+          const runtime=inventory.find(x=>x.camera_id===camera.camera_id && (!camera.edge_id || x.edge_id===camera.edge_id)); const online=!!runtime?.online;
+          return "<a class='overview-camera-row' href='/portal/live.html'><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><small>"+escapeHtml(camera.camera_role||"GENERAL")+" · "+escapeHtml(camera.camera_zone||"Shop")+"</small><span class='overview-state "+(online?"camera-state-online":"camera-state-offline")+"'>● "+(online?"Online":"Offline")+"</span></a>";
+        }).join(""):"<p>No cameras configured for this shop yet.</p>";
       }
-      const overviewActivity=document.getElementById("overview-activity-list");
-      if(overviewActivity){
-        const recent=(unknown.items||[]).slice(0,6);
-        overviewActivity.innerHTML=recent.length?recent.map(item=>"<div class='overview-activity-row'><div><strong>Unknown person</strong><small>"+escapeHtml(item.camera_id||"Camera")+" · "+fmtTime(item.event_time||item.detected_at)+"</small></div><span class='event-badge'>Alert</span></div>").join(""):"<p>No recent alerts. Camera Eye is monitoring normally.</p>";
-      }
+      overviewActivityData={attendance:attendance.events||[],alerts:(events.items||[]).filter(item=>/ALERT|UNKNOWN|INCIDENT|SHOPLIFTING/.test(item.event_type||""))};
+      renderOverviewActivity();
       const today = new Date().toISOString().slice(0, 10);
-      const todayUnknown = (unknown.items || []).filter(item => String(item.event_time || "").slice(0, 10) === today).length;
+      const todayUnknown = (events.items || []).filter(item => /UNKNOWN|INCIDENT/.test(item.event_type||"") && String(item.event_time || "").slice(0, 10) === today).length;
       setText("unknown-incidents", todayUnknown);
     } catch (error) {
-      setText("application-status", "● Setup Required");
-      setText("database-status", "Connected");
+      setText("application-status", "● Unavailable");
+      setText("database-status", "Unavailable");
       renderEdges([]);
       showMessage(error.message, true);
     }
@@ -663,5 +687,5 @@
     if(nav.querySelector('a[href="/portal/alerts.html"]'))return;
     const link=document.createElement('a');link.className='nav-item';link.href='/portal/alerts.html';link.textContent='Alerts';nav.appendChild(link);
   });
-  bootstrapCrmSession().then(()=>{loadSystemStatus();wireEdgeSetup();wireCameraPage();wireCloudLivePage();wirePersonnelPage();wireAttendancePage();wireAlertsPage();}).catch(error=>showMessage(error.message,true));
+  bootstrapCrmSession().then(()=>{wireOverviewActivity();wireEdgeSetup();wireCameraPage();wireCloudLivePage();wirePersonnelPage();wireAttendancePage();wireAlertsPage();}).catch(error=>showMessage(error.message,true));
 })();

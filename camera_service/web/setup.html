@@ -10,9 +10,9 @@
             --muted: #686d74;
             --line: #e5e2d9;
             --surface: #ffffff;
-            --soft: #faf7ee;
-            --cream: #faf7ee;
-            --cream-alt: #fffbef;
+            --soft: #f2f5f3;
+            --cream: #f5f7f5;
+            --cream-alt: #f9fbf9;
             --brand: #ffcc32;
             --brand-dark: #161a1d;
             --brand-soft: #fff3bb;
@@ -175,6 +175,7 @@
         .btn:hover {
             transform: translateY(-1px);
         }
+        .btn:disabled { opacity:.45; cursor:not-allowed; transform:none; box-shadow:none; }
 
         .btn-primary {
             background: var(--brand);
@@ -531,15 +532,15 @@
         .live-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
         .live-grid.single { grid-template-columns:1fr; }
         .live-grid.dense { grid-template-columns:repeat(3,minmax(0,1fr)); }
-        .live-tile { position:relative; overflow:hidden; min-height:250px; border:1px solid var(--line); border-radius:12px; background:#111827; box-shadow:0 8px 24px rgba(15,23,42,.10); }
+        .live-tile { position:relative; overflow:hidden; min-height:250px; border:1px solid var(--line); border-radius:8px; background:#111827; box-shadow:0 8px 24px rgba(15,23,42,.10); }
         .live-tile img { display:block; width:100%; aspect-ratio:16/9; object-fit:contain; background:#0b0f14; }
-        .live-tile-head { position:absolute; inset:0 0 auto 0; z-index:2; display:flex; justify-content:space-between; gap:8px; padding:12px; color:white; background:linear-gradient(180deg,rgba(0,0,0,.72),transparent); pointer-events:none; }
+        .live-tile-head { display:flex; justify-content:space-between; gap:8px; padding:10px 12px; color:white; background:#101519; }
         .live-tile-head strong { font-size:13px; }
         .live-status { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:750; }
         .live-status.online { color:#86efac; } .live-status.offline { color:#fca5a5; }
         .live-tile-foot { display:flex; justify-content:space-between; gap:8px; align-items:center; padding:10px 12px; background:#fff; }
         .live-tile-foot small { margin:0; }
-        .camera-card { border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:12px; background:#fff; box-shadow:0 5px 16px rgba(22,26,29,.04); }
+        .camera-card { border:1px solid var(--line); border-radius:6px; padding:16px; margin-bottom:8px; background:#fff; display:flex; justify-content:space-between; align-items:center; gap:16px; }
         .camera-card .camera-info h3 { margin:0 0 5px; }
         .camera-card .camera-actions { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
         .camera-card .danger-menu { opacity:.86; }
@@ -548,6 +549,42 @@
         .feature-pill { background:var(--cream-alt); border:1px solid var(--line); border-radius:999px; padding:4px 8px; font-size:10px; font-weight:700; }
         .camera-wall-empty { padding:44px 20px; text-align:center; border:1px dashed var(--line); border-radius:12px; color:var(--muted); background:var(--cream-alt); }
         @media (max-width:900px){ .live-grid,.live-grid.dense{grid-template-columns:1fr}.live-tile{min-height:180px}.edge-overview-grid{grid-template-columns:1fr !important} }
+        #live-section { box-shadow:none; border:0; background:transparent; padding:0; }
+        #cameras-section { box-shadow:none; border:0; background:transparent; padding:0; }
+        .workspace-tabs { display:flex; gap:6px; align-items:center; }
+        .workspace-tabs button[aria-selected="true"], .activity-tabs button[aria-selected="true"] { background:var(--brand); color:var(--brand-dark); border-color:var(--brand); }
+        .focus-workspace { display:grid; grid-template-columns:minmax(170px,210px) minmax(0,1fr) minmax(240px,280px); gap:14px; align-items:start; }
+        .camera-rail, .focus-detail, .activity-band { background:var(--surface); border:1px solid var(--line); border-radius:8px; }
+        .camera-rail { padding:12px; display:grid; gap:6px; }
+        .camera-rail h3, .focus-detail h3 { margin:0 0 8px; font-size:13px; }
+        .camera-rail button { width:100%; min-height:58px; text-align:left; background:transparent; border:1px solid transparent; border-radius:6px; padding:8px 10px; cursor:pointer; color:var(--ink); }
+        .camera-rail button[aria-current="true"] { border-color:#e3b526; background:#fff5ca; }
+        .camera-rail button strong, .camera-rail button small { display:block; margin:0; overflow-wrap:anywhere; }
+        .camera-rail button small { font-weight:500; }
+        .focus-stage { background:#101519; border-radius:8px; overflow:hidden; min-width:0; }
+        .focus-stage img, .focus-placeholder { width:100%; aspect-ratio:16/9; object-fit:contain; display:block; background:#101519; }
+        .focus-placeholder { display:grid; place-items:center; color:#d1d5db; text-align:center; padding:20px; }
+        .focus-stage-bar { padding:10px 12px; color:#f9fafb; display:flex; justify-content:space-between; gap:10px; align-items:center; }
+        .focus-stage-bar strong { font-size:13px; overflow-wrap:anywhere; }
+        .focus-detail { padding:14px; min-height:260px; }
+        .focus-detail dl { display:grid; grid-template-columns:1fr auto; gap:8px; font-size:12px; margin:0 0 14px; }
+        .focus-detail dt { color:var(--muted); }.focus-detail dd { margin:0; text-align:right; font-weight:700; overflow-wrap:anywhere; }
+        .recognized-person { display:flex; gap:10px; align-items:center; border-top:1px solid var(--line); padding:12px 0; margin-top:4px; min-height:60px; }
+        .recognized-person img { width:44px; height:44px; border-radius:6px; object-fit:cover; background:var(--soft); }
+        .recognized-person strong { display:block; font-size:12px; }.recognized-person small { margin:0; }
+        .focus-detail .camera-actions { display:flex; flex-wrap:wrap; gap:7px; }
+        .focus-detail .camera-actions .btn { flex:1 1 46%; }
+        .focus-detail .camera-actions .btn:disabled { opacity:.45; cursor:not-allowed; }
+        .activity-band { margin-top:14px; padding:14px; min-height:170px; }
+        .activity-tabs { display:flex; gap:7px; border-bottom:1px solid var(--line); padding-bottom:10px; }
+        .activity-list { display:grid; gap:0; max-height:260px; overflow-y:auto; }
+        .activity-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:11px 2px; border-bottom:1px solid var(--line); font-size:12px; }
+        .activity-row strong { display:block; overflow-wrap:anywhere; }.activity-row small { margin:0; }.activity-row time { white-space:nowrap; color:var(--muted); }
+        .activity-empty { padding:24px 0; color:var(--muted); font-size:13px; }
+        #live-wall-view[hidden], #live-focus-view[hidden], .focus-stage img[hidden], .focus-placeholder[hidden] { display:none; }
+        #live-layout-controls[hidden], .recognized-person img[hidden] { display:none; }
+        @media (max-width:1050px) { .focus-workspace { grid-template-columns:160px minmax(0,1fr); }.focus-detail { grid-column:1 / -1; min-height:0; } }
+        @media (max-width:650px) { .focus-workspace { grid-template-columns:1fr; }.camera-rail { display:block; }.camera-rail h3 { display:none; }#focus-camera-list { display:flex; gap:6px; overflow-x:auto; }.camera-rail button { min-width:145px; }.focus-detail { grid-column:auto; }.live-toolbar { align-items:flex-start; } }
     </style>
 </head>
 <body>
@@ -561,9 +598,9 @@
                 </div>
             </div>
             <nav>
-                <a href="#" class="active" data-section="system">System Status</a>
-                <a href="#" data-section="live">Live Cameras</a>
+                <a href="#" class="active" data-section="live">Live Cameras</a>
                 <a href="#" data-section="cameras">Camera Setup</a>
+                <a href="#" data-section="system">System Status</a>
                 <a href="#" data-section="personnel">Personnel</a>
                 <a href="#" data-section="attendance">Attendance</a>
                 <a href="#" data-section="objectSecurity">Object Security Test</a>
@@ -577,7 +614,7 @@
         <div id="unknown-alert-banner" class="alert-banner"></div>
 
         <!-- System Status Section -->
-        <div id="system-section" class="main-content active">
+        <div id="system-section" class="main-content">
             <div class="section-header">
                 <h2 class="section-title">System Status</h2>
             </div>
@@ -656,11 +693,10 @@
 
 
         <!-- Live Cameras Section -->
-        <div id="live-section" class="main-content">
+        <div id="live-section" class="main-content active">
             <div class="section-header">
                 <div>
                     <h2 class="section-title">Live Cameras</h2>
-                    <small>Monitor every active camera from one screen. AI overlay uses the tracking stream.</small>
                 </div>
                 <div class="live-toolbar-actions">
                     <button class="btn btn-secondary" id="live-refresh-btn" type="button">Refresh</button>
@@ -668,14 +704,35 @@
                 </div>
             </div>
             <div class="live-toolbar">
-                <div><strong id="live-camera-summary">Loading cameras...</strong><small>Click Full Screen on any camera for a focused view.</small></div>
-                <div class="live-toolbar-actions">
+                <div><strong id="live-camera-summary">Loading cameras...</strong></div>
+                <div class="workspace-tabs" role="tablist" aria-label="Camera view">
+                    <button class="btn btn-secondary" id="live-focus-tab" type="button" role="tab" aria-selected="true">Focus</button>
+                    <button class="btn btn-secondary" id="live-wall-tab" type="button" role="tab" aria-selected="false">Wall</button>
+                </div>
+                <div class="live-toolbar-actions" id="live-layout-controls" hidden>
                     <button class="btn btn-secondary live-layout-btn" data-layout="single" type="button">1</button>
                     <button class="btn btn-secondary live-layout-btn" data-layout="grid" type="button">4</button>
                     <button class="btn btn-secondary live-layout-btn" data-layout="dense" type="button">9</button>
                 </div>
             </div>
-            <div id="live-camera-grid" class="live-grid"></div>
+            <div id="live-focus-view" class="focus-workspace" role="tabpanel">
+                <aside class="camera-rail"><h3>Cameras</h3><div id="focus-camera-list"></div></aside>
+                <div class="focus-stage">
+                    <div class="focus-stage-bar"><strong id="focus-camera-name">Select a camera</strong><span id="focus-camera-status" class="live-status offline">OFFLINE</span></div>
+                    <img id="focus-camera-image" alt="Selected live camera" hidden>
+                    <div id="focus-camera-placeholder" class="focus-placeholder">Select an online camera</div>
+                </div>
+                <aside class="focus-detail">
+                    <h3>Camera details</h3>
+                    <dl><dt>Role</dt><dd id="focus-camera-role">-</dd><dt>Zone</dt><dd id="focus-camera-zone">-</dd><dt>Monitoring</dt><dd id="focus-camera-monitoring">-</dd><dt>Features</dt><dd id="focus-camera-features">-</dd></dl>
+                    <h3>Latest recognized</h3>
+                    <div class="recognized-person"><img id="focus-person-photo" alt="Enrolled person photo" hidden><div><strong id="focus-person-name">No recognition yet</strong><small id="focus-person-time"></small></div></div>
+                    <div class="camera-actions"><button class="btn btn-success" id="focus-camera-start" type="button">Start</button><button class="btn btn-secondary" id="focus-camera-stop" type="button">Stop</button><button class="btn btn-secondary" id="focus-camera-capture" type="button">Capture</button><button class="btn btn-secondary" id="focus-camera-settings" type="button">Settings</button><button class="btn btn-secondary" id="focus-camera-fullscreen" type="button">Full Screen</button></div>
+                    <small id="focus-control-message" role="status"></small>
+                </aside>
+            </div>
+            <div id="live-wall-view" role="tabpanel" hidden><div id="live-camera-grid" class="live-grid"></div></div>
+            <div class="activity-band"><div class="activity-tabs" role="tablist" aria-label="Recent activity"><button class="btn btn-secondary" id="live-attendance-tab" type="button" role="tab" aria-selected="true">Attendance</button><button class="btn btn-secondary" id="live-alerts-tab" type="button" role="tab" aria-selected="false">Alerts</button></div><div id="live-activity-list" class="activity-list" aria-live="polite"></div></div>
         </div>
 
         <!-- Cameras Section -->
@@ -1230,8 +1287,11 @@
         function loadSectionData(sectionId) {
             if (sectionId !== 'live') {
                 document.querySelectorAll('#live-camera-grid img').forEach(img => img.removeAttribute('src'));
+                document.getElementById('focus-camera-image').removeAttribute('src');
                 clearInterval(liveRefreshTimer);
                 liveRefreshTimer = null;
+                clearInterval(liveActivityTimer);
+                liveActivityTimer = null;
             }
             switch(sectionId) {
                 case 'system':
@@ -1378,42 +1438,163 @@
 
         let liveAiOverlay = true;
         let liveRefreshTimer = null;
+        let liveActivityTimer = null;
+        let liveView = 'focus';
+        let liveActivity = 'attendance';
+        let selectedLiveCameraId = null;
+        let liveCameras = [];
+        let recognizedCameraId = null;
         function liveStreamUrl(cameraId) {
             const endpoint = liveAiOverlay ? 'tracking-stream' : 'stream';
             return `${API_BASE}/cameras/${encodeURIComponent(cameraId)}/${endpoint}`;
         }
-        async function loadLiveCameras() {
+        function renderFocusedCamera() {
+            const camera = liveCameras.find(item => item.camera_id === selectedLiveCameraId);
+            const online = !!camera?.status?.online;
+            const image = document.getElementById('focus-camera-image');
+            const placeholder = document.getElementById('focus-camera-placeholder');
+            document.getElementById('focus-camera-name').textContent = camera?.name || 'Select a camera';
+            const status = document.getElementById('focus-camera-status');
+            status.textContent = online ? 'LIVE' : 'OFFLINE';
+            status.className = `live-status ${online ? 'online' : 'offline'}`;
+            document.getElementById('focus-camera-role').textContent = camera?.camera_role || '-';
+            document.getElementById('focus-camera-zone').textContent = camera?.camera_zone || '-';
+            document.getElementById('focus-camera-monitoring').textContent = camera ? (camera.enabled === false ? 'Stopped' : 'Enabled') : '-';
+            const features = Object.entries(camera?.features || {}).filter(([, enabled]) => enabled).map(([name]) => name.replaceAll('_', ' '));
+            document.getElementById('focus-camera-features').textContent = features.length ? features.join(', ') : '-';
+            document.getElementById('focus-camera-settings').disabled = !camera;
+            document.getElementById('focus-camera-fullscreen').disabled = !online;
+            document.getElementById('focus-camera-capture').disabled = !online;
+            document.getElementById('focus-camera-start').disabled = !camera || camera.enabled !== false;
+            document.getElementById('focus-camera-stop').disabled = !camera || camera.enabled === false;
+            if (recognizedCameraId !== selectedLiveCameraId) {
+                recognizedCameraId = selectedLiveCameraId;
+                document.getElementById('focus-person-name').textContent = 'No recognition yet';
+                document.getElementById('focus-person-time').textContent = '';
+                document.getElementById('focus-person-photo').hidden = true;
+                document.getElementById('focus-person-photo').removeAttribute('src');
+                document.getElementById('focus-control-message').textContent = '';
+            }
+            image.hidden = !online || liveView !== 'focus';
+            placeholder.hidden = online && liveView === 'focus';
+            if (!online || liveView !== 'focus') {
+                image.removeAttribute('src');
+                placeholder.textContent = camera?.status?.last_error || (camera ? 'Camera offline' : 'No camera selected');
+            } else {
+                const url = liveStreamUrl(camera.camera_id);
+                if (!image.getAttribute('src')?.startsWith(url)) image.src = url;
+            }
+            document.getElementById('focus-camera-list').innerHTML = liveCameras.length
+                ? liveCameras.map(item => `<button type="button" data-camera-id="${escapeHtmlLocal(item.camera_id)}" aria-current="${item.camera_id === selectedLiveCameraId}"><strong>${escapeHtmlLocal(item.name || item.camera_id)}</strong><small>${item.status?.online ? 'Live' : 'Offline'} · ${escapeHtmlLocal(item.camera_role || 'General')}</small></button>`).join('')
+                : '<div class="activity-empty">No cameras configured</div>';
+            document.querySelectorAll('#focus-camera-list button').forEach(button => button.addEventListener('click', () => {
+                selectedLiveCameraId = button.dataset.cameraId;
+                renderFocusedCamera();
+                loadLiveActivity();
+            }));
+        }
+        function renderCameraWall() {
             const grid = document.getElementById('live-camera-grid');
-            if (!grid) return;
+            if (liveView !== 'wall') {
+                grid.innerHTML = '';
+                return;
+            }
+            const signature = JSON.stringify(liveCameras.map(c => [c.camera_id,c.name,c.camera_role,!!c.status?.online,liveAiOverlay]));
+            if (grid.dataset.signature === signature && grid.querySelector('.live-tile')) return;
+            grid.dataset.signature = signature;
+            if (!liveCameras.length) {
+                grid.innerHTML = '<div class="camera-wall-empty">No cameras configured yet. Open Camera Setup to add your first camera.</div>';
+                return;
+            }
+            grid.innerHTML = liveCameras.map(camera => {
+                const isOnline = !!camera.status?.online;
+                return `<article class="live-tile" data-camera-id="${escapeHtmlLocal(camera.camera_id)}">
+                    <div class="live-tile-head"><strong>${escapeHtmlLocal(camera.name || camera.camera_id)}</strong><span class="live-status ${isOnline?'online':'offline'}">${isOnline?'LIVE':'OFFLINE'}</span></div>
+                    ${isOnline ? `<img src="${liveStreamUrl(camera.camera_id)}" alt="${escapeHtmlLocal(camera.name || camera.camera_id)} live camera">` : '<div class="focus-placeholder">Camera offline</div>'}
+                    <div class="live-tile-foot"><small>${escapeHtmlLocal(camera.camera_role || 'GENERAL')}</small><button class="btn btn-secondary live-fullscreen" type="button" ${isOnline?'':'disabled'}>Full Screen</button></div>
+                </article>`;
+            }).join('');
+            grid.querySelectorAll('.live-fullscreen').forEach(button => button.addEventListener('click', () => {
+                const tile = button.closest('.live-tile');
+                if (tile?.requestFullscreen) tile.requestFullscreen();
+            }));
+        }
+        async function loadLiveCameras() {
             try {
                 const response = await fetch(`${API_BASE}/cameras`);
+                if (!response.ok) throw new Error('Camera status unavailable');
                 const data = await response.json();
-                const cameras = data.items || [];
-                const signature = JSON.stringify(cameras.map(c => [c.camera_id,c.name,c.camera_role,!!c.status?.online,liveAiOverlay]));
-                if (grid.dataset.signature === signature && grid.querySelector('img[src]')) return;
-                grid.dataset.signature = signature;
+                if (!sections.live.classList.contains('active')) return;
+                liveCameras = data.items || [];
                 if (!liveRefreshTimer) liveRefreshTimer = setInterval(loadLiveCameras, 5000);
-                const online = cameras.filter(camera => camera.status && camera.status.online).length;
-                document.getElementById('live-camera-summary').textContent = `${cameras.length} cameras · ${online} online`;
-                if (!cameras.length) {
-                    grid.innerHTML = '<div class="camera-wall-empty">No cameras configured yet. Open Camera Setup to add your first camera.</div>';
-                    return;
+                const firstActivityLoad = !liveActivityTimer;
+                if (!liveActivityTimer) {
+                    liveActivityTimer = setInterval(loadLiveActivity, 15000);
                 }
-                grid.innerHTML = cameras.map(camera => {
-                    const isOnline = !!camera.status?.online;
-                    return `<article class="live-tile" data-camera-id="${escapeHtmlLocal(camera.camera_id)}">
-                        <div class="live-tile-head"><strong>${escapeHtmlLocal(camera.name || camera.camera_id)}</strong><span class="live-status ${isOnline?'online':'offline'}">● ${isOnline?'LIVE':'OFFLINE'}</span></div>
-                        ${isOnline ? `<img src="${liveStreamUrl(camera.camera_id)}" alt="${escapeHtmlLocal(camera.name || camera.camera_id)} live camera">` : '<div style="aspect-ratio:16/9;display:grid;place-items:center;color:#cbd5e1">Camera offline</div>'}
-                        <div class="live-tile-foot"><small>${escapeHtmlLocal(camera.camera_role || 'GENERAL')} · ${liveAiOverlay?'AI tracking overlay':'Clean stream'}</small><button class="btn btn-secondary live-fullscreen" type="button">Full Screen</button></div>
-                    </article>`;
-                }).join('');
-                grid.querySelectorAll('.live-fullscreen').forEach(button => button.addEventListener('click', () => {
-                    const tile = button.closest('.live-tile');
-                    if (tile?.requestFullscreen) tile.requestFullscreen();
-                }));
+                if (!liveCameras.some(item => item.camera_id === selectedLiveCameraId)) {
+                    selectedLiveCameraId = (liveCameras.find(item => item.status?.online) || liveCameras.find(item => item.enabled !== false) || liveCameras[0])?.camera_id || null;
+                }
+                const online = liveCameras.filter(camera => camera.status?.online).length;
+                document.getElementById('live-camera-summary').textContent = `${liveCameras.length} cameras · ${online} online`;
+                renderFocusedCamera();
+                renderCameraWall();
+                if (firstActivityLoad) loadLiveActivity();
             } catch (error) {
-                grid.innerHTML = `<div class="camera-wall-empty">Unable to load cameras: ${escapeHtmlLocal(error.message)}</div>`;
+                document.getElementById('live-camera-summary').textContent = `Unable to load cameras: ${error.message}`;
             }
+        }
+        async function loadLiveActivity() {
+            if (!sections.live.classList.contains('active')) return;
+            const list = document.getElementById('live-activity-list');
+            try {
+                const endpoints = liveActivity === 'attendance' ? ['person-events'] : ['security-alerts', 'unknown-incidents'];
+                const responses = await Promise.all(endpoints.map(endpoint => fetch(`${API_BASE}/${endpoint}`)));
+                if (responses.some(response => !response.ok)) throw new Error('Recent activity unavailable');
+                const bodies = await Promise.all(responses.map(response => response.json()));
+                let records = bodies.flatMap((body, index) => (body.items || []).map(item => ({...item, kind:endpoints[index]})));
+                if (liveView === 'focus') records = records.filter(item => item.camera_id === selectedLiveCameraId);
+                if (liveActivity === 'attendance' && liveView === 'focus') {
+                    const cameraId = selectedLiveCameraId;
+                    const latest = records.find(item => item.person_id && item.full_name);
+                    document.getElementById('focus-person-name').textContent = latest?.full_name || 'No recognition yet';
+                    document.getElementById('focus-person-time').textContent = latest?.event_time ? `${latest.event_type || 'Seen'} · ${new Date(latest.event_time).toLocaleString()}` : '';
+                    const photo = document.getElementById('focus-person-photo');
+                    photo.hidden = true;
+                    photo.removeAttribute('src');
+                    if (latest) {
+                        const peopleResponse = await fetch(`${API_BASE}/personnel`);
+                        if (peopleResponse.ok && cameraId === selectedLiveCameraId) {
+                            const people = await peopleResponse.json();
+                            const person = (people.items || []).find(item => item.id === latest.person_id);
+                            if (person?.primary_face_url?.startsWith(`${API_BASE}/personnel/`)) {
+                                photo.src = person.primary_face_url;
+                                photo.hidden = false;
+                            }
+                        }
+                    }
+                }
+                records.sort((a,b) => new Date(b.event_time || b.confirmed_unknown_at || b.first_seen || b.detected_at || b.created_at || 0) - new Date(a.event_time || a.confirmed_unknown_at || a.first_seen || a.detected_at || a.created_at || 0));
+                records = records.slice(0, 12);
+                list.innerHTML = records.length ? records.map(item => {
+                    const label = liveActivity === 'attendance' ? `${item.full_name || item.person_id || 'Unidentified person'} · ${item.event_type || 'Event'}` : `${item.object_label || (item.kind === 'unknown-incidents' ? 'Unknown person' : 'Security alert')} · ${item.status || 'Open'}`;
+                    const stamp = item.event_time || item.confirmed_unknown_at || item.first_seen || item.detected_at || item.created_at;
+                    const time = stamp && !Number.isNaN(new Date(stamp).getTime()) ? new Date(stamp).toLocaleString() : '-';
+                    return `<div class="activity-row"><div><strong>${escapeHtmlLocal(label)}</strong><small>${escapeHtmlLocal(item.camera_id || '-')}</small></div><time>${escapeHtmlLocal(time)}</time></div>`;
+                }).join('') : `<div class="activity-empty">No ${liveActivity === 'attendance' ? 'attendance events' : 'alerts'} for ${liveView === 'focus' ? 'this camera' : 'these cameras'} yet.</div>`;
+            } catch (error) {
+                list.innerHTML = `<div class="activity-empty">${escapeHtmlLocal(error.message)}</div>`;
+            }
+        }
+        function switchLiveView(view) {
+            liveView = view;
+            document.getElementById('live-focus-view').hidden = view !== 'focus';
+            document.getElementById('live-wall-view').hidden = view !== 'wall';
+            document.getElementById('live-layout-controls').hidden = view !== 'wall';
+            document.getElementById('live-focus-tab').setAttribute('aria-selected', String(view === 'focus'));
+            document.getElementById('live-wall-tab').setAttribute('aria-selected', String(view === 'wall'));
+            renderFocusedCamera();
+            renderCameraWall();
+            loadLiveActivity();
         }
         function escapeHtmlLocal(value) {
             const node=document.createElement('div'); node.textContent=String(value ?? ''); return node.innerHTML.replaceAll('"','&quot;').replaceAll("'",'&#39;');
@@ -1425,8 +1606,46 @@
         document.getElementById('live-overlay-btn')?.addEventListener('click', event => {
             liveAiOverlay=!liveAiOverlay;
             event.currentTarget.textContent=`AI Overlay: ${liveAiOverlay?'On':'Off'}`;
-            loadLiveCameras();
+            renderFocusedCamera();
+            renderCameraWall();
         });
+        document.getElementById('live-focus-tab').addEventListener('click', () => switchLiveView('focus'));
+        document.getElementById('live-wall-tab').addEventListener('click', () => switchLiveView('wall'));
+        document.getElementById('focus-camera-fullscreen').addEventListener('click', () => document.querySelector('.focus-stage')?.requestFullscreen?.());
+        document.getElementById('focus-camera-settings').addEventListener('click', () => {
+            const camera = liveCameras.find(item => item.camera_id === selectedLiveCameraId);
+            if (!camera) return;
+            document.querySelector('nav a[data-section="cameras"]').click();
+            editCamera(camera);
+        });
+        async function setFocusedMonitoring(action) {
+            const cameraId = selectedLiveCameraId;
+            if (!cameraId) return;
+            const message = document.getElementById('focus-control-message');
+            message.textContent = action === 'start' ? 'Starting camera...' : 'Stopping camera...';
+            try {
+                const response = await fetch(`${API_BASE}/cameras/${encodeURIComponent(cameraId)}/${action}`, {method:'POST'});
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.detail || 'Camera command failed');
+                message.textContent = action === 'start' ? (result.diagnostics?.success ? 'Camera started' : (result.diagnostics?.message || 'Camera is reconnecting')) : 'Camera stopped';
+                await loadLiveCameras();
+            } catch (error) {
+                message.textContent = error.message;
+            }
+        }
+        document.getElementById('focus-camera-start').addEventListener('click', () => setFocusedMonitoring('start'));
+        document.getElementById('focus-camera-stop').addEventListener('click', () => setFocusedMonitoring('stop'));
+        document.getElementById('focus-camera-capture').addEventListener('click', () => {
+            if (selectedLiveCameraId) window.open(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/snapshot?t=${Date.now()}`, '_blank', 'noopener');
+        });
+        for (const [tab, activity] of [['live-attendance-tab','attendance'],['live-alerts-tab','alerts']]) {
+            document.getElementById(tab).addEventListener('click', () => {
+                liveActivity = activity;
+                document.getElementById('live-attendance-tab').setAttribute('aria-selected', String(activity === 'attendance'));
+                document.getElementById('live-alerts-tab').setAttribute('aria-selected', String(activity === 'alerts'));
+                loadLiveActivity();
+            });
+        }
         document.querySelectorAll('.live-layout-btn').forEach(button => button.addEventListener('click', () => {
             const grid=document.getElementById('live-camera-grid');
             grid.className='live-grid'+(button.dataset.layout==='single'?' single':button.dataset.layout==='dense'?' dense':'');
@@ -1484,50 +1703,38 @@
                     const startBtn = document.createElement('button');
                     startBtn.className = 'btn btn-success';
                     startBtn.textContent = 'START';
+                    startBtn.disabled = camera.enabled !== false;
                     startBtn.addEventListener('click', () => startCamera(camera.camera_id));
 
                     const stopBtn = document.createElement('button');
                     stopBtn.className = 'btn btn-danger';
                     stopBtn.textContent = 'STOP';
+                    stopBtn.disabled = camera.enabled === false;
                     stopBtn.addEventListener('click', () => stopCamera(camera.camera_id));
 
-                    const snapshotBtn = document.createElement('button');
-                    snapshotBtn.className = 'btn btn-secondary';
-                    snapshotBtn.textContent = 'SNAPSHOT';
-                    snapshotBtn.addEventListener('click', () => {
-                        window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/snapshot?t=${Date.now()}`, '_blank');
-                    });
-
-                    const streamBtn = document.createElement('button');
-                    streamBtn.className = 'btn btn-primary';
-                    streamBtn.textContent = 'VIEW LIVE';
-                    streamBtn.addEventListener('click', () => {
-                        window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/stream`, '_blank');
-                    });
-
-                    const trackingBtn = document.createElement('button');
-                    trackingBtn.className = 'btn btn-primary';
-                    trackingBtn.textContent = 'AI VIEW';
-                    trackingBtn.addEventListener('click', () => {
-                        window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/tracking-stream`, '_blank');
+                    const liveBtn = document.createElement('button');
+                    liveBtn.className = 'btn btn-primary';
+                    liveBtn.textContent = 'Live';
+                    liveBtn.addEventListener('click', () => {
+                        selectedLiveCameraId = camera.camera_id;
+                        switchLiveView('focus');
+                        document.querySelector('nav a[data-section="live"]').click();
                     });
 
                     const editBtn = document.createElement('button');
                     editBtn.className = 'btn btn-secondary';
-                    editBtn.textContent = 'SETTINGS';
+                    editBtn.textContent = 'Settings';
                     editBtn.addEventListener('click', () => editCamera(camera));
 
                     const deleteBtn = document.createElement('button');
                     deleteBtn.className = 'btn btn-danger';
-                    deleteBtn.textContent = 'DELETE';
+                    deleteBtn.textContent = 'Delete';
                     deleteBtn.classList.add('danger-menu');
                     deleteBtn.addEventListener('click', () => deleteCamera(camera.camera_id));
 
                     cameraActions.appendChild(startBtn);
                     cameraActions.appendChild(stopBtn);
-                    cameraActions.appendChild(snapshotBtn);
-                    cameraActions.appendChild(streamBtn);
-                    cameraActions.appendChild(trackingBtn);
+                    cameraActions.appendChild(liveBtn);
                     cameraActions.appendChild(editBtn);
                     cameraActions.appendChild(deleteBtn);
 
@@ -2531,6 +2738,7 @@
 
         // Initialize
         loadSystemStatus();
+        loadLiveCameras();
         setInterval(refreshUnknownAlert, 5000);
         setInterval(() => {
             if (sections.security.classList.contains('active')) {
