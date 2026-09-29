@@ -39,6 +39,12 @@ async function json(url, body, headers={}) {
     const page=await browser.newPage({viewport:{width:1440,height:1000}});
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto('http://127.0.0.1:8099/setup');
+    await page.waitForFunction(()=>document.querySelector('#overview-section')?.classList.contains('active') && document.querySelectorAll('#operator-camera-tiles [data-camera-id]').length===2,{},{timeout:30000});
+    await page.waitForFunction(()=>document.querySelector('#operator-records-body')?.textContent.includes('No attendance records'));
+    await page.locator('#operator-alerts-tab').click();
+    await page.waitForFunction(()=>document.querySelector('#operator-records-body')?.textContent.includes('No alerts'));
+    await page.screenshot({path:path.join(home,'edge-overview-desktop.png'),fullPage:true});
+    await page.locator('nav a[data-section="live"]').click();
     await page.waitForFunction(()=>document.querySelectorAll('#focus-camera-list button').length===2,{},{timeout:30000});
     await page.waitForFunction(()=>document.querySelector('#focus-camera-image')?.naturalWidth>0,{},{timeout:45000});
     if(await page.locator('#live-layout-controls').isVisible())throw new Error('Wall controls visible in Focus');
@@ -57,6 +63,9 @@ async function json(url, body, headers={}) {
     if(await page.locator('#live-camera-grid img[src]').count())throw new Error('Hidden live images retained streams');
     if(await page.locator('#focus-camera-image[src]').count())throw new Error('Hidden focus image retained stream');
     await page.setViewportSize({width:390,height:844});
+    await page.locator('nav a[data-section="overview"]').click();
+    await page.waitForFunction(()=>document.querySelector('#overview-section')?.classList.contains('active'));
+    await page.screenshot({path:path.join(home,'edge-overview-mobile.png'),fullPage:true});
     await page.locator('nav a[data-section="live"]').click();
     await page.locator('#live-focus-tab').click();
     await page.waitForFunction(()=>document.querySelector('#focus-camera-image')?.naturalWidth>0,{},{timeout:45000});
