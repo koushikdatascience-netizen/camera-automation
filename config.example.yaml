@@ -6,6 +6,15 @@ yolo_model: yolo11m.pt
 runtime:
   profile: auto
   inference_backend: AUTO
+  person_model:
+    model_id: person-detection
+    family: yolo26
+    version: yolo26n
+    storage_dir: data/models/person_detection
+    preferred_runtime: AUTO
+    openvino_artifact: yolo26n_openvino_model
+    onnx_artifact: yolo26n.onnx
+    pytorch_artifact: yolo26n.pt
   low_power:
     model: yolo26n.pt
     tracking_fps: 1
