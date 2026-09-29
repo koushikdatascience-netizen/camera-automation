@@ -124,6 +124,40 @@
     }).join("");
   }
 
+  function wireEdgeSetup() {
+    const open=document.getElementById("setup-edge-btn");
+    const panel=document.getElementById("edge-setup-panel");
+    const close=document.getElementById("close-edge-setup-btn");
+    const generate=document.getElementById("generate-edge-code-btn");
+    if(!open||!panel||!generate) return;
+    open.addEventListener("click",()=>{panel.style.display="block";panel.scrollIntoView({behavior:"smooth",block:"nearest"});});
+    close?.addEventListener("click",()=>{panel.style.display="none";});
+    generate.addEventListener("click",async()=>{
+      const result=document.getElementById("edge-activation-result");
+      const original=generate.textContent;
+      generate.disabled=true; generate.textContent="Generating...";
+      try{
+        const scope=requireScope(["tenant_id"]);
+        const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edge-activation-codes",{
+          method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({expires_minutes:30})
+        });
+        const body=await response.json();
+        if(!response.ok) throw new Error(body.detail||"Unable to generate activation code.");
+        const expires=new Date(body.expiresAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+        result.innerHTML="<div style='margin-bottom:14px;padding:16px;border:1px solid #fde68a;border-radius:10px;background:#fffbeb'>"+
+          "<div style='font-size:12px;color:#6b7280;margin-bottom:4px'>ONE-TIME ACTIVATION CODE</div>"+
+          "<strong style='font-size:24px;letter-spacing:2px'>"+escapeHtml(body.activationCode)+"</strong>"+
+          "<div style='margin-top:6px;font-size:12px;color:#6b7280'>Shop: "+escapeHtml(body.shopCode)+" · Expires at "+escapeHtml(expires)+"</div>"+
+          "<button class='btn btn-light' id='copy-edge-code-btn' type='button' style='margin-top:10px'>Copy Code</button></div>";
+        document.getElementById("copy-edge-code-btn")?.addEventListener("click",async event=>{
+          await navigator.clipboard.writeText(body.activationCode);
+          event.currentTarget.textContent="Copied";
+        });
+      }catch(error){result.innerHTML="<p style='color:#b91c1c'>"+escapeHtml(error.message)+"</p>";}
+      finally{generate.disabled=false;generate.textContent=original;}
+    });
+  }
+
   async function loadSystemStatus() {
     if (!document.getElementById("configured-cameras")) return;
     try {
@@ -528,5 +562,5 @@
   }
   function wireAttendancePage(){if(!document.getElementById("attendance-records-body"))return;loadAttendance().catch(error=>showMessage(error.message,true));setInterval(()=>loadAttendance().catch(()=>{}),15000);}
 
-  bootstrapCrmSession().then(()=>{loadSystemStatus();wireCameraPage();wirePersonnelPage();wireAttendancePage();}).catch(error=>showMessage(error.message,true));
+  bootstrapCrmSession().then(()=>{loadSystemStatus();wireEdgeSetup();wireCameraPage();wirePersonnelPage();wireAttendancePage();}).catch(error=>showMessage(error.message,true));
 })();
