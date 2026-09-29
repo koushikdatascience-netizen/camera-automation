@@ -50,6 +50,11 @@ class CameraWorker:
             if st and st.state=='KNOWN' and now-last<self.app.recognition.known_recheck_seconds: continue
             if now-last<0.5: continue
             self.last_face_attempt[tid]=now
+            if self.face is None:
+                # A persisted/cloud camera can enable face features after process
+                # startup. Do not crash the continuous detector while the face
+                # service is unavailable; the supervisor can inject it later.
+                continue
             roi=crop(frame,bbox); faces=self.face.detect(roi)
             if not faces: continue
             best=max(faces,key=lambda f:self.face.quality(f,roi.shape)); q=self.face.quality(best,roi.shape)
