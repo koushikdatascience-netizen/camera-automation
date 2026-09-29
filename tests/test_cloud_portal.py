@@ -154,3 +154,27 @@ def test_crm_attendance_uses_verified_login_logout_contract(tmp_path, monkeypatc
   'actualStartTime':'','actualOffTime':'2026-09-28T18:15:20.000Z',
   'loginLocation':'','logoutLocation':'Camera Eye - site-1',
  }
+
+
+
+def test_portal_generates_scoped_one_time_edge_activation_code(tmp_path, monkeypatch):
+ monkeypatch.setenv('SNAPKEY_PORTAL_DB',str(tmp_path/'edge-activation.db'))
+ monkeypatch.delenv('SNAPKEY_DATABASE_URL',raising=False)
+ monkeypatch.setenv('SNAPKEY_ENV','development')
+ import importlib
+ import cloud_portal.api as api
+ importlib.reload(api)
+ client=TestClient(api.app)
+ auth=portal_auth(client,monkeypatch,tenant='tenant-a',shop='SHOP1')
+ status=client.get('/session/status',headers=auth)
+ assert status.status_code==200
+ tenant=status.json()['tenantId']
+ response=client.post(f'/portal/v1/tenants/{tenant}/edge-activation-codes',json={'expires_minutes':30},headers=auth)
+ assert response.status_code==200
+ body=response.json()
+ assert body['activationCode'].startswith('CE-')
+ assert body['shopCode']=='SHOP1'
+ digest=api._token_digest(body['activationCode'])
+ first=api.store.consume_edge_activation_code(digest,'MACHINE-1')
+ assert first is not None and first['tenant_id']==tenant and first['shop_id']=='SHOP1'
+ assert api.store.consume_edge_activation_code(digest,'MACHINE-2') is None
