@@ -183,6 +183,11 @@ class CameraManager:
             self._ensure_column(c, 'cameras', 'crowd_threshold', 'INTEGER NOT NULL DEFAULT 10')
             self._ensure_column(c, 'cameras', 'rotation_degrees', 'INTEGER NOT NULL DEFAULT 0')
             self._ensure_column(c, 'cameras', 'attendance_active', 'INTEGER NOT NULL DEFAULT 1')
+            # Once an operator edits a camera on the edge, cloud assignment polling
+            # must not continuously overwrite role/features/performance choices.
+            # The cloud can still provision new cameras; explicit cloud commands remain
+            # available for deliberate remote changes.
+            self._ensure_column(c, 'cameras', 'local_override', 'INTEGER NOT NULL DEFAULT 0')
             self._ensure_column(c, 'cameras', 'tracking_fps', 'REAL NOT NULL DEFAULT 3.0')
             self._ensure_column(c, 'cameras', 'tracking_imgsz', 'INTEGER NOT NULL DEFAULT 384')
             self._ensure_column(c, 'cameras', 'tracking_quality', 'INTEGER NOT NULL DEFAULT 65')
@@ -399,6 +404,10 @@ class CameraManager:
         }
         existing = self.get_camera(camera_id)
         if existing:
+            with self._conn() as c:
+                row = c.execute('SELECT local_override FROM cameras WHERE camera_id = ?', (camera_id,)).fetchone()
+            if row and bool(row['local_override']):
+                return existing
             payload['features'] = {**existing.features.model_dump(), **local_features}
             candidate = CameraConfig(**{**existing.model_dump(), **payload})
             if candidate.model_dump() == existing.model_dump():
@@ -471,8 +480,12 @@ class CameraManager:
                 ) for row in rows
             ]
 
-    def update_camera(self, camera_id: str, updates: Dict[str, Any]) -> Optional[CameraConfig]:
-        """Update camera configuration"""
+    def update_camera(self, camera_id: str, updates: Dict[str, Any], *, mark_local_override: bool = False) -> Optional[CameraConfig]:
+        """Update camera configuration.
+
+        mark_local_override is used for operator/API edits. Background cloud assignment
+        polling uses the default False so it cannot claim local ownership.
+        """
         with self._lock:
             camera = self.get_camera(camera_id)
             if not camera:
@@ -519,7 +532,8 @@ class CameraManager:
                         camera_role = ?, camera_zone = ?, crowd_threshold = ?,
                         tracking_fps = ?, tracking_imgsz = ?, tracking_quality = ?,
                         tracking_mode = ?, rotation_degrees = ?, attendance_active = ?,
-                        features_json = ?, updated_at = ?
+                        features_json = ?, updated_at = ?,
+                        local_override = CASE WHEN ? THEN 1 ELSE local_override END
                     WHERE camera_id = ?
                 ''', (
                     camera.name,
@@ -537,6 +551,7 @@ class CameraManager:
                     1 if camera.attendance_active else 0,
                     json.dumps(camera.features.model_dump()),
                     camera.updated_at,
+                    1 if mark_local_override else 0,
                     camera_id
                 ))
 
