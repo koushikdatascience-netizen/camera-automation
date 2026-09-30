@@ -778,7 +778,7 @@
                         <div class="form-col" hidden>
                             <div class="form-group">
                                 <label for="camera-id">Camera ID</label>
-                                <input type="text" id="camera-id" class="form-control" required>
+                                <input type="text" id="camera-id" class="form-control">
                             </div>
                         </div>
                     </div>
@@ -1893,6 +1893,9 @@
             editingCameraId = null;
             document.getElementById('camera-setup-form').reset();
             document.getElementById('camera-id').disabled = false;
+            // Camera ID is intentionally hidden from operators. Generate it here
+            // instead of relying on browser validation for an invisible required field.
+            document.getElementById('camera-id').value = 'camera-' + crypto.randomUUID();
             document.getElementById('test-result').innerHTML = '';
             document.getElementById('preview-container').style.display = 'none';
             document.getElementById('camera-form').style.display = 'block';
@@ -1982,7 +1985,7 @@
             e.preventDefault();
 
             const cameraData = {
-                camera_id: document.getElementById('camera-id').value.trim(),
+                camera_id: document.getElementById('camera-id').value.trim() || ('camera-' + crypto.randomUUID()),
                 name: document.getElementById('camera-name').value.trim(),
                 source_type: editingCameraId && document.getElementById('rtsp-url').value === document.getElementById('rtsp-url').dataset.storedSource ? document.getElementById('rtsp-url').dataset.sourceType : (/^\d+$/.test(document.getElementById('rtsp-url').value.trim()) ? 'webcam' : 'rtsp'),
                 rtsp_url: document.getElementById('rtsp-url').value.trim(),
