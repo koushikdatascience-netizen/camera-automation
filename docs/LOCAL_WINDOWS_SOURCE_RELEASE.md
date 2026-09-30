@@ -43,6 +43,12 @@ control failure was fixed and the expanded test passed on the final implementati
 
 ## Start SOURCE with the installed configuration
 
+For a start without pasting PowerShell commands, double-click
+`TEST_CAMERA_AI_SOURCE.bat` in the repository folder after closing the installed
+application. It uses the existing ProgramData config, prefers `.venv311`, opens
+the browser, and refuses to start if port 8091 is occupied. Keep its console open
+while testing; use Ctrl+C to stop source.
+
 First explicitly exit the installed EXE/service using its normal controls. If it
 only runs in the background, stop that application through Task Manager before
 running source. Do not run two workers against the same physical camera/database.
