@@ -142,6 +142,15 @@ class PortalLoginRequest(BaseModel):
     email: str
     password: str
 
+class ClientLoginOptionsRequest(BaseModel):
+    client_id: str = Field(min_length=1,max_length=128)
+
+class ClientSiteLoginRequest(BaseModel):
+    client_id: str = Field(min_length=1,max_length=128)
+    user_id: str = Field(min_length=1,max_length=256)
+    shop_code: str = Field(min_length=1,max_length=128)
+    password: str = Field(min_length=1,max_length=256)
+
 class CloudPersonCreate(BaseModel):
     employee_code: str = Field(min_length=1,max_length=64)
     full_name: str = Field(min_length=1,max_length=128)
@@ -238,6 +247,24 @@ def login_portal_user(payload: PortalLoginRequest):
     user=store.portal_user_by_email(payload.email.strip().lower())
     if not user or not _password_valid(payload.password,user["password_hash"]):
         raise HTTPException(401,"Invalid email or password")
+    return _native_session(user)
+
+
+@app.post("/auth/client/options")
+def client_login_options(payload: ClientLoginOptionsRequest):
+    if not hasattr(store,"client_login_options"):
+        raise HTTPException(503,"Client/site login requires PostgreSQL portal storage")
+    result=store.client_login_options(payload.client_id.strip())
+    # Keep the response deliberately minimal: no email addresses, password data or tenant internals.
+    return {"users":result.get("users") or [],"sites":result.get("sites") or []}
+
+@app.post("/auth/client/login")
+def client_site_login(payload: ClientSiteLoginRequest):
+    if not hasattr(store,"portal_user_for_client_site"):
+        raise HTTPException(503,"Client/site login requires PostgreSQL portal storage")
+    user=store.portal_user_for_client_site(payload.client_id.strip(),payload.user_id.strip(),_slug(payload.shop_code))
+    if not user or not _password_valid(payload.password,user["password_hash"]):
+        raise HTTPException(401,"Invalid client, user, site, or password")
     return _native_session(user)
 
 
