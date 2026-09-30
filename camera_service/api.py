@@ -663,6 +663,48 @@ class CameraCreate(BaseModel):
     tracking_mode: str = "detect"
     features: dict = {}
 
+class SecurityZoneRequest(BaseModel):
+    id: str | None = None
+    name: str = Field(default="Detection Zone", min_length=1, max_length=80)
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+    enabled: bool = True
+
+@app.get('/api/v1/cameras/{camera_id}/security-zones')
+def list_security_zones(camera_id: str):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    return {'items': camera_manager.list_security_zones(camera_id)}
+
+@app.post('/api/v1/cameras/{camera_id}/security-zones')
+def save_security_zone(camera_id: str, body: SecurityZoneRequest):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    if camera.camera_role.value != 'SECURITY':
+        raise HTTPException(409, 'Detection zones are available only for Security cameras')
+    try:
+        return camera_manager.save_security_zone(camera_id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+@app.delete('/api/v1/cameras/{camera_id}/security-zones/{zone_id}')
+def delete_security_zone(camera_id: str, zone_id: str):
+    if not camera_manager.delete_security_zone(camera_id, zone_id):
+        raise HTTPException(404, 'Security zone not found')
+    return {'deleted': True}
+
+@app.get('/api/v1/safety/capabilities')
+def safety_capabilities():
+    # Fire/smoke are deliberately unavailable until a validated safety model is installed.
+    return {
+        'fire': {'available': False, 'reason': 'Safety model not installed'},
+        'smoke': {'available': False, 'reason': 'Safety model not installed'},
+    }
+
 class OnvifProbeRequest(BaseModel):
     host: str
     port: int = 80
