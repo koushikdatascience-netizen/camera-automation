@@ -762,10 +762,10 @@ def portal_attendance(tenant_id: str, principal: PortalPrincipal = Depends(requi
                 "employee_code":person.get("employee_code") or "—","role":person.get("role") or "—","entry_time":None,"exit_time":None})
             if event_type=="ATTENDANCE_ENTRY": record["entry_time"]=str(event.get("event_time") or "")
             else: record["exit_time"]=str(event.get("event_time") or "")
-        if event_type in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT","BREAK_START","BREAK_END"}:
+        if event_type in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT","BREAK_START","BREAK_END","PERSON_RECOGNIZED"}:
             person_events.append({"event_id":event.get("id"),"event_type":event_type,"event_time":str(event.get("event_time") or ""),
                 "person_id":person_id,"full_name":person.get("full_name") or person_id or "Unknown","employee_code":person.get("employee_code") or "—",
-                "camera_id":event.get("camera_id"),"confidence":metadata.get("confidence")})
+                "camera_id":event.get("camera_id"),"confidence":metadata.get("confidence"),"has_evidence":bool(metadata.get("cloud_evidence"))})
     records=sorted(sessions.values(),key=lambda x:x.get("entry_time") or x.get("exit_time") or "",reverse=True)
     presence=[{**r,"status":"PRESENT"} for r in records if r.get("entry_time") and not r.get("exit_time")]
     return {"records":records,"presence":presence,"events":person_events[:100]}
