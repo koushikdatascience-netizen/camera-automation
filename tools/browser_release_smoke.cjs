@@ -32,7 +32,7 @@ async function json(url, body, headers={}) {
   try{
     server('camera_service.api:app',8099);server('cloud_portal.api:app',8100);
     await wait('http://127.0.0.1:8099/ready');await wait('http://127.0.0.1:8100/health');
-    await json('http://127.0.0.1:8099/api/v1/cameras',{camera_id:'video-1',name:'Video Test',source_type:'file',rtsp_url:path.join(root,'test.mp4'),tracking_mode:'track',features:{}});
+    await json('http://127.0.0.1:8099/api/v1/cameras',{camera_id:'video-1',name:'Video Test',source_type:'file',rtsp_url:path.join(root,'test.mp4'),camera_role:'ENTRANCE_EXIT',tracking_mode:'track',features:{}});
     await json('http://127.0.0.1:8099/api/v1/cameras',{camera_id:'offline',name:'Offline Camera',rtsp_url:'0',enabled:false,features:{}});
     const session=await json('http://127.0.0.1:8100/crm/session',{tenantId:'test-tenant',shopCode:'test-shop',userId:'test-owner',role:'OWNER'}, {'X-CRM-Integration-Key':'isolated-browser-test-key'});
     browser=await chromium.launch({
@@ -41,6 +41,19 @@ async function json(url, body, headers={}) {
     });
     const page=await browser.newPage({viewport:{width:1440,height:1000}});
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    let stationState = 'OUT', candidateVisible = true;
+    const expiresAt = new Date(Date.now()+120000).toISOString();
+    await page.route('**/api/v1/cameras/video-1/attendance-station', route => route.fulfill({json:{
+      candidate:candidateVisible ? {person_id:'employee-test',full_name:'Test Employee',employee_code:'E100',confidence:.94,
+        detected_at:new Date().toISOString(),expires_at:expiresAt,token:'test-candidate',state:stationState,
+        actions:stationState==='OUT'?['CHECK_IN']:stationState==='IN'?['CHECK_OUT','START_BREAK']:['END_BREAK','CHECK_OUT']} : null,
+      recent:[]}}));
+    await page.route('**/api/v1/cameras/video-1/attendance-station/action', async route => {
+      const action = route.request().postDataJSON().action;
+      stationState = action==='CHECK_IN'||action==='END_BREAK'?'IN':action==='START_BREAK'?'ON_BREAK':'OUT';
+      await route.fulfill({json:{applied:true}});
+    });
+    const streams=[]; page.on('request', request => {if(/\/(tracking-stream|stream)$/.test(new URL(request.url()).pathname))streams.push(request.url());});
     await page.goto('http://127.0.0.1:8099/setup');
     await page.waitForFunction(()=>document.querySelector('#overview-section')?.classList.contains('active') && document.querySelectorAll('#operator-camera-tiles [data-camera-id]').length===2,{},{timeout:30000});
     await page.waitForFunction(()=>document.querySelector('#operator-records-body')?.textContent.includes('No attendance records'));
@@ -49,15 +62,29 @@ async function json(url, body, headers={}) {
     await page.screenshot({path:path.join(home,'edge-overview-desktop.png'),fullPage:true});
     await page.locator('nav a[data-section="live"]').click();
     await page.waitForFunction(()=>document.querySelectorAll('#focus-camera-list button').length===2,{},{timeout:30000});
+    if(streams.length || await page.locator('#focus-camera-image[src], #live-camera-grid img[src]').count())throw new Error('Live View auto-opened streams');
+    await page.locator('#focus-camera-list button[data-camera-id="video-1"]').click();
     await page.waitForFunction(()=>document.querySelector('#focus-camera-image')?.naturalWidth>0,{},{timeout:45000});
     if(await page.locator('#live-layout-controls').isVisible())throw new Error('Wall controls visible in Focus');
     if(!await page.locator('#focus-camera-capture').isEnabled())throw new Error('Capture unavailable for online camera');
+    await page.getByRole('button',{name:'Check In',exact:true}).click();
+    await page.getByRole('button',{name:'Start Break',exact:true}).click();
+    await page.getByRole('button',{name:'End Break',exact:true}).click();
+    await page.getByRole('button',{name:'Check Out',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('#station-actions')?.textContent.includes('Check In'));
+    candidateVisible=false;
+    await page.waitForFunction(()=>document.querySelector('#station-actions')?.children.length===0,{},{timeout:10000});
+    candidateVisible=true;
+    await page.getByRole('button',{name:'Check In',exact:true}).waitFor();
     await page.screenshot({path:path.join(home,'edge-focus-desktop.png'),fullPage:true});
     await page.locator('#live-wall-tab').click();
     if(!await page.locator('#live-layout-controls').isVisible())throw new Error('Wall controls hidden in Wall');
     await page.waitForFunction(()=>document.querySelectorAll('#live-camera-grid .live-tile').length===2,{},{timeout:30000});
     await page.waitForFunction(()=>[...document.querySelectorAll('#live-camera-grid img')].some(img=>img.naturalWidth>0),{},{timeout:45000});
     await page.screenshot({path:path.join(home,'edge-live-desktop.png'),fullPage:true});
+    await page.locator('#close-live-view').click();
+    if(await page.locator('#focus-camera-image[src], #live-camera-grid img[src]').count())throw new Error('Close retained streams');
+    await page.locator('#live-wall-tab').click();
     await page.locator('#live-overlay-btn').click();
     await page.waitForFunction(()=>document.querySelector('#live-camera-grid img')?.getAttribute('src')?.includes('/stream'));
     await page.locator('nav a[data-section="cameras"]').click();
@@ -71,6 +98,7 @@ async function json(url, body, headers={}) {
     await page.screenshot({path:path.join(home,'edge-overview-mobile.png'),fullPage:true});
     await page.locator('nav a[data-section="live"]').click();
     await page.locator('#live-focus-tab').click();
+    await page.locator('#focus-camera-list button[data-camera-id="video-1"]').click();
     await page.waitForFunction(()=>document.querySelector('#focus-camera-image')?.naturalWidth>0,{},{timeout:45000});
     await page.screenshot({path:path.join(home,'edge-focus-mobile.png'),fullPage:true});
     await page.locator('#live-wall-tab').click();

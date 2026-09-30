@@ -34,3 +34,39 @@ def test_rotation_precedes_worker_tracking(tmp_path):
     worker.process_tracks = lambda f, tracks: seen.append(f.copy())
     assert worker.run_once()
     assert all(np.array_equal(f, np.rot90(frame, -1)) for f in seen)
+
+
+def test_legacy_database_migrates_to_zero(tmp_path):
+    import sqlite3
+    path = str(tmp_path / 'legacy.db')
+    manager = CameraManager(path)
+    manager.create_camera(dict(camera_id='old', name='Old', rtsp_url='0'))
+    with sqlite3.connect(path) as conn:
+        conn.execute('ALTER TABLE cameras DROP COLUMN rotation_degrees')
+    assert CameraManager(path).get_camera('old').rotation_degrees == 0
+
+
+def test_shared_pipeline_rotates_before_ai_and_publishes_same_orientation(tmp_path, monkeypatch):
+    import threading
+    import cv2
+    manager = CameraManager(str(tmp_path / 'pipeline.db'))
+    camera = CameraConfig(camera_id='cam', name='Camera', rtsp_url='test', source_type='file', rotation_degrees=90)
+    frame = np.zeros((24, 40, 3), dtype=np.uint8)
+    frame[:12, :20] = 255
+    stop = threading.Event()
+    seen, published = [], []
+    class Capture:
+        def isOpened(self): return True
+        def read(self): return True, frame.copy()
+        def release(self): pass
+    monkeypatch.setattr(manager, '_open_video_capture', lambda *a: Capture())
+    monkeypatch.setattr(manager, '_annotate_tracking_frame', lambda f, *a: seen.append(f.copy()) or f)
+    monkeypatch.setattr(manager, '_draw_tracking_demo_overlay', lambda f, *a: f)
+    iterator = manager.iter_tracking_mjpeg(camera, 'fake', stop_event=stop,
+        publish_callback=lambda raw, annotated: published.append(cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)))
+    try:
+        next(iterator)
+        assert published[0].shape == (40, 24, 3)
+        assert seen and np.array_equal(seen[0], np.rot90(frame, -1))
+    finally:
+        stop.set(); iterator.close()
