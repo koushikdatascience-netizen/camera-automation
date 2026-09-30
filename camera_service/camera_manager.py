@@ -116,6 +116,7 @@ class CameraManager:
         self._live_frames = {}
         self._live_frame_lock = threading.RLock()
         self._attendance_line_detectors = {}
+        self._unknown_zone_state = {}
         self._security_alerter = ObjectSecurityAlerter()
         self._init_db()
 
@@ -149,6 +150,20 @@ class CameraManager:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS security_zones (
+                id TEXT PRIMARY KEY,
+                camera_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                width REAL NOT NULL,
+                height REAL NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_security_zones_camera ON security_zones(camera_id);
 
             CREATE TABLE IF NOT EXISTS camera_status (
                 camera_id TEXT PRIMARY KEY,
@@ -196,6 +211,68 @@ class CameraManager:
         existing = {row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def list_security_zones(self, camera_id: str):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM security_zones WHERE camera_id=? ORDER BY created_at", (camera_id,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def save_security_zone(self, camera_id: str, zone: Dict[str, Any]):
+        name = str(zone.get("name") or "Detection Zone").strip()[:80]
+        values = [float(zone.get(key, 0)) for key in ("x", "y", "width", "height")]
+        x, y, width, height = values
+        if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < width <= 1 and 0 < height <= 1):
+            raise ValueError("Zone coordinates must be normalized to 0..1")
+        if x + width > 1.000001 or y + height > 1.000001:
+            raise ValueError("Zone must fit inside the camera frame")
+        zone_id = str(zone.get("id") or uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._conn() as c:
+            c.execute(
+                """INSERT INTO security_zones(id,camera_id,name,x,y,width,height,enabled,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET name=excluded.name,x=excluded.x,y=excluded.y,
+                   width=excluded.width,height=excluded.height,enabled=excluded.enabled,updated_at=excluded.updated_at""",
+                (zone_id, camera_id, name, x, y, width, height,
+                 1 if zone.get("enabled", True) else 0, now, now),
+            )
+        return next(item for item in self.list_security_zones(camera_id) if item["id"] == zone_id)
+
+    def delete_security_zone(self, camera_id: str, zone_id: str) -> bool:
+        with self._lock, self._conn() as c:
+            cur = c.execute("DELETE FROM security_zones WHERE id=? AND camera_id=?", (zone_id, camera_id))
+            return cur.rowcount > 0
+
+    def _matching_security_zone(self, camera_id: str, bbox, frame_shape):
+        zones = [z for z in self.list_security_zones(camera_id) if z.get("enabled")]
+        if not zones:
+            return None
+        height, width = frame_shape[:2]
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        cx = ((x1 + x2) / 2.0) / max(1.0, float(width))
+        cy = ((y1 + y2) / 2.0) / max(1.0, float(height))
+        for zone in zones:
+            if zone["x"] <= cx <= zone["x"] + zone["width"] and zone["y"] <= cy <= zone["y"] + zone["height"]:
+                return zone
+        return None
+
+    def _confirmed_unknown_zone(self, camera_id: str, track_id: str, bbox, frame_shape, seconds: float = 2.0):
+        zone = self._matching_security_zone(camera_id, bbox, frame_shape)
+        key_prefix = f"{camera_id}:{track_id}:"
+        now = time.monotonic()
+        if not zone:
+            for key in list(self._unknown_zone_state):
+                if key.startswith(key_prefix):
+                    self._unknown_zone_state.pop(key, None)
+            return None
+        key = key_prefix + str(zone["id"])
+        state = self._unknown_zone_state.setdefault(key, {"first_seen": now, "last_seen": now})
+        state["last_seen"] = now
+        if now - state["first_seen"] >= max(0.5, float(seconds)):
+            return zone
+        return None
 
     def _mask_rtsp_password(self, rtsp_url: str) -> str:
         """Mask password in RTSP URL for security"""
@@ -1012,7 +1089,14 @@ class CameraManager:
                                         "name": recognized_name,
                                         "score": score,
                                     }
-                                elif camera_config.camera_role != CameraRole.ENTRANCE_EXIT and (camera_config.features.unknown_detection or camera_config.features.unknown_person_detection) and camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
+                                elif camera_config.camera_role == CameraRole.SECURITY and (camera_config.features.unknown_detection or camera_config.features.unknown_person_detection) and camera_zone == "inside" and store:
+                                    confirmed_zone = self._confirmed_unknown_zone(camera_id, str(track_id), (x1, y1, x2, y2), frame.shape)
+                                    if not confirmed_zone or not self._should_emit_alert(f"unknown:{camera_id}:{track_id}:{confirmed_zone['id']}", 20):
+                                        self._track_identity_cache[cache_key] = {
+                                            "checked_at": now, "person_id": None,
+                                            "text": f"Unknown person {score:.2f}", "score": score,
+                                        }
+                                        continue
                                     event_time = datetime.now(timezone.utc)
                                     face_snapshot = self._save_event_snapshot(roi, camera_id, "unknown_face")
                                     person_snapshot = self._save_event_snapshot(frame, camera_id, "unknown_person")
@@ -1021,6 +1105,15 @@ class CameraManager:
                                         event_time, event_time, event_time, 1, score,
                                         face_path=face_snapshot, person_path=person_snapshot,
                                     )
+                                    if created:
+                                        try:
+                                            store.add_person_event(
+                                                None, getattr(attendance_engine, "store_id", "store-1"), camera_id,
+                                                "UNKNOWN_SECURITY_CONFIRMED", event_time,
+                                                {"track_id": str(track_id), "zone_id": confirmed_zone["id"], "zone_name": confirmed_zone["name"]},
+                                            )
+                                        except Exception:
+                                            pass
                                     if created:
                                         self._begin_unknown_clip(stream_state, incident_id, camera_id)
                                     self._track_identity_cache[cache_key] = {
@@ -1048,8 +1141,9 @@ class CameraManager:
                     recognized_text = cached_identity.get('text')
                     if (recognized_text and recognized_text.lower().startswith('unknown')
                         and camera_zone == 'inside' and camera_config.features.unknown_enabled
-                        and camera_config.camera_role.value in {'GENERAL','SECURITY'}):
-                        self._security_alerter.alarm_beep(f'unknown:{camera_id}',True,1250,180,3.0)
+                        and camera_config.camera_role == CameraRole.SECURITY
+                        and self._confirmed_unknown_zone(camera_id, str(track_id), (x1, y1, x2, y2), frame.shape)):
+                        self._security_alerter.alarm_beep(f'unknown:{camera_id}', True, 1250, 650, 8.0)
 
                 track_text = f" ID {track_id}" if track_id is not None else ""
                 text = recognized_text or f"{label}{track_text} {conf:.2f}"
