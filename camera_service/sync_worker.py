@@ -65,6 +65,7 @@ class EdgeSyncWorker:
         self.license_manager = license_manager
         self.camera_manager = camera_manager
         self.camera_supervisor = camera_supervisor
+        self._live_view_publisher = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -270,6 +271,23 @@ class EdgeSyncWorker:
             if self.camera_supervisor is not None:
                 self.camera_supervisor.reconcile()
             return {"deleted": True, "camera_id": camera_id}
+        if command_type=="LIVE_VIEW_START":
+            if self.camera_manager is None:
+                raise RuntimeError("Camera manager is unavailable")
+            from camera_service.livekit_publisher import LiveKitCameraPublisher
+            if self._live_view_publisher is None:
+                self._live_view_publisher = LiveKitCameraPublisher(self.camera_manager)
+            return self._live_view_publisher.start(
+                session_id=str(request.get("session_id") or ""),
+                camera_id=str(request.get("camera_id") or ""),
+                url=str(request.get("url") or ""),
+                token=str(request.get("publisher_token") or ""),
+                ttl_seconds=int(request.get("ttl_seconds") or 600),
+            )
+        if command_type=="LIVE_VIEW_STOP":
+            if self._live_view_publisher is None:
+                return {"stopped": True, "session_id": str(request.get("session_id") or ""), "already_stopped": True}
+            return self._live_view_publisher.stop(str(request.get("session_id") or ""))
         if command_type=="ONVIF_PROBE":
             result=probe_onvif(str(request.get("host") or ""),int(request.get("port") or 80),
                                str(request.get("username") or ""),str(request.get("password") or ""))
