@@ -193,6 +193,19 @@ class SQLiteStore:
                 payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path}}
                 self._enqueue_edge_event(c,iid,'UNKNOWN_INCIDENT',payload)
                 return iid,True
+    def update_unknown_clip(self,iid,clip_path):
+        with self._lock,self._conn() as c:
+            c.execute("UPDATE unknown_incidents SET clip_path=? WHERE id=?",(clip_path,iid))
+            # The original queued UNKNOWN_INCIDENT payload may have been created before
+            # the asynchronous evidence clip finished. Keep pending queue payloads in
+            # sync so cloud/CRM delivery receives the final evidence path.
+            row=c.execute("SELECT payload_json,status FROM edge_event_queue WHERE id=?",(iid,)).fetchone()
+            if row and row["status"]=="PENDING":
+                payload=json.loads(row["payload_json"])
+                payload.setdefault("metadata",{})["clip_path"]=clip_path
+                c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),iid))
+        return self.unknown(iid)
+
     def unknowns(self,limit=None):
         with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM unknown_incidents ORDER BY confirmed_unknown_at DESC LIMIT ?",(limit if limit is not None else -1,))]
     def unknown(self,iid):
@@ -212,7 +225,15 @@ class SQLiteStore:
     def security_alert(self,aid):
         with self._conn() as c: r=c.execute("SELECT * FROM security_alerts WHERE id=?",(aid,)).fetchone(); return dict(r) if r else None
     def update_security_alert_clip(self,aid,clip_path):
-        with self._lock,self._conn() as c: c.execute("UPDATE security_alerts SET clip_path=? WHERE id=?",(clip_path,aid))
+        with self._lock,self._conn() as c:
+            c.execute("UPDATE security_alerts SET clip_path=? WHERE id=?",(clip_path,aid))
+            # Clip generation is asynchronous. Update a still-pending queue payload so
+            # cloud/CRM sync includes the completed evidence instead of a null clip.
+            row=c.execute("SELECT payload_json,status FROM edge_event_queue WHERE id=?",(aid,)).fetchone()
+            if row and row["status"]=="PENDING":
+                payload=json.loads(row["payload_json"])
+                payload.setdefault("metadata",{})["clip_path"]=clip_path
+                c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),aid))
         return self.security_alert(aid)
     def acknowledge_security_alert(self,aid):
         with self._lock,self._conn() as c: c.execute("UPDATE security_alerts SET status='ACKNOWLEDGED',acknowledged_at=? WHERE id=?",(self.now(),aid))
