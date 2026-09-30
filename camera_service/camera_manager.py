@@ -104,6 +104,8 @@ class CameraManager:
         self._track_identity_cache = {}
         self._full_frame_face_cache = {}
         self._tracking_stream_state = {}
+        self._live_frames = {}
+        self._live_frame_lock = threading.RLock()
         self._attendance_line_detectors = {}
         self._security_alerter = ObjectSecurityAlerter()
         self._init_db()
@@ -159,6 +161,25 @@ class CameraManager:
             self._ensure_column(c, 'cameras', 'tracking_imgsz', 'INTEGER NOT NULL DEFAULT 384')
             self._ensure_column(c, 'cameras', 'tracking_quality', 'INTEGER NOT NULL DEFAULT 65')
             self._ensure_column(c, 'cameras', 'tracking_mode', "TEXT NOT NULL DEFAULT 'detect'")
+
+    def publish_live_ai_frame(self, camera_id: str, frame) -> None:
+        """Keep one in-memory annotated frame for temporary remote WebRTC viewing."""
+        if frame is None:
+            return
+        with self._live_frame_lock:
+            self._live_frames[str(camera_id)] = {
+                "frame": frame.copy(),
+                "updated_at": time.monotonic(),
+            }
+
+    def get_live_ai_frame(self, camera_id: str, max_age_seconds: float = 3.0):
+        """Return a copy of the latest annotated AI frame without reopening the camera."""
+        with self._live_frame_lock:
+            item = self._live_frames.get(str(camera_id))
+            if not item or time.monotonic() - float(item.get("updated_at", 0.0)) > max_age_seconds:
+                return None
+            frame = item.get("frame")
+            return frame.copy() if frame is not None else None
 
     def _ensure_column(self, conn, table: str, column: str, definition: str):
         existing = {row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -1845,6 +1866,10 @@ class CameraManager:
                                 (0, 0, 255),
                                 2,
                             )
+                    # The same annotated frame shown by the local AI workspace is made
+                    # available in memory to the optional WebRTC publisher. This avoids a
+                    # second RTSP/webcam connection and keeps inference on the edge.
+                    self.publish_live_ai_frame(camera_config.camera_id, annotated)
                     self._record_security_clip_frame(stream_state, frame, store)
                     profile_quality = int(os.environ.get("SNAPKEY_PROFILE_TRACKING_QUALITY", "65") or 65)
                     quality = max(35, min(int(getattr(camera_config, "tracking_quality", profile_quality) or profile_quality), profile_quality, 95))
