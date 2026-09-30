@@ -1,5 +1,6 @@
 from __future__ import annotations
 from contextlib import contextmanager
+from collections import deque
 import json, os, sqlite3, threading, uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -560,49 +561,90 @@ class CameraManager:
         except Exception:
             return None
 
-    def _begin_security_clip(self, stream_state: dict | None, alert_id: str, camera_id: str):
+    def _begin_evidence_clip(self, stream_state: dict | None, event_id: str, camera_id: str, event_kind: str):
+        """Capture bounded evidence: ~10 seconds before and 10 seconds after an alert.
+
+        The rolling buffer stores compressed JPEGs at 3 fps to keep per-camera RAM
+        bounded while still preserving useful context before the triggering event.
+        """
         if stream_state is None or stream_state.get("security_clip"):
             return
+        prebuffer = list(stream_state.get("evidence_buffer") or [])
         stream_state["security_clip"] = {
-            "alert_id": alert_id,
+            "alert_id": event_id,
             "camera_id": camera_id,
+            "event_kind": event_kind,
             "started_at": time.monotonic(),
-            "duration": 10.0,
+            "post_duration": 10.0,
+            "prebuffer": prebuffer,
             "frames": [],
+            "last_sample_at": 0.0,
         }
 
+    def _begin_security_clip(self, stream_state: dict | None, alert_id: str, camera_id: str):
+        self._begin_evidence_clip(stream_state, alert_id, camera_id, "security")
+
+    def _begin_unknown_clip(self, stream_state: dict | None, incident_id: str, camera_id: str):
+        self._begin_evidence_clip(stream_state, incident_id, camera_id, "unknown")
+
     def _record_security_clip_frame(self, stream_state: dict | None, frame, store=None):
-        if stream_state is None or not stream_state.get("security_clip"):
+        if stream_state is None:
             return
-        clip = stream_state["security_clip"]
-        clip["frames"].append(frame.copy())
-        if time.monotonic() - clip["started_at"] >= clip["duration"]:
+        now = time.monotonic()
+        # Keep only a compressed 10-second rolling history at ~3 fps.
+        if now - stream_state.get("evidence_sample_at", 0.0) >= (1.0 / 3.0):
+            ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 55])
+            if ok:
+                stream_state.setdefault("evidence_buffer", deque(maxlen=30)).append(encoded.tobytes())
+                stream_state["evidence_sample_at"] = now
+        clip = stream_state.get("security_clip")
+        if not clip:
+            return
+        if now - clip.get("last_sample_at", 0.0) >= (1.0 / 3.0):
+            ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            if ok:
+                clip["frames"].append(encoded.tobytes())
+                clip["last_sample_at"] = now
+        if now - clip["started_at"] >= clip["post_duration"]:
             self._finalize_security_clip(stream_state, store)
 
     def _finalize_security_clip(self, stream_state: dict | None, store=None):
         if stream_state is None or not stream_state.get("security_clip"):
             return
         clip = stream_state.pop("security_clip")
-        frames = clip.get("frames") or []
-        if not frames:
+        encoded_frames = (clip.get("prebuffer") or []) + (clip.get("frames") or [])
+        if not encoded_frames:
             return
-        thread = threading.Thread(target=self._write_security_clip, args=(clip, frames, store), daemon=True)
+        thread = threading.Thread(target=self._write_security_clip, args=(clip, encoded_frames, store), daemon=True)
         thread.start()
 
-    def _write_security_clip(self, clip: dict, frames: list, store=None):
+    def _write_security_clip(self, clip: dict, encoded_frames: list, store=None):
         try:
+            frames=[]
+            for encoded in encoded_frames:
+                frame=cv2.imdecode(np.frombuffer(encoded,dtype=np.uint8),cv2.IMREAD_COLOR)
+                if frame is not None:
+                    frames.append(frame)
+            if not frames:
+                return
             root = Path(self.db_path).parent / "evidence" / clip["camera_id"]
             root.mkdir(parents=True, exist_ok=True)
-            path = root / f"security_clip_{int(time.time() * 1000)}.mp4"
+            prefix = "unknown_clip" if clip.get("event_kind") == "unknown" else "security_clip"
+            path = root / f"{prefix}_{int(time.time() * 1000)}.mp4"
             h, w = frames[0].shape[:2]
-            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), max(1.0, len(frames) / max(1.0, clip["duration"])), (w, h))
+            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 3.0, (w, h))
+            if not writer.isOpened():
+                return
             for frame in frames:
                 if frame.shape[:2] != (h, w):
                     frame = cv2.resize(frame, (w, h))
                 writer.write(frame)
             writer.release()
             if store is not None:
-                store.update_security_alert_clip(clip["alert_id"], str(path))
+                if clip.get("event_kind") == "unknown":
+                    store.update_unknown_clip(clip["alert_id"], str(path))
+                else:
+                    store.update_security_alert_clip(clip["alert_id"], str(path))
         except Exception:
             return
 
@@ -901,9 +943,11 @@ class CameraManager:
                                 match, score = face_service.recognize(best.get("embedding"), recognition_config.known_threshold)
                                 if match:
                                     active_known_tracks.add(str(track_id))
-                                    snapshot_path = None
+                                    snapshot_path = self._save_event_snapshot(frame, camera_id, "recognized")
                                     recognized_name = match["full_name"]
                                     recognized_text = f"{recognized_name} {score:.2f}"
+                                    if store and self._should_emit_alert(f"recognized:{camera_id}:{match['person_id']}", 60):
+                                        store.add_person_event(match["person_id"], getattr(attendance_engine, "store_id", "store-1"), camera_id, "PERSON_RECOGNIZED", datetime.now(timezone.utc), {"track_id": str(track_id), "confidence": score, "snapshot_path": snapshot_path})
                                     if camera_config.features.attendance and track_id is not None:
                                         attendance_engine.on_identity(IdentitySeen(
                                             store_id=attendance_engine.store_id,
@@ -923,8 +967,16 @@ class CameraManager:
                                         "score": score,
                                     }
                                 elif (camera_config.features.unknown_detection or camera_config.features.unknown_person_detection) and camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
-                                    snapshot_path = self._save_event_snapshot(roi, camera_id, "unknown")
-                                    store.add_person_event(None, getattr(attendance_engine, "store_id", "store-1"), camera_id, "UNKNOWN_INSIDE_ALERT", datetime.now(timezone.utc), {"track_id": track_id, "score": score, "snapshot_path": snapshot_path})
+                                    event_time = datetime.now(timezone.utc)
+                                    face_snapshot = self._save_event_snapshot(roi, camera_id, "unknown_face")
+                                    person_snapshot = self._save_event_snapshot(frame, camera_id, "unknown_person")
+                                    incident_id, created = store.upsert_unknown(
+                                        getattr(attendance_engine, "store_id", "store-1"), camera_id, str(track_id),
+                                        event_time, event_time, event_time, 1, score,
+                                        face_path=face_snapshot, person_path=person_snapshot,
+                                    )
+                                    if created:
+                                        self._begin_unknown_clip(stream_state, incident_id, camera_id)
                                     self._track_identity_cache[cache_key] = {
                                         "checked_at": now,
                                         "person_id": None,
@@ -1596,6 +1648,8 @@ class CameraManager:
         frame_delay = 1.0 / display_fps
         stream_state = {
             "security_clip": None,
+            "evidence_buffer": deque(maxlen=30),
+            "evidence_sample_at": 0.0,
             "latest_overlays": [],
             "latest_summary": {
                 "people": 0,
