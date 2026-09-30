@@ -805,9 +805,31 @@ def test_rtsp_connection(request: RTSPTestRequest):
         if not camera:
             raise HTTPException(404, 'Camera not found')
         status = camera_manager.get_camera_status(request.camera_id)
-        if status and status.online:
-            return {'success':True,'message':'Camera runtime is receiving frames','source':camera_manager._mask_rtsp_password(camera.rtsp_url),
-                'fps':status.capture_fps,'frames_received':status.frames_received,'connection_ms':0}
+        runtime_frame = supervisor.snapshot(request.camera_id)
+        if runtime_frame:
+            return {
+                'success': True,
+                'message': 'Camera runtime is receiving frames; existing worker reused',
+                'source': camera_manager._mask_rtsp_password(camera.rtsp_url),
+                'fps': status.capture_fps if status else 0,
+                'frames_received': status.frames_received if status else 1,
+                'connection_ms': 0,
+                'reused_runtime': True,
+            }
+        # Never reopen an enabled webcam already owned by this service. DirectShow
+        # permits exclusive access on many devices and a second probe produces a
+        # misleading "device in use" failure.
+        if camera.enabled and camera.source_type == 'webcam':
+            return {
+                'success': False,
+                'message': 'No recent frame from the existing camera worker. The service did not reopen the webcam.',
+                'source': camera_manager._mask_rtsp_password(camera.rtsp_url),
+                'fps': status.capture_fps if status else 0,
+                'frames_received': status.frames_received if status else 0,
+                'connection_ms': 0,
+                'reused_runtime': True,
+                'attempts': [],
+            }
         return camera_manager.test_rtsp_connection(camera.rtsp_url)
     result = camera_manager.test_rtsp_connection(request.rtsp_url)
     return result
