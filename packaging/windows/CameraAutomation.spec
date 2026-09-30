@@ -51,7 +51,7 @@ hiddenimports = [
     "uvicorn.lifespan.on",
 ]
 
-for package_name in ("insightface", "onnxruntime", "openvino", "ultralytics", "torch"):
+for package_name in ("insightface", "onnxruntime", "openvino", "ultralytics", "torch", "livekit"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
     datas += package_datas
     binaries += package_binaries
