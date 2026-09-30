@@ -872,6 +872,25 @@ def portal_event_evidence(tenant_id: str, event_id: str, principal: PortalPrinci
     return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
 
+@app.get("/portal/v1/tenants/{tenant_id}/events/{event_id}/clip")
+def portal_event_clip(tenant_id: str, event_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    event = store.get_event(tenant_id, principal.shop_id, event_id)
+    if not event:
+        raise HTTPException(404, "Event not found")
+    envelope = event["payload"]
+    evidence = (envelope.get("payload", envelope).get("metadata") or {}).get("cloud_clip") or {}
+    evidence_id = evidence.get("evidence_id")
+    if not evidence_id:
+        raise HTTPException(404, "Video clip not available")
+    root = Path(os.getenv("SNAPKEY_EVIDENCE_ROOT", "/app/data/evidence")).resolve()
+    allowed = (root / tenant_id / principal.shop_id / event["edge_id"]).resolve()
+    path = (root / evidence_id).resolve()
+    if not allowed.is_relative_to(root) or not path.is_relative_to(allowed) or not path.is_file():
+        raise HTTPException(404, "Video clip not available")
+    return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "private, no-store"})
+
+
 @app.post("/portal/v1/licenses/issue")
 def issue_license(request: LicenseIssueRequest, http_request: Request):
     supplied=http_request.headers.get("X-CRM-Integration-Key","")
