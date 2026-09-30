@@ -70,6 +70,7 @@ class CameraConfig(BaseModel):
     tracking_imgsz: int = 384
     tracking_quality: int = 65
     rotation_degrees: Literal[0, 90, 180, 270] = 0
+    attendance_active: bool = True
     tracking_mode: str = "detect"
     features: CameraFeatures = Field(default_factory=CameraFeatures)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -77,7 +78,12 @@ class CameraConfig(BaseModel):
 
     @model_validator(mode='after')
     def attendance_requires_tracks(self):
-        if self.features.attendance and self.camera_role == CameraRole.ENTRANCE_EXIT:
+        if self.camera_role == CameraRole.ENTRANCE_EXIT:
+            self.features.attendance = True
+            self.features.face_recognition = True
+            # Attendance cameras never create unknown-person security incidents.
+            self.features.unknown_detection = False
+            self.features.unknown_person_detection = False
             self.tracking_mode = 'track'
         return self
 
@@ -161,6 +167,7 @@ class CameraManager:
             self._ensure_column(c, 'cameras', 'camera_zone', "TEXT NOT NULL DEFAULT 'inside'")
             self._ensure_column(c, 'cameras', 'crowd_threshold', 'INTEGER NOT NULL DEFAULT 10')
             self._ensure_column(c, 'cameras', 'rotation_degrees', 'INTEGER NOT NULL DEFAULT 0')
+            self._ensure_column(c, 'cameras', 'attendance_active', 'INTEGER NOT NULL DEFAULT 1')
             self._ensure_column(c, 'cameras', 'tracking_fps', 'REAL NOT NULL DEFAULT 3.0')
             self._ensure_column(c, 'cameras', 'tracking_imgsz', 'INTEGER NOT NULL DEFAULT 384')
             self._ensure_column(c, 'cameras', 'tracking_quality', 'INTEGER NOT NULL DEFAULT 65')
@@ -234,6 +241,7 @@ class CameraManager:
             tracking_quality=max(35, min(int(camera_data.get('tracking_quality', os.environ.get("SNAPKEY_PROFILE_TRACKING_QUALITY", 65)) or 65), 95)),
             tracking_mode=str(camera_data.get('tracking_mode', os.environ.get("SNAPKEY_PROFILE_TRACKING_MODE", "detect")) or 'detect').strip().lower() if str(camera_data.get('tracking_mode', os.environ.get("SNAPKEY_PROFILE_TRACKING_MODE", "detect")) or 'detect').strip().lower() in {'detect','track'} else 'detect',
             rotation_degrees=camera_data.get('rotation_degrees', 0),
+            attendance_active=bool(camera_data.get('attendance_active', True)),
             features=CameraFeatures(**features),
             created_at=datetime.now(timezone.utc).isoformat(),
             updated_at=datetime.now(timezone.utc).isoformat()
@@ -244,7 +252,7 @@ class CameraManager:
                 INSERT INTO cameras
                 (id, camera_id, name, source_type, rtsp_url, enabled, camera_role,
                  camera_zone, crowd_threshold, tracking_fps, tracking_imgsz,
-                 tracking_quality, tracking_mode, rotation_degrees, features_json, created_at, updated_at)
+                 tracking_quality, tracking_mode, rotation_degrees, attendance_active, features_json, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 str(uuid.uuid4()),
@@ -261,6 +269,7 @@ class CameraManager:
                 config.tracking_quality,
                 config.tracking_mode,
                 config.rotation_degrees,
+                1 if config.attendance_active else 0,
                 json.dumps(config.features.model_dump()),
                 config.created_at,
                 config.updated_at
@@ -350,6 +359,7 @@ class CameraManager:
                 tracking_quality=int(row['tracking_quality']),
                 tracking_mode=row['tracking_mode'] if row['tracking_mode'] in {'detect','track'} else 'detect',
                 rotation_degrees=row['rotation_degrees'],
+                attendance_active=bool(row['attendance_active']),
                 features=CameraFeatures(**json.loads(row['features_json'])),
                 created_at=row['created_at'],
                 updated_at=row['updated_at']
@@ -374,7 +384,8 @@ class CameraManager:
                     tracking_quality=int(row['tracking_quality']),
                     tracking_mode=row['tracking_mode'] if row['tracking_mode'] in {'detect','track'} else 'detect',
                     rotation_degrees=row['rotation_degrees'],
-                features=CameraFeatures(**json.loads(row['features_json'])),
+                    attendance_active=bool(row['attendance_active']),
+                    features=CameraFeatures(**json.loads(row['features_json'])),
                     created_at=row['created_at'],
                     updated_at=row['updated_at']
                 ) for row in rows
@@ -413,6 +424,8 @@ class CameraManager:
                 camera.tracking_mode = mode if mode in {'detect','track'} else 'detect'
             if 'rotation_degrees' in updates:
                 camera.rotation_degrees = updates['rotation_degrees']
+            if 'attendance_active' in updates:
+                camera.attendance_active = bool(updates['attendance_active'])
             if 'features' in updates:
                 camera.features = CameraFeatures(**updates['features'])
 
@@ -425,7 +438,7 @@ class CameraManager:
                     SET name = ?, source_type = ?, rtsp_url = ?, enabled = ?,
                         camera_role = ?, camera_zone = ?, crowd_threshold = ?,
                         tracking_fps = ?, tracking_imgsz = ?, tracking_quality = ?,
-                        tracking_mode = ?, rotation_degrees = ?,
+                        tracking_mode = ?, rotation_degrees = ?, attendance_active = ?,
                         features_json = ?, updated_at = ?
                     WHERE camera_id = ?
                 ''', (
@@ -441,6 +454,7 @@ class CameraManager:
                     camera.tracking_quality,
                     camera.tracking_mode,
                     camera.rotation_degrees,
+                    1 if camera.attendance_active else 0,
                     json.dumps(camera.features.model_dump()),
                     camera.updated_at,
                     camera_id
@@ -980,7 +994,7 @@ class CameraManager:
                                     recognized_text = f"{recognized_name} {score:.2f}"
                                     if store and self._should_emit_alert(f"recognized:{camera_id}:{match['person_id']}", 5 if camera_config.features.attendance else 60):
                                         store.add_person_event(match["person_id"], getattr(attendance_engine, "store_id", "store-1"), camera_id, "PERSON_RECOGNIZED", datetime.now(timezone.utc), {"track_id": str(track_id), "confidence": score, "snapshot_path": snapshot_path})
-                                    if camera_config.features.attendance and track_id is not None:
+                                    if camera_config.features.attendance and camera_config.attendance_active and track_id is not None:
                                         attendance_engine.on_identity(IdentitySeen(
                                             store_id=attendance_engine.store_id,
                                             camera_id=camera_id,
@@ -998,7 +1012,7 @@ class CameraManager:
                                         "name": recognized_name,
                                         "score": score,
                                     }
-                                elif (camera_config.features.unknown_detection or camera_config.features.unknown_person_detection) and camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
+                                elif camera_config.camera_role != CameraRole.ENTRANCE_EXIT and (camera_config.features.unknown_detection or camera_config.features.unknown_person_detection) and camera_zone == "inside" and store and self._should_emit_alert(f"unknown:{camera_id}:{track_id}", 20):
                                     event_time = datetime.now(timezone.utc)
                                     face_snapshot = self._save_event_snapshot(roi, camera_id, "unknown_face")
                                     person_snapshot = self._save_event_snapshot(frame, camera_id, "unknown_person")
