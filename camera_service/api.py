@@ -10,6 +10,7 @@ from camera_service.models import PersonnelCreate, PersonnelPatch
 from camera_service.storage import SQLiteStore
 from camera_service.face_service import FaceService
 from camera_service.attendance_engine import AttendanceEngine
+from camera_service.attendance_station import AttendanceStation
 from camera_service.camera.supervisor import CameraSupervisor
 from camera_service.camera_manager import CameraManager, CameraConfig, CameraStatus, CameraState
 from camera_service.camera.onvif import probe_onvif, select_profile, OnvifUnavailable
@@ -25,7 +26,8 @@ from camera_service.object_security.roi import apply_roi, map_box_from_offset
 from camera_service.object_security.tiling import suppress_duplicates, tiles_for_shape
 from camera_service.person_model_registry import PersonModelRegistry
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 import json
 import os
 import requests
@@ -656,7 +658,7 @@ class CameraCreate(BaseModel):
     tracking_fps: float = 3.0
     tracking_imgsz: int = 384
     tracking_quality: int = 65
-    rotation_degrees: int = 0
+    rotation_degrees: Literal[0, 90, 180, 270] = 0
     tracking_mode: str = "detect"
     features: dict = {}
 
@@ -730,7 +732,10 @@ def update_camera(camera_id: str, updates: dict):
     _enforce_camera_license(_merged_camera_features(existing, updates), creating=False)
     if updates.get('rtsp_url') == camera_manager._mask_rtsp_password(existing.rtsp_url):
         updates.pop('rtsp_url', None)
-    camera = camera_manager.update_camera(camera_id, updates)
+    try:
+        camera = camera_manager.update_camera(camera_id, updates)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
     if not camera:
         raise HTTPException(404, 'Camera not found')
     return {
@@ -942,10 +947,58 @@ def end_person_break(person_id: str, body: BreakActionRequest, s=Depends(get_sto
     except ValueError as exc:
         raise HTTPException(409, str(exc))
 
+# Local Attendance Station (no CRM mutations)
+class StationActionRequest(BaseModel):
+    person_id: str
+    token: str
+    action: str
+    expected_state: str
+    request_id: str = Field(min_length=1, max_length=100)
+
+station = AttendanceStation(attendance_engine)
+
+def _attendance_camera(camera_id):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera or camera.camera_role.value != 'ENTRANCE_EXIT':
+        raise HTTPException(404, 'Attendance camera not found')
+    return camera
+
+@app.get('/api/v1/cameras/{camera_id}/attendance-station')
+def attendance_station(camera_id: str, s=Depends(get_store)):
+    _attendance_camera(camera_id)
+    return {'candidate': station.candidate(camera_id), 'recent': [_public_attendance(item) for item in s.attendance(limit=25, camera_id=camera_id)]}
+
+@app.post('/api/v1/cameras/{camera_id}/attendance-station/action')
+def attendance_station_action(camera_id: str, body: StationActionRequest):
+    _attendance_camera(camera_id)
+    try:
+        return station.apply(camera_id, **body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+@app.get('/api/v1/cameras/{camera_id}/attendance-station/snapshot')
+def attendance_station_snapshot(camera_id: str, s=Depends(get_store)):
+    _attendance_camera(camera_id)
+    with attendance_engine._lock:
+        candidate = station.candidate(camera_id)
+        if not candidate:
+            raise HTTPException(404, 'Recognition expired')
+        identities = [ev for (cam, _), ev in attendance_engine.identities.items() if cam == camera_id and ev.person_id == candidate['person_id']]
+        ev = max(identities, key=lambda item: item.timestamp)
+        return _saved_evidence(ev.snapshot_path, s)
+
+def _public_attendance(record):
+    item = dict(record)
+    for side in ('arrival', 'exit'):
+        item[f'{side}_snapshot'] = bool(item.get(f'{side}_snapshot'))
+        item[f'{side}_snapshot_url'] = f"/api/v1/attendance/{item['id']}/snapshots/{side}" if item[f'{side}_snapshot'] else None
+    item['attendance_state'] = 'OUT' if item.get('exit_time') or not item.get('entry_confirmed') else ('ON_BREAK' if item.get('break_started_at') else 'IN')
+    return item
+
 # Attendance APIs
 @app.get('/api/v1/attendance')
 def attendance(person_id:str|None=None,limit:int|None=Query(default=None,ge=1,le=1000),camera_id:str|None=None,s=Depends(get_store)):
-    return {'items':s.attendance(person_id,limit=limit,camera_id=camera_id)}
+    return {'items':[_public_attendance(item) for item in s.attendance(person_id,limit=limit,camera_id=camera_id)]}
 
 def _saved_evidence(path_value, s, media_type='image/jpeg'):
     if not path_value:
@@ -966,10 +1019,10 @@ def attendance_snapshot(session_id:str,side:str,s=Depends(get_store)):
     return _saved_evidence(record.get(f'{side}_snapshot'),s)
 
 @app.get('/api/v1/attendance/today')
-def attendance_today(s=Depends(get_store)): return {'items':s.attendance()}
+def attendance_today(s=Depends(get_store)): return {'items':[_public_attendance(item) for item in s.attendance()]}
 
 @app.get('/api/v1/attendance/{person_id}')
-def attendance_person(person_id:str,s=Depends(get_store)): return {'items':s.attendance(person_id)}
+def attendance_person(person_id:str,s=Depends(get_store)): return {'items':[_public_attendance(item) for item in s.attendance(person_id)]}
 
 # Presence API
 @app.get('/api/v1/presence')
@@ -1103,14 +1156,39 @@ def object_security_test_stream(
 def object_security_events(s=Depends(get_store)): return {'items':s.object_security_events()}
 
 # Security Alert APIs
+def _public_incident(record, kind, s):
+    if not record:
+        return record
+    item = dict(record)
+    roots = (Path(config.evidence_dir).resolve(), (Path(s.path).parent / 'evidence').resolve())
+    def available(value):
+        if not value:
+            return False
+        try:
+            path = Path(value).resolve()
+            return any(path.is_relative_to(root) for root in roots) and path.is_file() and path.stat().st_size > 0
+        except OSError:
+            return False
+    for key in ('clip_path', 'snapshot_path', 'best_face_snapshot', 'best_person_snapshot'):
+        if key in item:
+            item[key] = available(item[key])
+    item['clip_available'] = bool(item.get('clip_path'))
+    item['snapshot_available'] = bool(item.get('snapshot_path') or item.get('best_face_snapshot') or item.get('best_person_snapshot'))
+    base = f"/api/v1/{kind}/{item['id']}"
+    item['clip_url'] = base + '/clip' if item['clip_available'] else None
+    item['snapshot_url'] = base + '/snapshot' if item['snapshot_available'] else None
+    # Evidence paths inside internal metadata are not browser-facing data.
+    item.pop('metadata_json', None)
+    return item
+
 @app.get('/api/v1/security-alerts')
-def security_alerts(limit:int|None=Query(default=None,ge=1,le=1000),s=Depends(get_store)): return {'items':s.security_alerts(limit=limit)}
+def security_alerts(limit:int|None=Query(default=None,ge=1,le=1000),s=Depends(get_store)): return {'items':[_public_incident(item, 'security-alerts', s) for item in s.security_alerts(limit=limit)]}
 
 @app.get('/api/v1/security-alerts/{alert_id}')
 def security_alert(alert_id:str,s=Depends(get_store)):
     alert=s.security_alert(alert_id)
     if not alert: raise HTTPException(404,'Security alert not found')
-    return alert
+    return _public_incident(alert, 'security-alerts', s)
 
 @app.get('/api/v1/security-alerts/{alert_id}/snapshot')
 def security_alert_snapshot(alert_id:str,s=Depends(get_store)):
@@ -1128,18 +1206,24 @@ def security_alert_clip(alert_id:str,s=Depends(get_store)):
 def acknowledge_security_alert(alert_id:str,s=Depends(get_store)):
     alert=s.acknowledge_security_alert(alert_id)
     if not alert: raise HTTPException(404,'Security alert not found')
-    return alert
+    return _public_incident(alert, 'security-alerts', s)
 
 # Unknown Incidents APIs
 @app.get('/api/v1/unknown-incidents')
-def unknowns(limit:int|None=Query(default=None,ge=1,le=1000),s=Depends(get_store)): return {'items':s.unknowns(limit=limit)}
+def unknowns(limit:int|None=Query(default=None,ge=1,le=1000),s=Depends(get_store)): return {'items':[_public_incident(item, 'unknown-incidents', s) for item in s.unknowns(limit=limit)]}
 
 @app.get('/api/v1/unknown-incidents/{incident_id}/snapshot')
 def unknown_snapshot(incident_id:str,s=Depends(get_store)):
     incident=s.unknown(incident_id)
     if not incident:
         raise HTTPException(404,'Incident not found')
-    return _saved_evidence(incident.get('best_face_snapshot') or incident.get('best_person_snapshot'),s)
+    for key in ('best_face_snapshot', 'best_person_snapshot'):
+        try:
+            return _saved_evidence(incident.get(key), s)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+    raise HTTPException(404, 'Snapshot unavailable')
 
 @app.get('/api/v1/unknown-incidents/{incident_id}/clip')
 def unknown_clip(incident_id:str,s=Depends(get_store)):
@@ -1152,10 +1236,10 @@ def unknown_clip(incident_id:str,s=Depends(get_store)):
 def unknown(incident_id:str,s=Depends(get_store)):
     i=s.unknown(incident_id)
     if not i: raise HTTPException(404,'Incident not found')
-    return i
+    return _public_incident(i, 'unknown-incidents', s)
 
 @app.post('/api/v1/unknown-incidents/{incident_id}/acknowledge')
 def ack(incident_id:str,s=Depends(get_store)):
     i=s.acknowledge_unknown(incident_id)
     if not i: raise HTTPException(404,'Incident not found')
-    return i
+    return _public_incident(i, 'unknown-incidents', s)

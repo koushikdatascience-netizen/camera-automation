@@ -42,6 +42,8 @@ class SQLiteStore:
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','entry_confirmed','INTEGER NOT NULL DEFAULT 0')
+            for column in ('break_started_at', 'last_break_start', 'last_break_end'):
+                self._ensure_column(c,'attendance_sessions',column,'TEXT')
             self._ensure_column(c,'edge_event_queue','next_attempt_at','TEXT')
             self._ensure_column(c,'edge_event_queue','claimed_at','TEXT')
     def _ensure_column(self,conn,table,column,definition):
