@@ -752,7 +752,7 @@
                     <div class="focus-stage-bar"><strong id="focus-camera-name">Select a camera</strong><span id="focus-camera-status" class="live-status offline">OFFLINE</span></div>
                     <img id="focus-camera-image" alt="Selected live camera" hidden>
                     <div id="security-zone-layer" hidden></div>
-                    <div id="focus-camera-placeholder" class="focus-placeholder">Select an online camera</div>
+                    <div id="focus-camera-placeholder" class="focus-placeholder"><span id="focus-camera-placeholder-text">Select an online camera</span><button id="focus-open-live-btn" class="btn btn-primary" type="button" hidden>Open Live View</button></div>
                 </div>
                 <aside class="focus-detail">
                     <h3 id="focus-purpose">Attendance</h3>
@@ -1601,6 +1601,7 @@
         let recognizedCameraId = null;
         let securityZones = [];
         let drawingSecurityZone = false;
+        let liveStreamRetryTimer = null;
 
         function clearStationCandidate() {
             stationCandidate = null;
@@ -1636,13 +1637,41 @@
             } finally { stationBusy=false; }
         }
 
+        function restartFocusedStream() {
+            const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+            if(!camera?.status?.online || !livePreviewOpen || liveView!=='focus') return;
+            const image=document.getElementById('focus-camera-image');
+            image.removeAttribute('src');
+            image.hidden=false;
+            requestAnimationFrame(()=>{ image.src=`${liveStreamUrl(camera.camera_id)}?t=${Date.now()}`; });
+        }
+
         async function setAttendanceActive(active) {
-            if(!selectedLiveCameraId) return;
-            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/attendance-station/${active?'start':'stop'}`,{method:'POST'});
-            const body=await response.json();
-            if(!response.ok){document.getElementById('focus-control-message').textContent=body.detail||'Attendance command failed';return;}
-            document.getElementById('focus-control-message').textContent=active?'Attendance is active':'Attendance stopped — no attendance candidates will be created';
-            await loadLiveCameras(); await loadAttendanceStation();
+            if(!selectedLiveCameraId || stationBusy) return;
+            stationBusy=true;
+            const start=document.getElementById('attendance-start'), stop=document.getElementById('attendance-stop');
+            start.disabled=true; stop.disabled=true;
+            try {
+                const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/attendance-station/${active?'start':'stop'}`,{method:'POST'});
+                const body=await response.json();
+                if(!response.ok) throw new Error(body.detail||'Attendance command failed');
+                document.getElementById('focus-control-message').textContent=active?'Attendance is active':'Attendance stopped — live video remains available';
+                if(!active) clearStationCandidate();
+                await loadLiveCameras();
+                await loadAttendanceStation();
+                // Attendance is a processing mode, not ownership of the live preview.
+                // Reconnect the MJPEG element in case the browser dropped the long-lived request.
+                restartFocusedStream();
+            } catch(error) {
+                document.getElementById('focus-control-message').textContent=error.message;
+            } finally {
+                stationBusy=false;
+                const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+                if(camera?.camera_role==='ENTRANCE_EXIT') {
+                    start.disabled=!!camera.attendance_active;
+                    stop.disabled=!camera.attendance_active;
+                }
+            }
         }
 
         async function loadAttendanceStation() {
@@ -1739,6 +1768,8 @@
             if (!entrance || !livePreviewOpen) clearStationCandidate();
             const image = document.getElementById('focus-camera-image');
             const placeholder = document.getElementById('focus-camera-placeholder');
+            const placeholderText = document.getElementById('focus-camera-placeholder-text');
+            const openLiveButton = document.getElementById('focus-open-live-btn');
             document.getElementById('focus-camera-name').textContent = camera?.name || 'Select a camera';
             const status = document.getElementById('focus-camera-status');
             status.textContent = online ? 'LIVE' : 'OFFLINE';
@@ -1768,8 +1799,10 @@
             placeholder.hidden = online && livePreviewOpen && liveView === 'focus';
             if (!online || !livePreviewOpen || liveView !== 'focus') {
                 image.removeAttribute('src');
-                placeholder.textContent = camera?.status?.last_error || 'Select Open Live View on a camera';
+                placeholderText.textContent = camera?.status?.last_error || (camera ? 'Live preview is closed' : 'Select a camera');
+                openLiveButton.hidden = !online || !camera;
             } else {
+                openLiveButton.hidden = true;
                 const url = liveStreamUrl(camera.camera_id);
                 if (!image.getAttribute('src')?.startsWith(url)) image.src = url;
             }
@@ -1878,6 +1911,31 @@
             const link=document.querySelector('nav a[data-section="live"]'); if(link) link.click();
         });
         document.getElementById('live-refresh-btn')?.addEventListener('click', loadLiveCameras);
+        document.getElementById('focus-open-live-btn')?.addEventListener('click', () => {
+            if(!selectedLiveCameraId) return;
+            livePreviewOpen=true;
+            renderFocusedCamera();
+            restartFocusedStream();
+            loadLiveActivity();
+        });
+        document.getElementById('close-live-view')?.addEventListener('click', () => {
+            livePreviewOpen=false;
+            clearTimeout(liveStreamRetryTimer);
+            liveStreamRetryTimer=null;
+            document.getElementById('focus-camera-image').removeAttribute('src');
+            renderFocusedCamera();
+        });
+        document.getElementById('focus-camera-image')?.addEventListener('error', () => {
+            const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+            if(!camera?.status?.online || !livePreviewOpen || liveView!=='focus') return;
+            const placeholder=document.getElementById('focus-camera-placeholder');
+            const placeholderText=document.getElementById('focus-camera-placeholder-text');
+            placeholder.hidden=false;
+            placeholderText.textContent='Live stream interrupted — reconnecting…';
+            document.getElementById('focus-open-live-btn').hidden=false;
+            clearTimeout(liveStreamRetryTimer);
+            liveStreamRetryTimer=setTimeout(restartFocusedStream, 1500);
+        });
         document.getElementById('live-overlay-btn')?.addEventListener('click', event => {
             liveAiOverlay=!liveAiOverlay;
             event.currentTarget.textContent=`AI Overlay: ${liveAiOverlay?'On':'Off'}`;
