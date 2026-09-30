@@ -447,11 +447,62 @@ def _portal_camera_view(camera: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
+def _edge_inventory_camera(tenant_id: str, shop_id: str, edge_id: str, camera_id: str) -> dict[str, Any] | None:
+    """Resolve a credential-free camera advertised by the edge heartbeat."""
+    for edge in store.list_edges(tenant_id, shop_id=shop_id):
+        if str(edge.get("edge_id") or "") != edge_id:
+            continue
+        for camera in (edge.get("status") or {}).get("cameras") or []:
+            if str(camera.get("camera_id") or "") == camera_id:
+                return {
+                    **camera,
+                    "tenant_id": tenant_id,
+                    "shop_id": shop_id,
+                    "site_id": edge.get("site_id") or shop_id,
+                    "edge_id": edge_id,
+                    "source_type": camera.get("source_type") or "rtsp",
+                    "source_configured": True,
+                    "source_is_edge_local": True,
+                    "edge_inventory": True,
+                }
+    return None
+
+
+def _portal_camera_lookup(tenant_id: str, shop_id: str, edge_id: str, camera_id: str) -> dict[str, Any] | None:
+    camera = store.get_camera(tenant_id, shop_id, edge_id, camera_id)
+    return camera or _edge_inventory_camera(tenant_id, shop_id, edge_id, camera_id)
+
+
 @app.get("/portal/v1/tenants/{tenant_id}/cameras")
 def portal_cameras(tenant_id: str, shop_id: str | None = None, edge_id: str | None = None, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id,principal)
     if shop_id and shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
-    return {"items": [_portal_camera_view(camera) for camera in store.list_cameras(tenant_id, shop_id=principal.shop_id, edge_id=edge_id)]}
+    configured = [_portal_camera_view(camera) for camera in store.list_cameras(tenant_id, shop_id=principal.shop_id, edge_id=edge_id)]
+    keyed = {(str(item.get("edge_id") or ""), str(item.get("camera_id") or "")): item for item in configured}
+    # Local Camera Eye setup remains authoritative for RTSP credentials. Heartbeats
+    # publish only safe metadata/status so CRM can immediately see locally-created cameras.
+    for edge in store.list_edges(tenant_id, shop_id=principal.shop_id):
+        eid = str(edge.get("edge_id") or "")
+        if edge_id and eid != edge_id:
+            continue
+        for advertised in (edge.get("status") or {}).get("cameras") or []:
+            cid = str(advertised.get("camera_id") or "")
+            key = (eid, cid)
+            if key in keyed:
+                keyed[key].update({k: advertised.get(k) for k in ("online","state","last_frame_at","capture_fps","ai_fps","last_error")})
+                continue
+            keyed[key] = {
+                **advertised,
+                "tenant_id": tenant_id,
+                "company_code": principal.company_code,
+                "shop_id": principal.shop_id,
+                "site_id": edge.get("site_id") or principal.shop_id,
+                "edge_id": eid,
+                "source_configured": True,
+                "source_is_edge_local": True,
+                "edge_inventory": True,
+            }
+    return {"items": list(keyed.values())}
 
 
 @app.put("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
@@ -780,7 +831,7 @@ def portal_attendance(tenant_id: str, principal: PortalPrincipal = Depends(requi
 @app.get("/portal/v1/tenants/{tenant_id}/attendance-station/candidate")
 def attendance_station_candidate(tenant_id: str, camera_id: str, edge_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id,principal)
-    camera=store.get_camera(tenant_id,principal.shop_id,edge_id,camera_id)
+    camera=_portal_camera_lookup(tenant_id,principal.shop_id,edge_id,camera_id)
     if not camera or str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
         raise HTTPException(400,"Attendance Station is available only for attendance/entrance cameras")
     now=datetime.now(timezone.utc)
@@ -807,7 +858,7 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
     action=request.action.strip().upper()
     if action not in {"CHECK_IN","CHECK_OUT","BREAK_START","BREAK_END"}:
         raise HTTPException(400,"Unsupported attendance action")
-    camera=store.get_camera(tenant_id,principal.shop_id,request.edge_id,request.camera_id)
+    camera=_portal_camera_lookup(tenant_id,principal.shop_id,request.edge_id,request.camera_id)
     if not camera or str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
         raise HTTPException(400,"Manual attendance actions require an attendance/entrance camera")
     event=store.get_event(tenant_id,principal.shop_id,request.recognition_event_id)
