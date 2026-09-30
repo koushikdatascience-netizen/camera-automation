@@ -835,7 +835,7 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
     audit_id="manual-"+secrets.token_urlsafe(12)
     store.record_portal_event({"event_id":audit_id,"tenant_id":tenant_id,"company_code":principal.company_code,"shop_id":principal.shop_id,
         "site_id":str(camera.get("site_id") or principal.shop_id),"edge_id":request.edge_id,"camera_id":request.camera_id,
-        "event_type":"MANUAL_"+action,"event_time":now,"payload":{"person_id":person_id,"event_type":"MANUAL_"+action,
+        "event_type":"MANUAL_"+action,"event_time":crm_timestamp,"payload":{"person_id":person_id,"event_type":"MANUAL_"+action,
         "event_time":crm_timestamp,"metadata":{"recognition_event_id":request.recognition_event_id,"confirmed_by_user_id":principal.user_id,
         "confirmed_by_name":principal.display_name,"confirmed_by_role":principal.role,"camera_name":camera.get("name")}}})
     return {"ok":True,"audit_event_id":audit_id,"action":action,"person_id":person_id,"recognition_event_id":request.recognition_event_id,"confirmed_at":crm_timestamp,
