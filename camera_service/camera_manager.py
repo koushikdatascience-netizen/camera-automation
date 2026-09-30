@@ -330,7 +330,7 @@ class CameraManager:
                 (id, camera_id, name, source_type, rtsp_url, enabled, camera_role,
                  camera_zone, crowd_threshold, tracking_fps, tracking_imgsz,
                  tracking_quality, tracking_mode, rotation_degrees, attendance_active, features_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 str(uuid.uuid4()),
                 config.camera_id,
@@ -1024,7 +1024,7 @@ class CameraManager:
                 label = names.get(class_id, f"class_{class_id}")
                 recognized_text = None
 
-                if label == "person" and track_id is not None and attendance_line is not None:
+                if label == "person" and track_id is not None and attendance_line is not None and camera_config.attendance_active:
                     direction = attendance_line.update(str(track_id), (float(x1), float(y1), float(x2), float(y2)))
                     if direction:
                         attendance_engine.on_crossing(LineCrossingEvent(
