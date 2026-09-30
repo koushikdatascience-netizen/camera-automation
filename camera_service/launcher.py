@@ -1,4 +1,5 @@
 import os
+import json
 import argparse
 import sys
 import threading
@@ -96,6 +97,39 @@ def open_browser_when_ready(host: str, port: int) -> None:
         print(f"Server health check did not become ready: {health_url}")
 
 
+def existing_instance_healthy(host: str, port: int) -> bool:
+    """Identify our edge service, not just any HTTP listener on this port."""
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=2) as response:
+            data = json.loads(response.read(65536))
+            return isinstance(data, dict) and response.status == 200 and data.get('status') == 'ok' and 'store_id' in data and isinstance(data.get('runtime'), dict)
+    except (OSError, ValueError, urllib.error.URLError):
+        return False
+
+
+def acquire_instance_lock(port: int) -> bool:
+    """Windows kernel mutex survives startup races and is released on process exit."""
+    global _INSTANCE_HANDLE
+    if os.name != 'nt':
+        return True
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    name = 'Global\\SnapKeyVisionAI' if port == 8091 else f'Global\\SnapKeyVisionAI-{port}'
+    ctypes.set_last_error(0)
+    handle = kernel.CreateMutexW(None, False, name)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), 'Could not create application instance lock')
+    if ctypes.get_last_error() == 183:
+        kernel.CloseHandle(handle)
+        return False
+    _INSTANCE_HANDLE = handle
+    return True
+
+
 def main() -> None:
     ensure_console_streams()
     parser = argparse.ArgumentParser(description="Madhushala Camera AI edge service")
@@ -117,18 +151,21 @@ def main() -> None:
         open_browser(setup_url)
         return
 
-    global _INSTANCE_HANDLE
-    if os.name == "nt" and getattr(sys, "frozen", False):
-        import ctypes
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.CreateMutexW.restype = ctypes.c_void_p
-        _INSTANCE_HANDLE = kernel.CreateMutexW(None, False, "Global\\SnapKeyVisionAI")
-        if not _INSTANCE_HANDLE:
-            raise OSError("Could not create application instance lock")
-        if ctypes.get_last_error() == 183:
-            if not args.background and not args.no_browser:
-                open_browser(setup_url)
-            return
+    foreground = env_bool("AUTO_OPEN_BROWSER", True) and not args.background and not args.no_browser
+    if existing_instance_healthy(host, port):
+        if foreground:
+            open_browser(setup_url)
+        return
+    if not acquire_instance_lock(port):
+        # The owner may still be importing models; do not race it with another server.
+        if foreground:
+            open_browser_when_ready(host, port)
+        return
+    # An older service started outside this launcher can become ready during locking.
+    if existing_instance_healthy(host, port):
+        if foreground:
+            open_browser(setup_url)
+        return
 
     from camera_service.api import app
 
