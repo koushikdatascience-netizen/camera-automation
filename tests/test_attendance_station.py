@@ -89,3 +89,22 @@ def test_local_station_api_and_camera_scope(tmp_path, monkeypatch):
     assert data['recent'][0]['arrival_snapshot'] is False
     body['request_id'] = 'new'
     assert client.post('/api/v1/cameras/entrance/attendance-station/action', json=body).status_code == 409
+
+
+def test_attendance_camera_stop_blocks_candidates_and_actions(tmp_path):
+    from camera_service.camera_manager import CameraManager
+    station, now = station_fixture(tmp_path)
+    manager = CameraManager(str(tmp_path / 'cameras.db'))
+    manager.create_camera({
+        'camera_id':'entrance','name':'Entrance','source_type':'webcam','rtsp_url':'0',
+        'camera_role':'ENTRANCE_EXIT','attendance_active':False,
+        'features':{'attendance':True,'face_recognition':True,'unknown_detection':True},
+    })
+    station.camera_manager = manager
+    assert station.candidate('entrance', now) is None
+    manager.update_camera('entrance', {'attendance_active': True})
+    candidate = station.candidate('entrance', now)
+    assert candidate is not None
+    manager.update_camera('entrance', {'attendance_active': False})
+    with pytest.raises(ValueError, match='stopped'):
+        station.apply('entrance', candidate['person_id'], candidate['token'], 'CHECK_IN', 'OUT', 'stopped', now)
