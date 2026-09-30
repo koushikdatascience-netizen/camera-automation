@@ -636,7 +636,10 @@
     const presence=document.getElementById("presence-body"); const active=data.presence||[];
     if(presence) presence.innerHTML=active.length?active.map(r=>"<tr><td><strong>"+escapeHtml(r.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(r.employee_code||"—")+"</td><td>"+escapeHtml(r.role||"—")+"</td><td>"+fmtTime(r.entry_time)+"</td><td>"+fmtTime(r.entry_time)+"</td><td>—</td><td>—</td><td>—</td><td><span class='status-badge active'>● Present</span></td></tr>").join(""):"<tr><td colspan='9'>No personnel currently present from confirmed attendance events.</td></tr>";
     const events=document.getElementById("person-events-body"); const ev=data.events||[];
-    if(events) events.innerHTML=ev.length?ev.map(e=>"<tr><td>"+fmtTime(e.event_time)+"</td><td><strong>"+escapeHtml(e.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(String(e.event_type||"").replaceAll("_"," "))+"</td><td>"+escapeHtml(e.camera_id||"—")+"</td><td>—</td><td>—</td><td>"+(e.confidence!=null?Math.round(Number(e.confidence)*100)+"%":"—")+"</td><td>—</td></tr>").join(""):"<tr><td colspan='8'>No person events received yet.</td></tr>";
+    if(events){
+      events.innerHTML=ev.length?ev.map(e=>"<tr><td>"+fmtTime(e.event_time)+"</td><td><strong>"+escapeHtml(e.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(String(e.event_type||"").replaceAll("_"," "))+"</td><td>"+escapeHtml(e.camera_id||"—")+"</td><td>—</td><td>"+(e.has_evidence?"<button class='btn btn-light person-evidence' data-event-id='"+escapeHtml(e.event_id)+"'>View image</button>":"—")+"</td><td>"+(e.confidence!=null?Math.round(Number(e.confidence)*100)+"%":"—")+"</td><td>—</td></tr>").join(""):"<tr><td colspan='8'>No person events received yet.</td></tr>";
+      events.querySelectorAll(".person-evidence").forEach(button=>button.addEventListener("click",()=>openPortalEvidence(button.dataset.eventId,"evidence")));
+    }
   }
   async function loadAttendance(){
     if(!document.getElementById("attendance-records-body"))return;
@@ -644,6 +647,20 @@
     const data=await response.json(); if(!response.ok)throw new Error(data.detail||"Unable to load attendance."); renderAttendance(data);
   }
   function wireAttendancePage(){if(!document.getElementById("attendance-records-body"))return;loadAttendance().catch(error=>showMessage(error.message,true));setInterval(()=>loadAttendance().catch(()=>{}),15000);}
+
+  async function openPortalEvidence(eventId,kind="evidence"){
+    try{
+      const scope=requireScope(["tenant_id"]);
+      const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/events/"+encodeURIComponent(eventId)+"/"+kind);
+      if(!response.ok)throw new Error(kind==="clip"?"Video unavailable.":"Snapshot unavailable.");
+      const url=URL.createObjectURL(await response.blob());const dialog=document.createElement("dialog");
+      const media=kind==="clip"?document.createElement("video"):document.createElement("img");media.src=url;
+      if(kind==="clip"){media.controls=true;media.autoplay=true;}else media.alt="Event snapshot";
+      media.style.maxWidth="min(85vw,1100px)";media.style.maxHeight="78vh";
+      const close=document.createElement("button");close.className="btn btn-light";close.textContent="Close";close.addEventListener("click",()=>dialog.close());
+      dialog.append(media,close);dialog.addEventListener("close",()=>{URL.revokeObjectURL(url);dialog.remove();});document.body.appendChild(dialog);dialog.showModal();
+    }catch(error){showMessage(error.message,true);}
+  }
 
   async function loadAlerts(){
     const body=document.getElementById('alerts-body'); if(!body)return;
@@ -659,21 +676,10 @@
         const cell=document.createElement('td');cell.textContent=text;row.appendChild(cell);
       }
       const evidence=document.createElement('td');
-      evidence.textContent=metadata.cloud_evidence?'Synced':'Unavailable';
-      if(metadata.cloud_evidence){
-        const button=document.createElement('button');button.className='btn btn-light';button.textContent='View snapshot';
-        button.addEventListener('click',async()=>{
-          try{
-            const response=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/events/'+encodeURIComponent(event.id)+'/evidence');
-            if(!response.ok)throw new Error('Snapshot unavailable.');
-            const url=URL.createObjectURL(await response.blob());const dialog=document.createElement('dialog');
-            const image=document.createElement('img');image.src=url;image.alt='Alert snapshot';image.style.maxWidth='min(80vw,960px)';image.style.maxHeight='75vh';
-            const close=document.createElement('button');close.className='btn btn-light';close.textContent='Close';close.addEventListener('click',()=>dialog.close());
-            dialog.append(image,close);dialog.addEventListener('close',()=>{URL.revokeObjectURL(url);dialog.remove();});document.body.appendChild(dialog);dialog.showModal();
-          }catch(error){showMessage(error.message,true);}
-        });
-        evidence.replaceChildren(button);
-      }
+      const actions=[];
+      if(metadata.cloud_evidence){const button=document.createElement('button');button.className='btn btn-light';button.textContent='Snapshot';button.addEventListener('click',()=>openPortalEvidence(event.id,'evidence'));actions.push(button);}
+      if(metadata.cloud_clip){const button=document.createElement('button');button.className='btn btn-light';button.textContent='Video';button.addEventListener('click',()=>openPortalEvidence(event.id,'clip'));actions.push(button);}
+      if(actions.length){evidence.replaceChildren(...actions);}else{evidence.textContent='Unavailable';}
       row.appendChild(evidence);body.appendChild(row);
     }
     if(!items.length){const row=body.insertRow();const cell=row.insertCell();cell.colSpan=5;cell.textContent='No alerts received from this shop.';}
