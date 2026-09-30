@@ -776,7 +776,7 @@ def update_camera(camera_id: str, updates: dict):
     if updates.get('rtsp_url') == camera_manager._mask_rtsp_password(existing.rtsp_url):
         updates.pop('rtsp_url', None)
     try:
-        camera = camera_manager.update_camera(camera_id, updates)
+        camera = camera_manager.update_camera(camera_id, updates, mark_local_override=True)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     if not camera:
