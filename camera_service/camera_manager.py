@@ -187,6 +187,9 @@ class CameraManager:
             self._ensure_column(c, 'cameras', 'tracking_imgsz', 'INTEGER NOT NULL DEFAULT 384')
             self._ensure_column(c, 'cameras', 'tracking_quality', 'INTEGER NOT NULL DEFAULT 65')
             self._ensure_column(c, 'cameras', 'tracking_mode', "TEXT NOT NULL DEFAULT 'detect'")
+            # Forward-compatible runtime metadata used by newer edge builds. Keeping
+            # the migration here makes existing ProgramData databases safe to upgrade.
+            self._ensure_column(c, 'camera_status', 'operating_json', "TEXT NOT NULL DEFAULT '{}'")
 
     def publish_live_ai_frame(self, camera_id: str, frame) -> None:
         """Keep one in-memory annotated frame for temporary remote WebRTC viewing."""
