@@ -176,6 +176,18 @@ class AttendanceStationActionRequest(BaseModel):
     action: str
 
 
+class AttendanceLiveStartRequest(BaseModel):
+    camera_id: str
+    edge_id: str
+    ttl_seconds: int = Field(default=600, ge=30, le=1800)
+
+
+class AttendanceLiveStopRequest(BaseModel):
+    camera_id: str
+    edge_id: str
+    session_id: str
+
+
 def _password_hash(password: str, salt: bytes | None = None) -> str:
     if salt is None:
         salt=secrets.token_bytes(16)
@@ -827,6 +839,53 @@ def portal_attendance(tenant_id: str, principal: PortalPrincipal = Depends(requi
     records=sorted(sessions.values(),key=lambda x:x.get("entry_time") or x.get("exit_time") or "",reverse=True)
     presence=[{**r,"status":"PRESENT"} for r in records if r.get("entry_time") and not r.get("exit_time")]
     return {"records":records,"presence":presence,"events":person_events[:100]}
+
+def _livekit_token(room: str, identity: str, *, publish: bool, subscribe: bool, ttl_seconds: int) -> str:
+    try:
+        from livekit import api as livekit_api
+    except ImportError as exc:
+        raise HTTPException(503, "LiveKit server SDK is not installed") from exc
+    api_key=os.getenv("SNAPKEY_LIVEKIT_API_KEY","").strip()
+    api_secret=os.getenv("SNAPKEY_LIVEKIT_API_SECRET","").strip()
+    if not api_key or not api_secret:
+        raise HTTPException(503, "Attendance live view is not configured")
+    return (livekit_api.AccessToken(api_key,api_secret)
+        .with_identity(identity)
+        .with_grants(livekit_api.VideoGrants(room_join=True,room=room,can_publish=publish,can_subscribe=subscribe,can_publish_data=False))
+        .with_ttl(timedelta(seconds=ttl_seconds+60))
+        .to_jwt())
+
+
+@app.post("/portal/v1/tenants/{tenant_id}/attendance-station/live/start")
+def attendance_station_live_start(tenant_id: str, request: AttendanceLiveStartRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    camera=_portal_camera_lookup(tenant_id,principal.shop_id,request.edge_id,request.camera_id)
+    if not camera or str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
+        raise HTTPException(400,"Remote live view is available only for attendance/entrance cameras")
+    livekit_url=os.getenv("SNAPKEY_LIVEKIT_URL","").strip()
+    if not livekit_url:
+        raise HTTPException(503,"Attendance live view is not configured")
+    session_id=secrets.token_urlsafe(18)
+    room="camera-eye-"+secrets.token_urlsafe(18)
+    publisher_token=_livekit_token(room,"edge-"+secrets.token_urlsafe(12),publish=True,subscribe=False,ttl_seconds=request.ttl_seconds)
+    viewer_token=_livekit_token(room,"viewer-"+secrets.token_urlsafe(12),publish=False,subscribe=True,ttl_seconds=request.ttl_seconds)
+    command=store.create_edge_command({"tenant_id":tenant_id,"shop_id":principal.shop_id,"edge_id":request.edge_id,
+        "command_type":"LIVE_VIEW_START","request":{"session_id":session_id,"camera_id":request.camera_id,"url":livekit_url,
+        "publisher_token":publisher_token,"ttl_seconds":request.ttl_seconds}})
+    return {"session_id":session_id,"camera_id":request.camera_id,"edge_id":request.edge_id,"url":livekit_url,
+        "viewer_token":viewer_token,"ttl_seconds":request.ttl_seconds,"command_id":command.get("id"),"transport":"webrtc"}
+
+
+@app.post("/portal/v1/tenants/{tenant_id}/attendance-station/live/stop")
+def attendance_station_live_stop(tenant_id: str, request: AttendanceLiveStopRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    camera=_portal_camera_lookup(tenant_id,principal.shop_id,request.edge_id,request.camera_id)
+    if not camera:
+        raise HTTPException(404,"Camera not found")
+    command=store.create_edge_command({"tenant_id":tenant_id,"shop_id":principal.shop_id,"edge_id":request.edge_id,
+        "command_type":"LIVE_VIEW_STOP","request":{"session_id":request.session_id,"camera_id":request.camera_id}})
+    return {"ok":True,"session_id":request.session_id,"command_id":command.get("id")}
+
 
 @app.get("/portal/v1/tenants/{tenant_id}/attendance-station/candidate")
 def attendance_station_candidate(tenant_id: str, camera_id: str, edge_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
