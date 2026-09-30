@@ -659,6 +659,7 @@ class CameraCreate(BaseModel):
     tracking_imgsz: int = 384
     tracking_quality: int = 65
     rotation_degrees: Literal[0, 90, 180, 270] = 0
+    attendance_active: bool = True
     tracking_mode: str = "detect"
     features: dict = {}
 
@@ -955,7 +956,7 @@ class StationActionRequest(BaseModel):
     expected_state: str
     request_id: str = Field(min_length=1, max_length=100)
 
-station = AttendanceStation(attendance_engine)
+station = AttendanceStation(attendance_engine, camera_manager)
 
 def _attendance_camera(camera_id):
     camera = camera_manager.get_camera(camera_id)
@@ -963,17 +964,63 @@ def _attendance_camera(camera_id):
         raise HTTPException(404, 'Attendance camera not found')
     return camera
 
+def _attendance_profile_image(person_id: str, s):
+    faces = s.list_faces(person_id)
+    primary = faces[0] if faces else None
+    if primary and primary.get('image_path'):
+        return _face_image_url(person_id, primary['id'])
+    return None
+
+def _capture_attendance_evidence(camera_id: str, person_id: str):
+    raw = supervisor.snapshot(camera_id)
+    if not raw:
+        return None
+    root = Path(config.evidence_dir) / camera_id
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+    path = root / f"attendance_{person_id}_{stamp}.jpg"
+    path.write_bytes(raw)
+    return str(path)
+
+@app.post('/api/v1/cameras/{camera_id}/attendance-station/start')
+def attendance_station_start(camera_id: str):
+    camera = _attendance_camera(camera_id)
+    camera_manager.update_camera(camera_id, {'attendance_active': True})
+    return {'camera_id': camera_id, 'attendance_active': True}
+
+@app.post('/api/v1/cameras/{camera_id}/attendance-station/stop')
+def attendance_station_stop(camera_id: str):
+    _attendance_camera(camera_id)
+    camera_manager.update_camera(camera_id, {'attendance_active': False})
+    return {'camera_id': camera_id, 'attendance_active': False}
+
 @app.get('/api/v1/cameras/{camera_id}/attendance-station')
 def attendance_station(camera_id: str, s=Depends(get_store)):
-    _attendance_camera(camera_id)
-    return {'candidate': station.candidate(camera_id), 'recent': [_public_attendance(item) for item in s.attendance(limit=25, camera_id=camera_id)]}
+    camera = _attendance_camera(camera_id)
+    candidate = station.candidate(camera_id)
+    if candidate:
+        candidate = {**candidate, 'profile_image_url': _attendance_profile_image(candidate['person_id'], s)}
+        candidate.pop('recognition_snapshot_path', None)
+    return {
+        'attendance_active': bool(camera.attendance_active),
+        'candidate': candidate,
+        'recent': [_public_attendance(item) for item in s.attendance(limit=25, camera_id=camera_id)],
+    }
 
 @app.post('/api/v1/cameras/{camera_id}/attendance-station/action')
 def attendance_station_action(camera_id: str, body: StationActionRequest):
-    _attendance_camera(camera_id)
+    camera = _attendance_camera(camera_id)
+    if not camera.attendance_active:
+        raise HTTPException(409, 'Attendance camera is stopped')
+    evidence_path = _capture_attendance_evidence(camera_id, body.person_id)
     try:
-        return station.apply(camera_id, **body.model_dump())
+        return station.apply(camera_id, evidence_path=evidence_path, **body.model_dump())
     except ValueError as exc:
+        if evidence_path:
+            try:
+                Path(evidence_path).unlink(missing_ok=True)
+            except Exception:
+                pass
         raise HTTPException(409, str(exc))
 
 @app.get('/api/v1/cameras/{camera_id}/attendance-station/snapshot')
