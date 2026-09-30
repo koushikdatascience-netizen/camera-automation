@@ -181,3 +181,44 @@ def test_portal_generates_scoped_one_time_edge_activation_code(tmp_path, monkeyp
  first=api.store.consume_edge_activation_code(digest,'MACHINE-1')
  assert first is not None and first['tenant_id']==tenant and first['shop_id']=='shop1'
  assert api.store.consume_edge_activation_code(digest,'MACHINE-2') is None
+
+
+def test_edge_heartbeat_camera_inventory_is_visible_without_rtsp_secret(tmp_path, monkeypatch):
+ monkeypatch.setenv('SNAPKEY_PORTAL_DB',str(tmp_path/'edge-inventory.db'))
+ monkeypatch.delenv('SNAPKEY_DATABASE_URL',raising=False)
+ monkeypatch.setenv('SNAPKEY_ENV','development')
+ import importlib
+ import cloud_portal.api as api
+ importlib.reload(api)
+ api.store.record_heartbeat({'tenant_id':'tenant-a','company_code':'COMP1','shop_id':'shop1','site_id':'site-1','edge_id':'edge-1',
+  'status':{'cameras':[{'camera_id':'local-cam','name':'Attendance Gate','source_type':'rtsp','camera_role':'ENTRANCE_EXIT',
+  'camera_zone':'inside','enabled':True,'features':{'attendance':True},'online':True,'state':'ONLINE'}]}})
+ client=TestClient(api.app);auth=portal_auth(client,monkeypatch)
+ response=client.get('/portal/v1/tenants/tenant-a/cameras',params={'shop_id':'shop1'},headers=auth)
+ assert response.status_code==200
+ item=response.json()['items'][0]
+ assert item['camera_id']=='local-cam' and item['edge_inventory'] is True and item['online'] is True
+ assert 'source' not in item and item['source_is_edge_local'] is True
+
+
+def test_attendance_live_start_queues_scoped_webrtc_command(tmp_path, monkeypatch):
+ monkeypatch.setenv('SNAPKEY_PORTAL_DB',str(tmp_path/'attendance-live.db'))
+ monkeypatch.delenv('SNAPKEY_DATABASE_URL',raising=False)
+ monkeypatch.setenv('SNAPKEY_ENV','development')
+ monkeypatch.setenv('SNAPKEY_LIVEKIT_URL','wss://livekit.example.test')
+ import importlib
+ import cloud_portal.api as api
+ importlib.reload(api)
+ api.store.record_heartbeat({'tenant_id':'tenant-a','shop_id':'shop1','site_id':'site-1','edge_id':'edge-1',
+  'status':{'cameras':[{'camera_id':'attendance-1','name':'Attendance','source_type':'rtsp','camera_role':'ENTRANCE_EXIT',
+  'enabled':True,'features':{'attendance':True},'online':True,'state':'ONLINE'}]}})
+ monkeypatch.setattr(api,'_livekit_token',lambda room,identity,**kwargs:'signed-'+('pub' if kwargs['publish'] else 'viewer'))
+ client=TestClient(api.app);auth=portal_auth(client,monkeypatch)
+ response=client.post('/portal/v1/tenants/tenant-a/attendance-station/live/start',
+  json={'camera_id':'attendance-1','edge_id':'edge-1','ttl_seconds':300},headers=auth)
+ assert response.status_code==200
+ body=response.json();assert body['transport']=='webrtc' and body['viewer_token']=='signed-viewer'
+ claimed=api.store.claim_edge_commands('tenant-a','shop1','edge-1')
+ assert len(claimed)==1 and claimed[0]['command_type']=='LIVE_VIEW_START'
+ assert claimed[0]['request']['camera_id']=='attendance-1'
+ assert claimed[0]['request']['publisher_token']=='signed-pub'
