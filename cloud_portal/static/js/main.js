@@ -646,14 +646,14 @@
     const scope=requireScope(["tenant_id"]); const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance");
     const data=await response.json(); if(!response.ok)throw new Error(data.detail||"Unable to load attendance."); renderAttendance(data);
   }
-  let attendanceStationTimer=null,attendanceStationCandidate=null;
+  let attendanceStationTimer=null,attendanceStationCandidate=null,attendanceLiveRoom=null,attendanceLiveSession=null;
   async function loadAttendanceStationCameras(){
     const select=document.getElementById("station-camera");if(!select)return;
     const scope=requireScope(["tenant_id","shop_id"]);
     const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id));
     const data=await response.json();if(!response.ok)throw new Error(data.detail||"Unable to load attendance cameras.");
     const cameras=(data.items||[]).filter(c=>String(c.camera_role||"").toUpperCase()==="ENTRANCE_EXIT" && c.enabled!==false);
-    select.innerHTML=cameras.length?cameras.map(c=>"<option value='"+escapeHtml((c.edge_id||"")+"::"+c.camera_id)+"'>"+escapeHtml(c.name||c.camera_id)+"</option>").join(""):"<option value=''>No attendance camera configured</option>";
+    select.innerHTML=cameras.length?cameras.map(c=>"<option value='"+escapeHtml((c.edge_id||"")+"::"+c.camera_id)+"'>"+escapeHtml(c.name||c.camera_id)+(c.online===false?" · Offline":"")+"</option>").join(""):"<option value=''>No attendance camera configured</option>";
   }
   function renderStationCandidate(candidate){
     attendanceStationCandidate=candidate||null;const box=document.getElementById("station-candidate"),expiry=document.getElementById("station-expiry");
@@ -668,11 +668,34 @@
     const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-station/candidate?camera_id="+encodeURIComponent(cameraId)+"&edge_id="+encodeURIComponent(edgeId));
     const data=await response.json();if(!response.ok)throw new Error(data.detail||"Unable to read recognition candidate.");renderStationCandidate(data.candidate);
   }
-  function stopAttendanceStation(){if(attendanceStationTimer){clearInterval(attendanceStationTimer);attendanceStationTimer=null;}renderStationCandidate(null);document.getElementById("station-state").textContent="● Stopped";document.getElementById("start-attendance-station").disabled=false;document.getElementById("stop-attendance-station").disabled=true;}
+  async function stopAttendanceStation(){
+    if(attendanceStationTimer){clearInterval(attendanceStationTimer);attendanceStationTimer=null;}
+    const session=attendanceLiveSession;attendanceLiveSession=null;
+    if(session){
+      try{const scope=requireScope(["tenant_id"]);await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-station/live/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:session.cameraId,edge_id:session.edgeId,session_id:session.sessionId})});}catch(_){}
+    }
+    if(attendanceLiveRoom){try{await attendanceLiveRoom.disconnect();}catch(_){}attendanceLiveRoom=null;}
+    const video=document.getElementById("station-live-video");if(video){video.replaceChildren();video.srcObject=null;video.style.display="none";}
+    renderStationCandidate(null);document.getElementById("station-state").textContent="● Stopped";document.getElementById("start-attendance-station").disabled=false;document.getElementById("stop-attendance-station").disabled=true;
+    document.getElementById("station-video-message").textContent="Remote video is stopped. Edge AI monitoring continues independently.";
+  }
   async function startAttendanceStation(){
     const value=document.getElementById("station-camera")?.value||"";if(!value){showMessage("Configure an Entrance / Attendance camera first.",true);return;}
-    stopAttendanceStation();document.getElementById("station-state").textContent="● Recognition Active";document.getElementById("start-attendance-station").disabled=true;document.getElementById("stop-attendance-station").disabled=false;
-    document.getElementById("station-video-message").textContent="Attendance recognition is active on the edge. Remote video will use the secure WebRTC transport when configured; Camera Eye does not proxy continuous video through the API server.";
+    await stopAttendanceStation();
+    const [edgeId,cameraId]=value.split("::"),scope=requireScope(["tenant_id"]);
+    document.getElementById("station-state").textContent="● Starting WebRTC…";document.getElementById("start-attendance-station").disabled=true;document.getElementById("stop-attendance-station").disabled=false;
+    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-station/live/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:cameraId,edge_id:edgeId,ttl_seconds:600})});
+    const session=await response.json();if(!response.ok)throw new Error(session.detail||"Unable to start secure live view.");
+    if(!window.LivekitClient)throw new Error("LiveKit browser client failed to load.");
+    const room=new LivekitClient.Room({adaptiveStream:true,dynacast:true});
+    const video=document.getElementById("station-live-video");
+    room.on(LivekitClient.RoomEvent.TrackSubscribed,(track)=>{
+      if(track.kind===LivekitClient.Track.Kind.Video){track.attach(video);video.style.display="block";document.getElementById("station-video-message").textContent="Secure temporary WebRTC live view. AI inference remains on the edge PC.";}
+    });
+    room.on(LivekitClient.RoomEvent.Disconnected,()=>{document.getElementById("station-state").textContent="● Video disconnected";});
+    await room.connect(session.url,session.viewer_token,{autoSubscribe:true});
+    attendanceLiveRoom=room;attendanceLiveSession={sessionId:session.session_id,cameraId,edgeId};
+    document.getElementById("station-state").textContent="● Live";
     await pollAttendanceStation();attendanceStationTimer=setInterval(()=>pollAttendanceStation().catch(error=>showMessage(error.message,true)),1000);
   }
   async function confirmAttendanceStationAction(action){
@@ -682,9 +705,10 @@
   }
   function wireAttendanceStation(){
     if(!document.getElementById("attendance-station"))return;loadAttendanceStationCameras().catch(error=>showMessage(error.message,true));
-    document.getElementById("start-attendance-station").addEventListener("click",()=>startAttendanceStation().catch(error=>showMessage(error.message,true)));document.getElementById("stop-attendance-station").addEventListener("click",stopAttendanceStation);
+    document.getElementById("start-attendance-station").addEventListener("click",()=>startAttendanceStation().catch(async error=>{showMessage(error.message,true);await stopAttendanceStation();}));
+    document.getElementById("stop-attendance-station").addEventListener("click",()=>stopAttendanceStation());
     document.querySelectorAll(".station-action").forEach(button=>button.addEventListener("click",()=>confirmAttendanceStationAction(button.dataset.action)));
-    window.addEventListener("beforeunload",()=>{if(attendanceStationTimer)clearInterval(attendanceStationTimer);});
+    window.addEventListener("beforeunload",()=>{if(attendanceStationTimer)clearInterval(attendanceStationTimer);if(attendanceLiveRoom)attendanceLiveRoom.disconnect();});
   }
   function wireAttendancePage(){if(!document.getElementById("attendance-records-body"))return;loadAttendance().catch(error=>showMessage(error.message,true));wireAttendanceStation();setInterval(()=>loadAttendance().catch(()=>{}),15000);}
 
