@@ -1115,17 +1115,13 @@ def security_alert(alert_id:str,s=Depends(get_store)):
 def security_alert_snapshot(alert_id:str,s=Depends(get_store)):
     alert=s.security_alert(alert_id)
     if not alert or not alert.get('snapshot_path'): raise HTTPException(404,'Snapshot not found')
-    path=Path(alert['snapshot_path'])
-    if not path.exists() or not path.is_file(): raise HTTPException(404,'Snapshot not found')
-    return Response(content=path.read_bytes(),media_type='image/jpeg')
+    return _saved_evidence(alert.get('snapshot_path'),s)
 
 @app.get('/api/v1/security-alerts/{alert_id}/clip')
 def security_alert_clip(alert_id:str,s=Depends(get_store)):
     alert=s.security_alert(alert_id)
     if not alert or not alert.get('clip_path'): raise HTTPException(404,'Clip not found')
-    path=Path(alert['clip_path'])
-    if not path.exists() or not path.is_file(): raise HTTPException(404,'Clip not found')
-    return Response(content=path.read_bytes(),media_type='video/mp4')
+    return _saved_evidence(alert.get('clip_path'),s,media_type='video/mp4')
 
 @app.post('/api/v1/security-alerts/{alert_id}/acknowledge')
 def acknowledge_security_alert(alert_id:str,s=Depends(get_store)):
@@ -1143,6 +1139,13 @@ def unknown_snapshot(incident_id:str,s=Depends(get_store)):
     if not incident:
         raise HTTPException(404,'Incident not found')
     return _saved_evidence(incident.get('best_face_snapshot') or incident.get('best_person_snapshot'),s)
+
+@app.get('/api/v1/unknown-incidents/{incident_id}/clip')
+def unknown_clip(incident_id:str,s=Depends(get_store)):
+    incident=s.unknown(incident_id)
+    if not incident or not incident.get('clip_path'):
+        raise HTTPException(404,'Clip not found')
+    return _saved_evidence(incident.get('clip_path'),s,media_type='video/mp4')
 
 @app.get('/api/v1/unknown-incidents/{incident_id}')
 def unknown(incident_id:str,s=Depends(get_store)):
