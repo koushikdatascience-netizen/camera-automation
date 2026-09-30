@@ -72,6 +72,15 @@ class PostgresPortalStore:
                 tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'OWNER',
                 enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL)""",
             """CREATE INDEX IF NOT EXISTS idx_portal_users_email ON portal_users(email)""",
+            """CREATE TABLE IF NOT EXISTS portal_user_sites(
+                user_id TEXT NOT NULL, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'USER', enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(user_id,tenant_id,shop_id))""",
+            """CREATE INDEX IF NOT EXISTS idx_portal_user_sites_scope ON portal_user_sites(tenant_id,shop_id,enabled)""",
+            """INSERT INTO portal_user_sites(user_id,tenant_id,shop_id,role,enabled,created_at)
+                SELECT id,tenant_id,shop_id,role,TRUE,created_at FROM portal_users
+                ON CONFLICT(user_id,tenant_id,shop_id) DO NOTHING""",
             """CREATE TABLE IF NOT EXISTS cloud_personnel(
                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, employee_code TEXT NOT NULL,
                 full_name TEXT NOT NULL, role TEXT NOT NULL, phone TEXT, email TEXT, active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -408,6 +417,37 @@ class PostgresPortalStore:
         with self._conn() as conn:
             row=conn.execute(text("SELECT * FROM portal_users WHERE lower(email)=lower(:email) AND enabled=TRUE"),{"email":email}).mappings().first()
         return dict(row) if row else None
+
+    def client_login_options(self, client_id: str) -> dict[str, Any]:
+        """Return non-secret login choices for one client/company code."""
+        client=(client_id or "").strip()
+        with self._conn() as conn:
+            users=conn.execute(text("""SELECT DISTINCT u.id,u.display_name
+                FROM portal_users u
+                JOIN portal_user_sites s ON s.user_id=u.id AND s.tenant_id=u.tenant_id
+                WHERE u.enabled=TRUE AND s.enabled=TRUE AND lower(COALESCE(u.company_code,''))=lower(:client)
+                ORDER BY u.display_name,u.id"""),{"client":client}).mappings().all()
+            sites=conn.execute(text("""SELECT DISTINCT s.shop_id,
+                       COALESCE(NULLIF(si.name,''),s.shop_id) AS name
+                FROM portal_user_sites s
+                JOIN portal_users u ON u.id=s.user_id AND u.tenant_id=s.tenant_id
+                LEFT JOIN sites si ON si.tenant_id=s.tenant_id AND (si.id=s.shop_id OR si.id='site-'||s.shop_id)
+                WHERE u.enabled=TRUE AND s.enabled=TRUE AND lower(COALESCE(u.company_code,''))=lower(:client)
+                ORDER BY name,s.shop_id"""),{"client":client}).mappings().all()
+        return {"users":[dict(row) for row in users],"sites":[dict(row) for row in sites]}
+
+    def portal_user_for_client_site(self, client_id: str, user_id: str, shop_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT u.*,s.role AS site_role
+                FROM portal_users u JOIN portal_user_sites s
+                  ON s.user_id=u.id AND s.tenant_id=u.tenant_id
+                WHERE u.id=:user AND u.enabled=TRUE AND s.enabled=TRUE
+                  AND lower(COALESCE(u.company_code,''))=lower(:client)
+                  AND s.shop_id=:shop LIMIT 1"""),
+                {"client":(client_id or "").strip(),"user":user_id,"shop":shop_id}).mappings().first()
+        if not row: return None
+        data=dict(row); data["shop_id"]=shop_id; data["role"]=data.pop("site_role") or data.get("role") or "USER"
+        return data
 
     def create_portal_session(self, session: dict[str, Any]) -> None:
         with self._conn() as conn:
