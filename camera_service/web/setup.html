@@ -833,23 +833,23 @@
 
                     <div class="form-group">
                         <label>Features</label>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-attendance">
                             <input type="checkbox" id="feature-attendance" checked>
                             <label for="feature-attendance">Attendance</label>
                         </div>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-face-recognition">
                             <input type="checkbox" id="feature-face-recognition" checked>
                             <label for="feature-face-recognition">Face Recognition</label>
                         </div>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-unknown-detection">
                             <input type="checkbox" id="feature-unknown-detection" checked>
                             <label for="feature-unknown-detection">Unknown Person Detection</label>
                         </div>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-shoplifting">
                             <input type="checkbox" id="feature-shoplifting">
                             <label for="feature-shoplifting">Shoplifting</label>
                         </div>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-object-security">
                             <input type="checkbox" id="feature-object-security">
                             <label for="feature-object-security">Object Security</label>
                         </div>
@@ -2122,19 +2122,49 @@
 
         function syncCameraRoleFeatures() {
             const role=document.getElementById('camera-role').value;
-            const attendance=document.getElementById('feature-attendance').closest('.checkbox-group');
-            const unknown=document.getElementById('feature-unknown-detection').closest('.checkbox-group');
+            const show=(id,visible)=>{document.getElementById(id).hidden=!visible;};
+            const set=(id,value)=>{document.getElementById(id).checked=value;};
+
+            // A camera profile owns its relevant feature set. Do not make operators
+            // reason about security features while configuring attendance.
             if(role==='ENTRANCE_EXIT'){
-                document.getElementById('feature-attendance').checked=true;
-                document.getElementById('feature-face-recognition').checked=true;
-                document.getElementById('feature-unknown-detection').checked=false;
-                attendance.hidden=false; unknown.hidden=true;
+                set('feature-attendance',true);
+                set('feature-face-recognition',true);
+                set('feature-unknown-detection',false);
+                set('feature-shoplifting',false);
+                set('feature-object-security',false);
+                show('feature-row-attendance',true);
+                show('feature-row-face-recognition',true);
+                show('feature-row-unknown-detection',false);
+                show('feature-row-shoplifting',false);
+                show('feature-row-object-security',false);
             } else if(role==='SECURITY'){
-                document.getElementById('feature-attendance').checked=false;
-                attendance.hidden=true; unknown.hidden=false;
+                set('feature-attendance',false);
+                set('feature-shoplifting',false);
+                show('feature-row-attendance',false);
+                show('feature-row-face-recognition',true);
+                show('feature-row-unknown-detection',true);
+                show('feature-row-shoplifting',false);
+                show('feature-row-object-security',true);
+            } else if(role==='SHOPLIFTING'){
+                set('feature-attendance',false);
+                set('feature-unknown-detection',false);
+                set('feature-shoplifting',true);
+                show('feature-row-attendance',false);
+                show('feature-row-face-recognition',true);
+                show('feature-row-unknown-detection',false);
+                show('feature-row-shoplifting',true);
+                show('feature-row-object-security',true);
             } else {
-                document.getElementById('feature-attendance').checked=false;
-                attendance.hidden=true; unknown.hidden=true;
+                set('feature-attendance',false);
+                set('feature-unknown-detection',false);
+                set('feature-shoplifting',false);
+                set('feature-object-security',false);
+                show('feature-row-attendance',false);
+                show('feature-row-face-recognition',true);
+                show('feature-row-unknown-detection',false);
+                show('feature-row-shoplifting',false);
+                show('feature-row-object-security',false);
             }
         }
         document.getElementById('camera-role').addEventListener('change',syncCameraRoleFeatures);
@@ -2163,9 +2193,9 @@
                     face_recognition: document.getElementById('feature-face-recognition').checked || document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
                     unknown_detection: document.getElementById('camera-role').value === 'SECURITY' && document.getElementById('feature-unknown-detection').checked,
                     unknown_person_detection: document.getElementById('camera-role').value === 'SECURITY' && document.getElementById('feature-unknown-detection').checked,
-                    shoplifting: document.getElementById('feature-shoplifting').checked,
-                    shoplifting_detection: document.getElementById('feature-shoplifting').checked,
-                    object_security: document.getElementById('feature-object-security').checked
+                    shoplifting: document.getElementById('camera-role').value === 'SHOPLIFTING' && document.getElementById('feature-shoplifting').checked,
+                    shoplifting_detection: document.getElementById('camera-role').value === 'SHOPLIFTING' && document.getElementById('feature-shoplifting').checked,
+                    object_security: ['SECURITY','SHOPLIFTING'].includes(document.getElementById('camera-role').value) && document.getElementById('feature-object-security').checked
                 }
             };
 
