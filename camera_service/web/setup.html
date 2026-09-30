@@ -600,7 +600,12 @@
         #live-layout-controls[hidden], .recognized-person img[hidden] { display:none; }
         @media (max-width:1050px) { .focus-workspace { grid-template-columns:160px minmax(0,1fr); }.focus-detail { grid-column:1 / -1; min-height:0; } }
         @media (max-width:650px) { .focus-workspace { grid-template-columns:1fr; }.camera-rail { display:block; }.camera-rail h3 { display:none; }#focus-camera-list { display:flex; gap:6px; overflow-x:auto; }.camera-rail button { min-width:145px; }.focus-detail { grid-column:auto; }.live-toolbar { align-items:flex-start; } }
-    </style>
+    
+        .focus-stage { position:relative; }
+        #security-zone-layer { position:absolute; inset:42px 0 0 0; z-index:5; pointer-events:auto; }
+        .security-zone-box { position:absolute; border:2px solid #ffcc32; background:rgba(255,204,50,.10); min-width:8px; min-height:8px; }
+        .security-zone-box span { position:absolute; left:0; top:0; transform:translateY(-100%); background:#161a1d; color:#fff; padding:2px 6px; font-size:11px; white-space:nowrap; }
+</style>
 </head>
 <body>
     <header>
@@ -745,6 +750,7 @@
                 <div class="focus-stage">
                     <div class="focus-stage-bar"><strong id="focus-camera-name">Select a camera</strong><span id="focus-camera-status" class="live-status offline">OFFLINE</span></div>
                     <img id="focus-camera-image" alt="Selected live camera" hidden>
+                    <div id="security-zone-layer" hidden></div>
                     <div id="focus-camera-placeholder" class="focus-placeholder">Select an online camera</div>
                 </div>
                 <aside class="focus-detail">
@@ -753,7 +759,11 @@
                     <span id="focus-camera-zone" hidden></span><span id="focus-camera-features" hidden></span>
                     <div id="station-panel"><div class="recognized-person"><img id="focus-person-photo" alt="Latest attendance snapshot" hidden><div><strong id="focus-person-name">No attendance yet</strong><small id="focus-person-time"></small></div></div>
                     <dl id="focus-attendance-details"><dt>Recognition</dt><dd id="focus-time-in">-</dd><dt>State</dt><dd id="focus-time-out">-</dd><dt>Validity</dt><dd id="focus-duration">-</dd></dl>
-                    <div id="station-actions" class="camera-actions"></div><div id="station-recent" class="activity-list" style="max-height:300px;overflow:auto"></div></div><div class="camera-actions"><button class="btn btn-success" id="focus-camera-start" type="button">Start Monitoring</button><button class="btn btn-secondary" id="focus-camera-stop" type="button">Stop Monitoring</button><button class="btn btn-secondary" id="focus-camera-capture" type="button">Capture</button><button class="btn btn-secondary" id="focus-camera-settings" type="button">Settings</button><button class="btn btn-secondary" id="focus-camera-fullscreen" type="button">Full Screen</button></div>
+                    <div id="station-actions" class="camera-actions"></div>
+                    <div class="camera-actions"><button class="btn btn-success" id="attendance-start" type="button">Start Attendance</button><button class="btn btn-danger" id="attendance-stop" type="button">Stop Attendance</button></div>
+                    <h3>Recent attendance</h3><div id="station-recent" class="activity-list" style="max-height:300px;overflow:auto"></div></div>
+                    <div id="security-panel" hidden><strong>Security zones</strong><small>Draw zones over the live picture. Unknown-person alarms are confirmed only inside enabled zones.</small><div class="camera-actions"><button class="btn btn-primary" id="security-add-zone" type="button">Add Detection Zone</button><button class="btn btn-secondary" id="security-refresh-zones" type="button">Refresh Zones</button></div><div id="security-zone-list" class="activity-list"></div><small id="security-zone-message"></small><h3>Safety detection</h3><small id="safety-capability">Fire / smoke: checking model capability…</small></div>
+                    <div class="camera-actions"><button class="btn btn-success" id="focus-camera-start" type="button">Start Camera</button><button class="btn btn-secondary" id="focus-camera-stop" type="button">Stop Camera</button><button class="btn btn-secondary" id="focus-camera-capture" type="button">Capture</button><button class="btn btn-secondary" id="focus-camera-settings" type="button">Settings</button><button class="btn btn-secondary" id="focus-camera-fullscreen" type="button">Full Screen</button></div>
                     <small id="focus-control-message" role="status"></small>
                 </aside>
             </div>
@@ -1588,6 +1598,105 @@
         let stationBusy = false;
         let liveCameras = [];
         let recognizedCameraId = null;
+        let securityZones = [];
+        let drawingSecurityZone = false;
+
+        function clearStationCandidate() {
+            stationCandidate = null;
+            const photo=document.getElementById('focus-person-photo');
+            photo.hidden=true; photo.removeAttribute('src');
+            document.getElementById('focus-person-name').textContent='Waiting for a recognized employee';
+            document.getElementById('focus-person-time').textContent='';
+            document.getElementById('focus-time-in').textContent='-';
+            document.getElementById('focus-time-out').textContent='-';
+            document.getElementById('focus-duration').textContent='-';
+            document.getElementById('station-actions').innerHTML='';
+        }
+
+        function attendanceActionLabel(action) {
+            return ({CHECK_IN:'Log In',CHECK_OUT:'Log Out',START_BREAK:'Break In',END_BREAK:'Break Out'})[action] || action;
+        }
+
+        async function submitStationAction(action) {
+            if (!stationCandidate || stationBusy || !selectedLiveCameraId) return;
+            stationBusy=true;
+            const requestId=crypto.randomUUID();
+            try {
+                const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/attendance-station/action`,{
+                    method:'POST',headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({person_id:stationCandidate.person_id,token:stationCandidate.token,action,expected_state:stationCandidate.state,request_id:requestId})
+                });
+                const body=await response.json();
+                if(!response.ok) throw new Error(body.detail||'Attendance action failed');
+                document.getElementById('focus-control-message').textContent=`${attendanceActionLabel(action)} recorded at ${new Date().toLocaleTimeString()}`;
+                await loadAttendanceStation();
+            } catch(error) {
+                document.getElementById('focus-control-message').textContent=error.message;
+            } finally { stationBusy=false; }
+        }
+
+        async function setAttendanceActive(active) {
+            if(!selectedLiveCameraId) return;
+            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/attendance-station/${active?'start':'stop'}`,{method:'POST'});
+            const body=await response.json();
+            if(!response.ok){document.getElementById('focus-control-message').textContent=body.detail||'Attendance command failed';return;}
+            document.getElementById('focus-control-message').textContent=active?'Attendance is active':'Attendance stopped — no attendance candidates will be created';
+            await loadLiveCameras(); await loadAttendanceStation();
+        }
+
+        async function loadAttendanceStation() {
+            const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+            if(!camera || camera.camera_role!=='ENTRANCE_EXIT' || !livePreviewOpen) return;
+            try {
+                const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/attendance-station`);
+                const body=await response.json();
+                if(!response.ok) throw new Error(body.detail||'Attendance station unavailable');
+                document.getElementById('attendance-start').disabled=!!body.attendance_active;
+                document.getElementById('attendance-stop').disabled=!body.attendance_active;
+                stationCandidate=body.candidate||null;
+                if(!stationCandidate){ clearStationCandidate(); document.getElementById('focus-person-name').textContent=body.attendance_active?'Person not recognized':'Attendance stopped'; }
+                else {
+                    const p=stationCandidate, photo=document.getElementById('focus-person-photo');
+                    document.getElementById('focus-person-name').textContent=`${p.full_name} · ${p.employee_code}`;
+                    document.getElementById('focus-person-time').textContent=p.role||'Employee';
+                    document.getElementById('focus-time-in').textContent=`${Math.round((p.confidence||0)*100)}% · ${new Date(p.detected_at).toLocaleTimeString()}`;
+                    document.getElementById('focus-time-out').textContent=p.state;
+                    document.getElementById('focus-duration').textContent=`Valid until ${new Date(p.expires_at).toLocaleTimeString()}`;
+                    if(p.profile_image_url){photo.src=p.profile_image_url+`?t=${Date.now()}`;photo.hidden=false;}else{photo.hidden=true;photo.removeAttribute('src');}
+                    document.getElementById('station-actions').innerHTML=(p.actions||[]).map(a=>`<button class="btn btn-primary station-action" data-action="${a}" type="button">${attendanceActionLabel(a)}</button>`).join('');
+                    document.querySelectorAll('.station-action').forEach(btn=>btn.addEventListener('click',()=>submitStationAction(btn.dataset.action)));
+                }
+                document.getElementById('station-recent').innerHTML=(body.recent||[]).slice(0,10).map(item=>`<div class="activity-row"><div><strong>${escapeHtmlLocal(item.full_name||item.person_id||'Employee')}</strong><small>${escapeHtmlLocal(item.employee_code||'')} · ${escapeHtmlLocal(item.attendance_state||'')}</small></div><time>${escapeHtmlLocal(formatDateTime(item.arrival_time))}</time></div>`).join('')||'<div class="activity-empty">No attendance records yet.</div>';
+            } catch(error) { document.getElementById('focus-control-message').textContent=error.message; }
+        }
+
+        async function loadSecurityZones() {
+            const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+            if(!camera || camera.camera_role!=='SECURITY') return;
+            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones`);
+            const body=await response.json(); securityZones=body.items||[]; renderSecurityZones();
+        }
+        function renderSecurityZones() {
+            const layer=document.getElementById('security-zone-layer');
+            layer.innerHTML=securityZones.map(z=>`<div class="security-zone-box" data-zone-id="${escapeHtmlLocal(z.id)}" style="left:${z.x*100}%;top:${z.y*100}%;width:${z.width*100}%;height:${z.height*100}%"><span>${escapeHtmlLocal(z.name)}</span></div>`).join('');
+            document.getElementById('security-zone-list').innerHTML=securityZones.map(z=>`<div class="activity-row"><strong>${escapeHtmlLocal(z.name)}</strong><button class="btn btn-danger security-zone-delete" data-zone-id="${escapeHtmlLocal(z.id)}">Delete</button></div>`).join('')||'<div class="activity-empty">No zones. Add one over the live picture.</div>';
+            document.querySelectorAll('.security-zone-delete').forEach(btn=>btn.addEventListener('click',async()=>{await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones/${encodeURIComponent(btn.dataset.zoneId)}`,{method:'DELETE'});loadSecurityZones();}));
+        }
+        async function beginSecurityZoneDraw() {
+            const layer=document.getElementById('security-zone-layer');
+            if(!selectedLiveCameraId || layer.hidden) return;
+            drawingSecurityZone=true; document.getElementById('security-zone-message').textContent='Drag a rectangle over the camera image.';
+            const down=ev=>{
+                if(!drawingSecurityZone)return;
+                const rect=layer.getBoundingClientRect(), sx=Math.max(0,Math.min(1,(ev.clientX-rect.left)/rect.width)), sy=Math.max(0,Math.min(1,(ev.clientY-rect.top)/rect.height));
+                const draft=document.createElement('div');draft.className='security-zone-box';draft.style.left=(sx*100)+'%';draft.style.top=(sy*100)+'%';layer.appendChild(draft);
+                const move=e=>{const ex=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),ey=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height));draft.style.left=(Math.min(sx,ex)*100)+'%';draft.style.top=(Math.min(sy,ey)*100)+'%';draft.style.width=(Math.abs(ex-sx)*100)+'%';draft.style.height=(Math.abs(ey-sy)*100)+'%';};
+                const up=async e=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);drawingSecurityZone=false;const ex=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),ey=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height));const zone={name:prompt('Zone name','Detection Zone')||'Detection Zone',x:Math.min(sx,ex),y:Math.min(sy,ey),width:Math.abs(ex-sx),height:Math.abs(ey-sy),enabled:true};draft.remove();if(zone.width<0.02||zone.height<0.02){document.getElementById('security-zone-message').textContent='Zone was too small.';return;}const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(zone)});const body=await response.json();document.getElementById('security-zone-message').textContent=response.ok?'Zone saved':(body.detail||'Unable to save zone');await loadSecurityZones();};
+                window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
+            };
+            layer.addEventListener('pointerdown',down,{once:true});
+        }
+
         function liveStreamUrl(cameraId) {
             const endpoint = liveAiOverlay ? 'tracking-stream' : 'stream';
             return `${API_BASE}/cameras/${encodeURIComponent(cameraId)}/${endpoint}`;
@@ -1596,9 +1705,14 @@
             const camera = liveCameras.find(item => item.camera_id === selectedLiveCameraId);
             const online = !!camera?.status?.online;
             const entrance = camera?.camera_role === 'ENTRANCE_EXIT';
-            document.getElementById('focus-purpose').textContent = entrance ? 'Attendance Station' : 'Camera workspace';
+            const security = camera?.camera_role === 'SECURITY';
+            document.getElementById('focus-purpose').textContent = entrance ? 'Attendance Station' : security ? 'Security Monitor' : 'Camera workspace';
             document.getElementById('station-panel').hidden = !entrance;
+            document.getElementById('security-panel').hidden = !security;
+            document.getElementById('security-zone-layer').hidden = !security || !livePreviewOpen;
             for (const id of ['focus-camera-start','focus-camera-stop']) document.getElementById(id).hidden = entrance;
+            if (entrance && livePreviewOpen) loadAttendanceStation();
+            if (security && livePreviewOpen) { loadSecurityZones(); fetch(`${API_BASE}/safety/capabilities`).then(r=>r.json()).then(s=>{document.getElementById('safety-capability').textContent=`Fire: ${s.fire.available?'Available':s.fire.reason}; Smoke: ${s.smoke.available?'Available':s.smoke.reason}`;}).catch(()=>{}); }
             if (!entrance || !livePreviewOpen) clearStationCandidate();
             const image = document.getElementById('focus-camera-image');
             const placeholder = document.getElementById('focus-camera-placeholder');
@@ -1771,6 +1885,10 @@
                 message.textContent = error.message;
             }
         }
+        document.getElementById('attendance-start').addEventListener('click', () => setAttendanceActive(true));
+        document.getElementById('attendance-stop').addEventListener('click', () => setAttendanceActive(false));
+        document.getElementById('security-add-zone').addEventListener('click', beginSecurityZoneDraw);
+        document.getElementById('security-refresh-zones').addEventListener('click', loadSecurityZones);
         document.getElementById('focus-camera-start').addEventListener('click', () => setFocusedMonitoring('start'));
         document.getElementById('focus-camera-stop').addEventListener('click', () => setFocusedMonitoring('stop'));
         document.getElementById('focus-camera-capture').addEventListener('click', () => {
@@ -1997,11 +2115,12 @@
                 tracking_quality: Number(document.getElementById('tracking-quality').value || 65),
                 rotation_degrees: Number(document.getElementById('camera-rotation').value),
                 tracking_mode: document.getElementById('tracking-mode').value,
+                attendance_active: document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
                 features: {
-                    attendance: document.getElementById('feature-attendance').checked,
-                    face_recognition: document.getElementById('feature-face-recognition').checked,
-                    unknown_detection: document.getElementById('feature-unknown-detection').checked,
-                    unknown_person_detection: document.getElementById('feature-unknown-detection').checked,
+                    attendance: document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
+                    face_recognition: document.getElementById('feature-face-recognition').checked || document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
+                    unknown_detection: document.getElementById('camera-role').value === 'SECURITY' && document.getElementById('feature-unknown-detection').checked,
+                    unknown_person_detection: document.getElementById('camera-role').value === 'SECURITY' && document.getElementById('feature-unknown-detection').checked,
                     shoplifting: document.getElementById('feature-shoplifting').checked,
                     shoplifting_detection: document.getElementById('feature-shoplifting').checked,
                     object_security: document.getElementById('feature-object-security').checked
@@ -2031,6 +2150,7 @@
                         tracking_imgsz: cameraData.tracking_imgsz,
                         tracking_quality: cameraData.tracking_quality,
                         rotation_degrees: cameraData.rotation_degrees,
+                        attendance_active: cameraData.attendance_active,
                         tracking_mode: cameraData.tracking_mode,
                         features: cameraData.features
                     } : cameraData)
