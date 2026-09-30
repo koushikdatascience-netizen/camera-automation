@@ -1156,15 +1156,18 @@ def object_security_status(object_class:str='scissors'):
     object_class=_validate_object_class(object_class)
     models=object_security_registry.list_models(object_class)
     active=models.get('active')
+    ready=bool(active and active.get('has_model'))
     return {
         'enabled':config.object_security.enabled or config.features.object_security,
         'object_class':object_class,
-        'ready':bool(active and active.get('has_model')),
+        'ready':ready,
         'model_loaded':object_security_detector._model is not None,
         'active_model':active,
         'previous_model':models.get('previous'),
         'candidate_count':len(models.get('candidates',[])),
-        'message':None if active else 'No custom scissors model installed.',
+        # Registry metadata may contain an active selection even when its model
+        # artifact is absent. The API message must follow actual readiness.
+        'message':None if ready else f'No custom {object_class} model installed.',
         'last_error':object_security_detector.last_error,
         'config':config.object_security.model_dump(exclude={'model_storage_dir'}),
     }
