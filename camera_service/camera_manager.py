@@ -952,7 +952,13 @@ class CameraManager:
             active_known_tracks = set()
             now = time.monotonic()
             camera_id = camera_config.camera_id if camera_config is not None else None
-            camera_zone = camera_config.camera_zone.value if camera_config is not None else "inside"
+            # Runtime role/attendance switches are persisted while the capture worker
+            # remains alive. Refresh the lightweight camera config so Start/Stop
+            # Attendance takes effect without reopening the webcam/RTSP source.
+            runtime_camera_config = self.get_camera(camera_id) if camera_id else camera_config
+            if runtime_camera_config is None:
+                runtime_camera_config = camera_config
+            camera_zone = runtime_camera_config.camera_zone.value if runtime_camera_config is not None else "inside"
             crowd_threshold = camera_config.crowd_threshold if camera_config is not None else 10
             summary = {
                 "people": 0,
@@ -979,11 +985,12 @@ class CameraManager:
             )
             attendance_line = None
             attendance_enabled = bool(
-                camera_config is not None
+                runtime_camera_config is not None
                 and camera_id is not None
                 and attendance_engine is not None
-                and getattr(getattr(camera_config, "features", None), "attendance", False)
-                and getattr(getattr(camera_config, "camera_role", None), "value", str(getattr(camera_config, "camera_role", ""))) == "ENTRANCE_EXIT"
+                and getattr(getattr(runtime_camera_config, "features", None), "attendance", False)
+                and getattr(runtime_camera_config, "attendance_active", False)
+                and getattr(getattr(runtime_camera_config, "camera_role", None), "value", str(getattr(runtime_camera_config, "camera_role", ""))) == "ENTRANCE_EXIT"
             )
             if attendance_enabled:
                 # Dynamic/cloud cameras historically had no persisted attendance line.
@@ -1027,7 +1034,7 @@ class CameraManager:
                 label = names.get(class_id, f"class_{class_id}")
                 recognized_text = None
 
-                if label == "person" and track_id is not None and attendance_line is not None and camera_config.attendance_active:
+                if label == "person" and track_id is not None and attendance_line is not None and runtime_camera_config.attendance_active:
                     direction = attendance_line.update(str(track_id), (float(x1), float(y1), float(x2), float(y2)))
                     if direction:
                         attendance_engine.on_crossing(LineCrossingEvent(
@@ -1074,7 +1081,7 @@ class CameraManager:
                                     recognized_text = f"{recognized_name} {score:.2f}"
                                     if store and self._should_emit_alert(f"recognized:{camera_id}:{match['person_id']}", 5 if camera_config.features.attendance else 60):
                                         store.add_person_event(match["person_id"], getattr(attendance_engine, "store_id", "store-1"), camera_id, "PERSON_RECOGNIZED", datetime.now(timezone.utc), {"track_id": str(track_id), "confidence": score, "snapshot_path": snapshot_path})
-                                    if camera_config.features.attendance and camera_config.attendance_active and track_id is not None:
+                                    if runtime_camera_config.features.attendance and runtime_camera_config.attendance_active and track_id is not None:
                                         attendance_engine.on_identity(IdentitySeen(
                                             store_id=attendance_engine.store_id,
                                             camera_id=camera_id,
