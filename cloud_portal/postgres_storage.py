@@ -159,6 +159,10 @@ class PostgresPortalStore:
                 "event_time":envelope.get("event_time"),"received":now,"payload":json.dumps(envelope)}).rowcount > 0
         return {"ok":True,"event_id":event_id,"tenant_id":tenant_id,"site_id":site_id,"inserted":bool(inserted)}
 
+    def record_portal_event(self, item: dict[str, Any]) -> dict[str, Any]:
+        envelope=dict(item); envelope.setdefault("store_id",item.get("shop_id")); envelope.setdefault("payload",{})
+        return self.ingest_event(envelope)
+
     def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100, shop_id: str | None = None):
         clauses=["tenant_id=:tenant"]; params={"tenant":tenant_id,"limit":max(1,min(500,int(limit)))}
         if shop_id: clauses.append("shop_id=:shop"); params["shop"]=shop_id
