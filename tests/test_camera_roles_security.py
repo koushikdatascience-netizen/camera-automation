@@ -72,3 +72,16 @@ def test_security_zone_rejects_out_of_bounds(tmp_path):
         assert "fit inside" in str(exc)
     else:
         raise AssertionError("Out-of-bounds zone should be rejected")
+
+
+def test_role_normalization_removes_attendance_security_mix(tmp_path):
+    manager = CameraManager(str(tmp_path / "camera.db"))
+    attendance = manager.create_camera({
+        "camera_id":"att","name":"Attendance","source_type":"webcam","rtsp_url":"0",
+        "camera_role":"ENTRANCE_EXIT",
+        "features":{"attendance":False,"face_recognition":False,"unknown_detection":True,
+                    "unknown_person_detection":True,"shoplifting":True,"object_security":True},
+    })
+    assert attendance.features.attendance is True
+    assert attendance.features.face_recognition is True
+    assert attendance.features.unknown_enabled is False
