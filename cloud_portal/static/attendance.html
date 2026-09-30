@@ -94,7 +94,9 @@
       <div class="attendance-card-header"><div><h2>Attendance Station</h2><p>Recognize a person first, then explicitly confirm check-in, check-out or break actions.</p></div><span class="live-badge" id="station-state">● Stopped</span></div>
       <div style="display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr);gap:20px">
         <div class="camera-panel" style="min-height:320px;padding:20px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center">
-          <strong id="station-camera-title">Select an attendance camera</strong><p id="station-video-message">Remote video is started only for an attendance session. AI recognition continues on the assigned edge.</p>
+          <strong id="station-camera-title">Select an attendance camera</strong>
+          <video id="station-live-video" autoplay playsinline muted style="display:none;width:100%;max-height:420px;background:#101519;border-radius:10px;margin:12px 0;object-fit:contain"></video>
+          <p id="station-video-message">Remote video is started only for an attendance session. AI recognition continues on the assigned edge.</p>
           <select id="station-camera" style="max-width:420px;width:100%;margin:12px 0"></select>
           <div style="display:flex;gap:10px"><button class="btn btn-primary" id="start-attendance-station">Start Attendance Station</button><button class="btn btn-light" id="stop-attendance-station" disabled>Stop</button></div>
         </div>
@@ -620,6 +622,7 @@
 
 </main>
 
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.17.0/dist/livekit-client.umd.min.js"></script>
 <script src="/static/js/main.js"></script>
 </body>
 </html>
