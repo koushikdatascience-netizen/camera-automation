@@ -1430,9 +1430,11 @@
                     head.innerHTML='<tr><th>Alert</th><th>Camera</th><th>Time</th><th>Status</th><th>Evidence</th></tr>';
                     body.innerHTML=records.length?records.slice(0,100).map(item=>{
                         const label=item.recordType==='unknown'?'Unknown person':(item.object_label||item.alert_type||'Security alert');
-                        const hasEvidence=item.recordType==='unknown'?(item.best_face_snapshot||item.best_person_snapshot):item.snapshot_path;
-                        const evidenceUrl=item.recordType==='unknown'?`${API_BASE}/unknown-incidents/${encodeURIComponent(item.id)}/snapshot`:`${API_BASE}/security-alerts/${encodeURIComponent(item.id)}/snapshot`;
-                        return `<tr><td><strong>${escapeHtmlLocal(label)}</strong></td><td>${escapeHtmlLocal(operatorCameraName(item.camera_id))}</td><td>${escapeHtmlLocal(formatDateTime(item.stamp))}</td><td>${escapeHtmlLocal(item.status||'OPEN')}</td><td>${hasEvidence?operatorEvidenceLink(evidenceUrl,'Snapshot'):'-'}</td></tr>`;
+                        const hasSnapshot=item.recordType==='unknown'?(item.best_face_snapshot||item.best_person_snapshot):item.snapshot_path;
+                        const snapshotUrl=item.recordType==='unknown'?`${API_BASE}/unknown-incidents/${encodeURIComponent(item.id)}/snapshot`:`${API_BASE}/security-alerts/${encodeURIComponent(item.id)}/snapshot`;
+                        const clipUrl=item.recordType==='unknown'?`${API_BASE}/unknown-incidents/${encodeURIComponent(item.id)}/clip`:`${API_BASE}/security-alerts/${encodeURIComponent(item.id)}/clip`;
+                        const evidence=[hasSnapshot?operatorEvidenceLink(snapshotUrl,'Snapshot'):'',item.clip_path?operatorEvidenceLink(clipUrl,'Video'):''].filter(Boolean).join(' ');
+                        return `<tr><td><strong>${escapeHtmlLocal(label)}</strong></td><td>${escapeHtmlLocal(operatorCameraName(item.camera_id))}</td><td>${escapeHtmlLocal(formatDateTime(item.stamp))}</td><td>${escapeHtmlLocal(item.status||'OPEN')}</td><td>${evidence||'-'}</td></tr>`;
                     }).join(''):'<tr><td colspan="5">No alerts yet.</td></tr>';
                     status.textContent=`${records.length} alert record(s)`;
                 }
