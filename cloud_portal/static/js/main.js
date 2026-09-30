@@ -646,7 +646,47 @@
     const scope=requireScope(["tenant_id"]); const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance");
     const data=await response.json(); if(!response.ok)throw new Error(data.detail||"Unable to load attendance."); renderAttendance(data);
   }
-  function wireAttendancePage(){if(!document.getElementById("attendance-records-body"))return;loadAttendance().catch(error=>showMessage(error.message,true));setInterval(()=>loadAttendance().catch(()=>{}),15000);}
+  let attendanceStationTimer=null,attendanceStationCandidate=null;
+  async function loadAttendanceStationCameras(){
+    const select=document.getElementById("station-camera");if(!select)return;
+    const scope=requireScope(["tenant_id","shop_id"]);
+    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id));
+    const data=await response.json();if(!response.ok)throw new Error(data.detail||"Unable to load attendance cameras.");
+    const cameras=(data.items||[]).filter(c=>String(c.camera_role||"").toUpperCase()==="ENTRANCE_EXIT" && c.enabled!==false);
+    select.innerHTML=cameras.length?cameras.map(c=>"<option value='"+escapeHtml((c.edge_id||"")+"::"+c.camera_id)+"'>"+escapeHtml(c.name||c.camera_id)+"</option>").join(""):"<option value=''>No attendance camera configured</option>";
+  }
+  function renderStationCandidate(candidate){
+    attendanceStationCandidate=candidate||null;const box=document.getElementById("station-candidate"),expiry=document.getElementById("station-expiry");
+    document.querySelectorAll(".station-action").forEach(b=>b.disabled=!candidate||!candidate.crm_mapped||(b.dataset.action==="BREAK_START"&&!candidate.break_configured));
+    if(!candidate){box.innerHTML="<p>No person selected. Ask the employee to face the attendance camera.</p>";expiry.textContent="Waiting for a fresh recognition.";return;}
+    box.innerHTML="<div style='font-size:20px;font-weight:700'>"+escapeHtml(candidate.full_name||"Recognized person")+"</div><div style='margin-top:8px'>"+escapeHtml(candidate.employee_code||"—")+" · "+escapeHtml(candidate.role||"—")+"</div><div style='margin-top:8px'>Confidence: "+(candidate.confidence!=null?Math.round(Number(candidate.confidence)*100)+"%":"—")+"</div><div style='margin-top:8px'>Detected: "+escapeHtml(new Date(candidate.detected_at).toLocaleString())+"</div>"+(!candidate.crm_mapped?"<p style='color:#b91c1c'>CRM mapping required before an attendance action can be confirmed.</p>":"");
+    expiry.textContent="Recognition valid for "+candidate.expires_in_seconds+" seconds.";
+  }
+  async function pollAttendanceStation(){
+    const select=document.getElementById("station-camera"),value=select?.value||"";if(!value)return;
+    const [edgeId,cameraId]=value.split("::");const scope=requireScope(["tenant_id"]);
+    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-station/candidate?camera_id="+encodeURIComponent(cameraId)+"&edge_id="+encodeURIComponent(edgeId));
+    const data=await response.json();if(!response.ok)throw new Error(data.detail||"Unable to read recognition candidate.");renderStationCandidate(data.candidate);
+  }
+  function stopAttendanceStation(){if(attendanceStationTimer){clearInterval(attendanceStationTimer);attendanceStationTimer=null;}renderStationCandidate(null);document.getElementById("station-state").textContent="● Stopped";document.getElementById("start-attendance-station").disabled=false;document.getElementById("stop-attendance-station").disabled=true;}
+  async function startAttendanceStation(){
+    const value=document.getElementById("station-camera")?.value||"";if(!value){showMessage("Configure an Entrance / Attendance camera first.",true);return;}
+    stopAttendanceStation();document.getElementById("station-state").textContent="● Recognition Active";document.getElementById("start-attendance-station").disabled=true;document.getElementById("stop-attendance-station").disabled=false;
+    document.getElementById("station-video-message").textContent="Attendance recognition is active on the edge. Remote video will use the secure WebRTC transport when configured; Camera Eye does not proxy continuous video through the API server.";
+    await pollAttendanceStation();attendanceStationTimer=setInterval(()=>pollAttendanceStation().catch(error=>showMessage(error.message,true)),1000);
+  }
+  async function confirmAttendanceStationAction(action){
+    const candidate=attendanceStationCandidate,value=document.getElementById("station-camera")?.value||"";if(!candidate||!value){showMessage("Recognition expired. Ask the employee to face the camera again.",true);return;}
+    const [edgeId,cameraId]=value.split("::");const scope=requireScope(["tenant_id"]);document.querySelectorAll(".station-action").forEach(b=>b.disabled=true);
+    try{const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-station/action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:cameraId,edge_id:edgeId,recognition_event_id:candidate.recognition_event_id,action})});const data=await response.json();if(!response.ok)throw new Error(data.detail||"Attendance action failed.");showMessage(String(action).replaceAll("_"," ")+" confirmed for "+candidate.full_name+".");renderStationCandidate(null);await loadAttendance();}catch(error){showMessage(error.message,true);await pollAttendanceStation();}
+  }
+  function wireAttendanceStation(){
+    if(!document.getElementById("attendance-station"))return;loadAttendanceStationCameras().catch(error=>showMessage(error.message,true));
+    document.getElementById("start-attendance-station").addEventListener("click",()=>startAttendanceStation().catch(error=>showMessage(error.message,true)));document.getElementById("stop-attendance-station").addEventListener("click",stopAttendanceStation);
+    document.querySelectorAll(".station-action").forEach(button=>button.addEventListener("click",()=>confirmAttendanceStationAction(button.dataset.action)));
+    window.addEventListener("beforeunload",()=>{if(attendanceStationTimer)clearInterval(attendanceStationTimer);});
+  }
+  function wireAttendancePage(){if(!document.getElementById("attendance-records-body"))return;loadAttendance().catch(error=>showMessage(error.message,true));wireAttendanceStation();setInterval(()=>loadAttendance().catch(()=>{}),15000);}
 
   async function openPortalEvidence(eventId,kind="evidence"){
     try{
