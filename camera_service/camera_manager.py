@@ -946,7 +946,7 @@ class CameraManager:
                                     snapshot_path = self._save_event_snapshot(frame, camera_id, "recognized")
                                     recognized_name = match["full_name"]
                                     recognized_text = f"{recognized_name} {score:.2f}"
-                                    if store and self._should_emit_alert(f"recognized:{camera_id}:{match['person_id']}", 60):
+                                    if store and self._should_emit_alert(f"recognized:{camera_id}:{match['person_id']}", 5 if camera_config.features.attendance else 60):
                                         store.add_person_event(match["person_id"], getattr(attendance_engine, "store_id", "store-1"), camera_id, "PERSON_RECOGNIZED", datetime.now(timezone.utc), {"track_id": str(track_id), "confidence": score, "snapshot_path": snapshot_path})
                                     if camera_config.features.attendance and track_id is not None:
                                         attendance_engine.on_identity(IdentitySeen(
