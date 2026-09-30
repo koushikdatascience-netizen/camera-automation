@@ -76,47 +76,43 @@ class LiveKitCameraPublisher:
         except ImportError as exc:
             raise RuntimeError("LiveKit RTC dependency is not installed") from exc
 
-        camera = self.camera_manager.get_camera(camera_id)
-        if not camera:
-            raise RuntimeError(f"Camera {camera_id} disappeared before live view started")
-        raw = str(camera.rtsp_url)
-        source_value: int | str = int(raw) if camera.source_type in {"webcam", "dshow"} and raw.isdigit() else raw
-        cap = cv2.VideoCapture(source_value)
-        if not cap.isOpened():
-            cap.release()
-            raise RuntimeError("Unable to open attendance camera for remote live view")
+        # Do not open RTSP/webcam here. The normal Camera Eye worker owns capture and
+        # inference. We publish its latest annotated frame so remote viewers see the
+        # same bounding boxes, recognized names and AI status without duplicate load.
+        deadline = time.monotonic() + ttl
+        first_frame = None
+        while not stop_event.is_set() and time.monotonic() < deadline:
+            first_frame = self.camera_manager.get_live_ai_frame(camera_id)
+            if first_frame is not None:
+                break
+            await asyncio.sleep(0.1)
+        if first_frame is None:
+            raise RuntimeError("No fresh annotated AI frame is available; ensure the attendance camera worker is online")
 
         room = rtc.Room()
-        deadline = time.monotonic() + ttl
+        height, width = first_frame.shape[:2]
+        source = rtc.VideoSource(width, height)
         try:
             await room.connect(url, token, rtc.RoomOptions(auto_subscribe=False, dynacast=True))
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                raise RuntimeError("Attendance camera opened but did not return a frame")
-            height, width = frame.shape[:2]
-            source = rtc.VideoSource(width, height)
-            track = rtc.LocalVideoTrack.create_video_track("attendance-camera", source)
+            track = rtc.LocalVideoTrack.create_video_track("attendance-ai-camera", source)
             await room.local_participant.publish_track(
                 track,
                 rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA),
             )
             frame_interval = 1.0 / 10.0
+            last_frame = first_frame
             while not stop_event.is_set() and time.monotonic() < deadline:
                 started = time.monotonic()
-                if frame is None:
-                    ok, frame = cap.read()
-                if not ok or frame is None:
-                    await asyncio.sleep(0.15)
-                    frame = None
-                    continue
-                rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
-                h, w = rgba.shape[:2]
+                frame = self.camera_manager.get_live_ai_frame(camera_id)
+                if frame is not None:
+                    last_frame = frame
+                frame = last_frame
+                h, w = frame.shape[:2]
                 if w != width or h != height:
-                    rgba = cv2.resize(rgba, (width, height))
+                    frame = cv2.resize(frame, (width, height))
+                rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
                 source.capture_frame(rtc.VideoFrame(width, height, rtc.VideoBufferType.RGBA, rgba.tobytes()))
-                ok, frame = cap.read()
                 await asyncio.sleep(max(0.0, frame_interval - (time.monotonic() - started)))
         finally:
-            cap.release()
             if room.isconnected():
                 await room.disconnect()
