@@ -1,4 +1,6 @@
 from __future__ import annotations
+from typing import Literal
+from camera_service.orientation import rotate_frame
 from contextlib import contextmanager
 from collections import deque
 import json, os, sqlite3, threading, uuid
@@ -67,6 +69,7 @@ class CameraConfig(BaseModel):
     tracking_fps: float = 3.0
     tracking_imgsz: int = 384
     tracking_quality: int = 65
+    rotation_degrees: Literal[0, 90, 180, 270] = 0
     tracking_mode: str = "detect"
     features: CameraFeatures = Field(default_factory=CameraFeatures)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -157,6 +160,7 @@ class CameraManager:
             ''')
             self._ensure_column(c, 'cameras', 'camera_zone', "TEXT NOT NULL DEFAULT 'inside'")
             self._ensure_column(c, 'cameras', 'crowd_threshold', 'INTEGER NOT NULL DEFAULT 10')
+            self._ensure_column(c, 'cameras', 'rotation_degrees', 'INTEGER NOT NULL DEFAULT 0')
             self._ensure_column(c, 'cameras', 'tracking_fps', 'REAL NOT NULL DEFAULT 3.0')
             self._ensure_column(c, 'cameras', 'tracking_imgsz', 'INTEGER NOT NULL DEFAULT 384')
             self._ensure_column(c, 'cameras', 'tracking_quality', 'INTEGER NOT NULL DEFAULT 65')
@@ -229,6 +233,7 @@ class CameraManager:
             tracking_imgsz=max(256, min(int(camera_data.get('tracking_imgsz', os.environ.get("SNAPKEY_PROFILE_TRACKING_IMGSZ", 384)) or 384), 640)),
             tracking_quality=max(35, min(int(camera_data.get('tracking_quality', os.environ.get("SNAPKEY_PROFILE_TRACKING_QUALITY", 65)) or 65), 95)),
             tracking_mode=str(camera_data.get('tracking_mode', os.environ.get("SNAPKEY_PROFILE_TRACKING_MODE", "detect")) or 'detect').strip().lower() if str(camera_data.get('tracking_mode', os.environ.get("SNAPKEY_PROFILE_TRACKING_MODE", "detect")) or 'detect').strip().lower() in {'detect','track'} else 'detect',
+            rotation_degrees=camera_data.get('rotation_degrees', 0),
             features=CameraFeatures(**features),
             created_at=datetime.now(timezone.utc).isoformat(),
             updated_at=datetime.now(timezone.utc).isoformat()
@@ -239,8 +244,8 @@ class CameraManager:
                 INSERT INTO cameras
                 (id, camera_id, name, source_type, rtsp_url, enabled, camera_role,
                  camera_zone, crowd_threshold, tracking_fps, tracking_imgsz,
-                 tracking_quality, tracking_mode, features_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tracking_quality, tracking_mode, rotation_degrees, features_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 str(uuid.uuid4()),
                 config.camera_id,
@@ -255,6 +260,7 @@ class CameraManager:
                 config.tracking_imgsz,
                 config.tracking_quality,
                 config.tracking_mode,
+                config.rotation_degrees,
                 json.dumps(config.features.model_dump()),
                 config.created_at,
                 config.updated_at
@@ -343,6 +349,7 @@ class CameraManager:
                 tracking_imgsz=int(row['tracking_imgsz']),
                 tracking_quality=int(row['tracking_quality']),
                 tracking_mode=row['tracking_mode'] if row['tracking_mode'] in {'detect','track'} else 'detect',
+                rotation_degrees=row['rotation_degrees'],
                 features=CameraFeatures(**json.loads(row['features_json'])),
                 created_at=row['created_at'],
                 updated_at=row['updated_at']
@@ -366,7 +373,8 @@ class CameraManager:
                     tracking_imgsz=int(row['tracking_imgsz']),
                     tracking_quality=int(row['tracking_quality']),
                     tracking_mode=row['tracking_mode'] if row['tracking_mode'] in {'detect','track'} else 'detect',
-                    features=CameraFeatures(**json.loads(row['features_json'])),
+                    rotation_degrees=row['rotation_degrees'],
+                features=CameraFeatures(**json.loads(row['features_json'])),
                     created_at=row['created_at'],
                     updated_at=row['updated_at']
                 ) for row in rows
@@ -403,6 +411,8 @@ class CameraManager:
             if 'tracking_mode' in updates:
                 mode = str(updates['tracking_mode']).strip().lower()
                 camera.tracking_mode = mode if mode in {'detect','track'} else 'detect'
+            if 'rotation_degrees' in updates:
+                camera.rotation_degrees = updates['rotation_degrees']
             if 'features' in updates:
                 camera.features = CameraFeatures(**updates['features'])
 
@@ -415,7 +425,7 @@ class CameraManager:
                     SET name = ?, source_type = ?, rtsp_url = ?, enabled = ?,
                         camera_role = ?, camera_zone = ?, crowd_threshold = ?,
                         tracking_fps = ?, tracking_imgsz = ?, tracking_quality = ?,
-                        tracking_mode = ?,
+                        tracking_mode = ?, rotation_degrees = ?,
                         features_json = ?, updated_at = ?
                     WHERE camera_id = ?
                 ''', (
@@ -430,6 +440,7 @@ class CameraManager:
                     camera.tracking_imgsz,
                     camera.tracking_quality,
                     camera.tracking_mode,
+                    camera.rotation_degrees,
                     json.dumps(camera.features.model_dump()),
                     camera.updated_at,
                     camera_id
@@ -1703,7 +1714,7 @@ class CameraManager:
         }
 
         def publish_frame(frame):
-            prepared = self._prepare_tracking_frame(frame, camera_config)
+            prepared = self._prepare_tracking_frame(rotate_frame(frame, camera_config.rotation_degrees), camera_config)
             with frame_lock:
                 if capture_state["latest_seq"] > capture_state["ai_seq"]:
                     capture_state["frames_dropped"] += 1

@@ -3,6 +3,7 @@ import time, threading, os
 from datetime import datetime, timezone
 from pathlib import Path
 import cv2
+from camera_service.orientation import rotate_frame
 from camera_service.bbox_utils import crop
 from camera_service.tracking import UltralyticsByteTracker, CentroidTracker
 from camera_service.identity_engine import IdentityResolutionEngine
@@ -90,6 +91,7 @@ class CameraWorker:
         if not self.source.open(): raise RuntimeError('camera source failed to open')
         ok,frame=self.source.read()
         if not ok: return False
+        frame=rotate_frame(frame, getattr(self.camera, 'rotation_degrees', 0))
         if hasattr(self.tracker,'track_frame'): tracks=self.tracker.track_frame(frame)
         else: tracks=self.tracker.update([])
         self.process_tracks(frame,tracks); return True
@@ -111,6 +113,7 @@ class CameraWorker:
                     self.reconnect_count += 1
                     self._status(state="RECONNECTING", online=False, reconnect_count=self.reconnect_count, last_error="Camera frame read failed")
                     self.source.close(); self.tracker.reset(); self.stop_event.wait(1); continue
+                frame=rotate_frame(frame, getattr(self.camera, 'rotation_degrees', 0))
                 self.frames_received += 1
                 tracks=self.tracker.track_frame(frame) if hasattr(self.tracker,'track_frame') else self.tracker.update([])
                 self.process_tracks(frame,tracks)

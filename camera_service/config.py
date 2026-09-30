@@ -162,6 +162,7 @@ class CameraConfig(BaseModel):
     source_type: Literal["rtsp","file","webcam"] = "file"
     source: str
     enabled: bool = True
+    rotation_degrees: Literal[0, 90, 180, 270] = 0
     fps: float = 6.0
     camera_role: Literal["ENTRANCE_EXIT","GENERAL","SECURITY","SHOPLIFTING"] = "GENERAL"
     features: FeatureConfig = Field(default_factory=FeatureConfig)

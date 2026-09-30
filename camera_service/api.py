@@ -656,6 +656,7 @@ class CameraCreate(BaseModel):
     tracking_fps: float = 3.0
     tracking_imgsz: int = 384
     tracking_quality: int = 65
+    rotation_degrees: int = 0
     tracking_mode: str = "detect"
     features: dict = {}
 
