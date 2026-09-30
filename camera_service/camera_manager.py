@@ -1091,31 +1091,31 @@ class CameraManager:
                                     }
                                 elif camera_config.camera_role == CameraRole.SECURITY and (camera_config.features.unknown_detection or camera_config.features.unknown_person_detection) and camera_zone == "inside" and store:
                                     confirmed_zone = self._confirmed_unknown_zone(camera_id, str(track_id), (x1, y1, x2, y2), frame.shape)
-                                    if not confirmed_zone or not self._should_emit_alert(f"unknown:{camera_id}:{track_id}:{confirmed_zone['id']}", 20):
-                                        self._track_identity_cache[cache_key] = {
-                                            "checked_at": now, "person_id": None,
-                                            "text": f"Unknown person {score:.2f}", "score": score,
-                                        }
-                                        continue
-                                    event_time = datetime.now(timezone.utc)
-                                    face_snapshot = self._save_event_snapshot(roi, camera_id, "unknown_face")
-                                    person_snapshot = self._save_event_snapshot(frame, camera_id, "unknown_person")
-                                    incident_id, created = store.upsert_unknown(
-                                        getattr(attendance_engine, "store_id", "store-1"), camera_id, str(track_id),
-                                        event_time, event_time, event_time, 1, score,
-                                        face_path=face_snapshot, person_path=person_snapshot,
+                                    should_create = bool(
+                                        confirmed_zone
+                                        and self._should_emit_alert(
+                                            f"unknown:{camera_id}:{track_id}:{confirmed_zone['id']}", 20
+                                        )
                                     )
-                                    if created:
-                                        try:
-                                            store.add_person_event(
-                                                None, getattr(attendance_engine, "store_id", "store-1"), camera_id,
-                                                "UNKNOWN_SECURITY_CONFIRMED", event_time,
-                                                {"track_id": str(track_id), "zone_id": confirmed_zone["id"], "zone_name": confirmed_zone["name"]},
-                                            )
-                                        except Exception:
-                                            pass
-                                    if created:
-                                        self._begin_unknown_clip(stream_state, incident_id, camera_id)
+                                    if should_create:
+                                        event_time = datetime.now(timezone.utc)
+                                        face_snapshot = self._save_event_snapshot(roi, camera_id, "unknown_face")
+                                        person_snapshot = self._save_event_snapshot(frame, camera_id, "unknown_person")
+                                        incident_id, created = store.upsert_unknown(
+                                            getattr(attendance_engine, "store_id", "store-1"), camera_id, str(track_id),
+                                            event_time, event_time, event_time, 1, score,
+                                            face_path=face_snapshot, person_path=person_snapshot,
+                                        )
+                                        if created:
+                                            try:
+                                                store.add_person_event(
+                                                    None, getattr(attendance_engine, "store_id", "store-1"), camera_id,
+                                                    "UNKNOWN_SECURITY_CONFIRMED", event_time,
+                                                    {"track_id": str(track_id), "zone_id": confirmed_zone["id"], "zone_name": confirmed_zone["name"]},
+                                                )
+                                            except Exception:
+                                                pass
+                                            self._begin_unknown_clip(stream_state, incident_id, camera_id)
                                     self._track_identity_cache[cache_key] = {
                                         "checked_at": now,
                                         "person_id": None,
