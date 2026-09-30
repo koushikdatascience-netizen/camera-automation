@@ -605,6 +605,7 @@
         #security-zone-layer { position:absolute; inset:42px 0 0 0; z-index:5; pointer-events:auto; }
         .security-zone-box { position:absolute; border:2px solid #ffcc32; background:rgba(255,204,50,.10); min-width:8px; min-height:8px; }
         .security-zone-box span { position:absolute; left:0; top:0; transform:translateY(-100%); background:#161a1d; color:#fff; padding:2px 6px; font-size:11px; white-space:nowrap; }
+        .security-zone-resize { position:absolute; right:-6px; bottom:-6px; width:14px; height:14px; border-radius:50%; background:#ffcc32; border:2px solid #161a1d; cursor:nwse-resize; }
 </style>
 </head>
 <body>
@@ -1676,11 +1677,33 @@
             const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones`);
             const body=await response.json(); securityZones=body.items||[]; renderSecurityZones();
         }
+        async function persistSecurityZone(zone) {
+            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(zone)});
+            const body=await response.json();
+            if(!response.ok) throw new Error(body.detail||'Unable to save zone');
+            return body;
+        }
         function renderSecurityZones() {
             const layer=document.getElementById('security-zone-layer');
-            layer.innerHTML=securityZones.map(z=>`<div class="security-zone-box" data-zone-id="${escapeHtmlLocal(z.id)}" style="left:${z.x*100}%;top:${z.y*100}%;width:${z.width*100}%;height:${z.height*100}%"><span>${escapeHtmlLocal(z.name)}</span></div>`).join('');
+            layer.innerHTML=securityZones.map(z=>`<div class="security-zone-box" data-zone-id="${escapeHtmlLocal(z.id)}" style="left:${z.x*100}%;top:${z.y*100}%;width:${z.width*100}%;height:${z.height*100}%"><span>${escapeHtmlLocal(z.name)}</span><i class="security-zone-resize" title="Resize"></i></div>`).join('');
             document.getElementById('security-zone-list').innerHTML=securityZones.map(z=>`<div class="activity-row"><strong>${escapeHtmlLocal(z.name)}</strong><button class="btn btn-danger security-zone-delete" data-zone-id="${escapeHtmlLocal(z.id)}">Delete</button></div>`).join('')||'<div class="activity-empty">No zones. Add one over the live picture.</div>';
             document.querySelectorAll('.security-zone-delete').forEach(btn=>btn.addEventListener('click',async()=>{await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones/${encodeURIComponent(btn.dataset.zoneId)}`,{method:'DELETE'});loadSecurityZones();}));
+            layer.querySelectorAll('.security-zone-box').forEach(box=>{
+                const zone=securityZones.find(z=>z.id===box.dataset.zoneId); if(!zone)return;
+                box.addEventListener('pointerdown',ev=>{
+                    if(ev.target.classList.contains('security-zone-resize'))return;
+                    ev.preventDefault(); const rect=layer.getBoundingClientRect(),sx=ev.clientX,sy=ev.clientY,ox=zone.x,oy=zone.y;
+                    const move=e=>{zone.x=Math.max(0,Math.min(1-zone.width,ox+(e.clientX-sx)/rect.width));zone.y=Math.max(0,Math.min(1-zone.height,oy+(e.clientY-sy)/rect.height));box.style.left=(zone.x*100)+'%';box.style.top=(zone.y*100)+'%';};
+                    const up=async()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);try{await persistSecurityZone(zone);}catch(error){document.getElementById('security-zone-message').textContent=error.message;}};
+                    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
+                });
+                box.querySelector('.security-zone-resize').addEventListener('pointerdown',ev=>{
+                    ev.stopPropagation();ev.preventDefault();const rect=layer.getBoundingClientRect(),sx=ev.clientX,sy=ev.clientY,ow=zone.width,oh=zone.height;
+                    const move=e=>{zone.width=Math.max(.02,Math.min(1-zone.x,ow+(e.clientX-sx)/rect.width));zone.height=Math.max(.02,Math.min(1-zone.y,oh+(e.clientY-sy)/rect.height));box.style.width=(zone.width*100)+'%';box.style.height=(zone.height*100)+'%';};
+                    const up=async()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);try{await persistSecurityZone(zone);}catch(error){document.getElementById('security-zone-message').textContent=error.message;}};
+                    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
+                });
+            });
         }
         async function beginSecurityZoneDraw() {
             const layer=document.getElementById('security-zone-layer');
