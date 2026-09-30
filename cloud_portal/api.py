@@ -169,6 +169,13 @@ class CrmPersonMappingRequest(BaseModel):
     employee_code: str | None = None
     break_master_id: str | None = None
 
+class AttendanceStationActionRequest(BaseModel):
+    camera_id: str
+    edge_id: str
+    recognition_event_id: str
+    action: str
+
+
 def _password_hash(password: str, salt: bytes | None = None) -> str:
     if salt is None:
         salt=secrets.token_bytes(16)
@@ -769,6 +776,64 @@ def portal_attendance(tenant_id: str, principal: PortalPrincipal = Depends(requi
     records=sorted(sessions.values(),key=lambda x:x.get("entry_time") or x.get("exit_time") or "",reverse=True)
     presence=[{**r,"status":"PRESENT"} for r in records if r.get("entry_time") and not r.get("exit_time")]
     return {"records":records,"presence":presence,"events":person_events[:100]}
+
+@app.get("/portal/v1/tenants/{tenant_id}/attendance-station/candidate")
+def attendance_station_candidate(tenant_id: str, camera_id: str, edge_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    camera=store.get_camera(tenant_id,principal.shop_id,edge_id,camera_id)
+    if not camera or str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
+        raise HTTPException(400,"Attendance Station is available only for attendance/entrance cameras")
+    now=datetime.now(timezone.utc)
+    for event in store.list_events(tenant_id,event_type="PERSON_RECOGNIZED",limit=50,shop_id=principal.shop_id):
+        if str(event.get("camera_id") or "")!=camera_id or str(event.get("edge_id") or "")!=edge_id:
+            continue
+        stamp=event.get("event_time"); dt=stamp if isinstance(stamp,datetime) else datetime.fromisoformat(str(stamp).replace("Z","+00:00"))
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+        age=(now-dt.astimezone(timezone.utc)).total_seconds()
+        if age>15: break
+        envelope=event.get("payload") or {}; payload=envelope.get("payload") if isinstance(envelope.get("payload"),dict) else envelope
+        person_id=str(payload.get("person_id") or "").strip(); metadata=payload.get("metadata") or {}
+        person=store.get_cloud_person(tenant_id,principal.shop_id,person_id) if person_id else None
+        mapping=store.crm_person_mapping(tenant_id,principal.shop_id,person_id) if person_id else None
+        return {"candidate":{"recognition_event_id":event.get("id"),"person_id":person_id,"full_name":(person or {}).get("full_name") or person_id,
+            "employee_code":(person or {}).get("employee_code"),"role":(person or {}).get("role"),"confidence":metadata.get("confidence"),
+            "camera_id":camera_id,"edge_id":edge_id,"detected_at":str(event.get("event_time")),"expires_in_seconds":max(0,int(15-age)),
+            "crm_mapped":bool(mapping),"break_configured":bool(mapping and mapping.get("break_master_id"))}}
+    return {"candidate":None}
+
+@app.post("/portal/v1/tenants/{tenant_id}/attendance-station/action")
+def attendance_station_action(tenant_id: str, request: AttendanceStationActionRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    action=request.action.strip().upper()
+    if action not in {"CHECK_IN","CHECK_OUT","BREAK_START","BREAK_END"}:
+        raise HTTPException(400,"Unsupported attendance action")
+    camera=store.get_camera(tenant_id,principal.shop_id,request.edge_id,request.camera_id)
+    if not camera or str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
+        raise HTTPException(400,"Manual attendance actions require an attendance/entrance camera")
+    event=store.get_event(tenant_id,principal.shop_id,request.recognition_event_id)
+    if not event or str(event.get("event_type") or "")!="PERSON_RECOGNIZED" or str(event.get("camera_id") or "")!=request.camera_id or str(event.get("edge_id") or "")!=request.edge_id:
+        raise HTTPException(409,"Recognition candidate is no longer valid")
+    stamp=event.get("event_time"); detected=stamp if isinstance(stamp,datetime) else datetime.fromisoformat(str(stamp).replace("Z","+00:00"))
+    if detected.tzinfo is None: detected=detected.replace(tzinfo=timezone.utc)
+    if (datetime.now(timezone.utc)-detected.astimezone(timezone.utc)).total_seconds()>15:
+        raise HTTPException(409,"Recognition expired; face the attendance camera again")
+    envelope=event.get("payload") or {}; payload=envelope.get("payload") if isinstance(envelope.get("payload"),dict) else envelope
+    person_id=str(payload.get("person_id") or "").strip(); mapping=store.crm_person_mapping(tenant_id,principal.shop_id,person_id) if person_id else None
+    if not mapping: raise HTTPException(409,"Recognized person is not mapped to a CRM user")
+    if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
+    now=datetime.now(timezone.utc); crm_timestamp=now.isoformat(timespec="milliseconds").replace("+00:00","Z")
+    location="Camera Eye - "+str(camera.get("name") or request.camera_id)
+    try:
+        if action=="CHECK_IN": result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_timestamp,"actualStartTime":crm_timestamp,"actualOffTime":"","loginLocation":location,"logoutLocation":""})
+        elif action=="CHECK_OUT": result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_timestamp,"actualStartTime":"","actualOffTime":crm_timestamp,"loginLocation":"","logoutLocation":location})
+        elif action=="BREAK_START":
+            if not mapping.get("break_master_id"): raise HTTPException(409,"No CRM break type is mapped for this person")
+            result=crm_client.start_break(mapping["crm_user_id"],mapping["break_master_id"])
+        else: result=crm_client.end_break(mapping["crm_user_id"])
+    except httpx.HTTPError as exc:
+        raise HTTPException(502,f"CRM attendance action failed: {exc}") from exc
+    return {"ok":True,"action":action,"person_id":person_id,"recognition_event_id":request.recognition_event_id,"confirmed_at":crm_timestamp,
+        "confirmed_by":{"user_id":principal.user_id,"display_name":principal.display_name,"role":principal.role},"crm_result":result}
 
 @app.get("/portal/v1/tenants/{tenant_id}/crm/status")
 def crm_status(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
