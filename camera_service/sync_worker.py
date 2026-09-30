@@ -173,19 +173,27 @@ class EdgeSyncWorker:
                 try:
                     event = json.loads(row["payload_json"])
                     metadata = event.get("metadata") or {}
+                    # Alert events deliberately wait for their post-event clip to finish
+                    # so image + video evidence reach the cloud in one durable event.
+                    if metadata.get("evidence_pending"):
+                        continue
                     snapshot_path = (
                         metadata.get("snapshot_path")
                         or metadata.get("person_path")
                         or metadata.get("face_path")
                     )
+                    clip_path = metadata.get("clip_path")
+                    cloud_metadata = dict(metadata)
                     if snapshot_path and Path(snapshot_path).is_file():
-                        evidence = self.cloud_client.upload_event_evidence(str(event.get("event_id") or row["id"]), snapshot_path)
-                        event["metadata"] = {**metadata, "cloud_evidence": evidence}
+                        cloud_metadata["cloud_evidence"] = self.cloud_client.upload_event_evidence(str(event.get("event_id") or row["id"]), snapshot_path)
                     elif snapshot_path:
-                        event["metadata"] = {**metadata, "evidence_unavailable": True}
-                    if event.get('metadata'):
-                        event['metadata'] = {key:value for key,value in event['metadata'].items()
-                            if key not in {'snapshot_path','person_path','face_path','clip_path'}}
+                        cloud_metadata["evidence_unavailable"] = True
+                    if clip_path and Path(clip_path).is_file():
+                        cloud_metadata["cloud_clip"] = self.cloud_client.upload_event_evidence(str(event.get("event_id") or row["id"]), clip_path)
+                    elif clip_path:
+                        cloud_metadata["clip_unavailable"] = True
+                    event["metadata"] = {key:value for key,value in cloud_metadata.items()
+                        if key not in {'snapshot_path','person_path','face_path','clip_path','evidence_pending'}}
                     self.cloud_client.post_event(self.edge_config, event)
                     self.store.mark_event_synced(row["id"])
                     synced += 1
