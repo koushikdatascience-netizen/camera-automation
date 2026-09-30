@@ -2120,6 +2120,25 @@
             }
         });
 
+        function syncCameraRoleFeatures() {
+            const role=document.getElementById('camera-role').value;
+            const attendance=document.getElementById('feature-attendance').closest('.checkbox-group');
+            const unknown=document.getElementById('feature-unknown-detection').closest('.checkbox-group');
+            if(role==='ENTRANCE_EXIT'){
+                document.getElementById('feature-attendance').checked=true;
+                document.getElementById('feature-face-recognition').checked=true;
+                document.getElementById('feature-unknown-detection').checked=false;
+                attendance.hidden=false; unknown.hidden=true;
+            } else if(role==='SECURITY'){
+                document.getElementById('feature-attendance').checked=false;
+                attendance.hidden=true; unknown.hidden=false;
+            } else {
+                document.getElementById('feature-attendance').checked=false;
+                attendance.hidden=true; unknown.hidden=true;
+            }
+        }
+        document.getElementById('camera-role').addEventListener('change',syncCameraRoleFeatures);
+
         // Save Camera
         document.getElementById('camera-setup-form').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -2138,7 +2157,7 @@
                 tracking_quality: Number(document.getElementById('tracking-quality').value || 65),
                 rotation_degrees: Number(document.getElementById('camera-rotation').value),
                 tracking_mode: document.getElementById('tracking-mode').value,
-                attendance_active: document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
+                attendance_active: document.getElementById('camera-role').value === 'ENTRANCE_EXIT' && (editingCameraId ? document.getElementById('camera-id').dataset.attendanceActive !== 'false' : true),
                 features: {
                     attendance: document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
                     face_recognition: document.getElementById('feature-face-recognition').checked || document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
@@ -2233,6 +2252,7 @@
                 document.getElementById('rtsp-url').dataset.storedSource = fullCamera.rtsp_url || '';
                 document.getElementById('rtsp-url').dataset.sourceType = fullCamera.source_type || 'rtsp';
                 document.getElementById('camera-id').dataset.enabled = String(fullCamera.enabled !== false);
+                document.getElementById('camera-id').dataset.attendanceActive = String(fullCamera.attendance_active !== false);
                 document.getElementById('camera-role').value = fullCamera.camera_role || 'GENERAL';
                 document.getElementById('camera-zone').value = fullCamera.camera_zone || 'inside';
                 document.getElementById('crowd-threshold').value = fullCamera.crowd_threshold || 10;
@@ -2246,6 +2266,7 @@
                 document.getElementById('feature-unknown-detection').checked = !!(fullCamera.features && fullCamera.features.unknown_detection);
                 document.getElementById('feature-shoplifting').checked = !!(fullCamera.features && fullCamera.features.shoplifting);
                 document.getElementById('feature-object-security').checked = !!(fullCamera.features && fullCamera.features.object_security);
+                syncCameraRoleFeatures();
                 document.getElementById('test-result').innerHTML = '';
                 document.getElementById('preview-container').style.display = 'none';
                 document.getElementById('camera-form').style.display = 'block';
