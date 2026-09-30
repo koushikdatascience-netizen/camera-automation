@@ -577,12 +577,14 @@ async def upload_edge_event_evidence(
     if not safe_event_id:
         raise HTTPException(400, "Invalid event_id")
     content_type = (file.content_type or "").lower()
-    if content_type not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
-        raise HTTPException(415, "Only JPEG, PNG, and WebP evidence images are supported")
-    data = await file.read(5 * 1024 * 1024 + 1)
-    if len(data) > 5 * 1024 * 1024:
-        raise HTTPException(413, "Evidence image exceeds 5 MB")
-    suffix = { "image/png": ".png", "image/webp": ".webp" }.get(content_type, ".jpg")
+    allowed = {"image/jpeg", "image/jpg", "image/png", "image/webp", "video/mp4"}
+    if content_type not in allowed:
+        raise HTTPException(415, "Only JPEG, PNG, WebP, and MP4 evidence are supported")
+    max_bytes = 50 * 1024 * 1024 if content_type == "video/mp4" else 5 * 1024 * 1024
+    data = await file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(413, "Evidence file exceeds the allowed size")
+    suffix = {"image/png": ".png", "image/webp": ".webp", "video/mp4": ".mp4"}.get(content_type, ".jpg")
     root = Path(os.getenv("SNAPKEY_EVIDENCE_ROOT", "/app/data/evidence"))
     root = root.resolve()
     target_dir = (root / str(principal.tenant_id) / str(principal.shop_id) / str(principal.edge_id)).resolve()
