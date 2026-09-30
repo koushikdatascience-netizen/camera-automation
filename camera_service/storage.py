@@ -234,6 +234,7 @@ class SQLiteStore:
             if row and row["status"]=="PENDING":
                 payload=json.loads(row["payload_json"])
                 payload.setdefault("metadata",{})["clip_path"]=clip_path
+                payload["metadata"]["evidence_pending"]=False
                 c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),aid))
         return self.security_alert(aid)
     def acknowledge_security_alert(self,aid):
