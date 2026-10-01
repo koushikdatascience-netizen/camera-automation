@@ -33,7 +33,15 @@ class PostgresPortalStore:
     def _init(self) -> None:
         statements = [
             """CREATE TABLE IF NOT EXISTS tenants(id TEXT PRIMARY KEY, name TEXT, created_at TIMESTAMPTZ NOT NULL)""",
+            """ALTER TABLE tenants ADD COLUMN IF NOT EXISTS client_id TEXT""",
+            """ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tenant_code TEXT""",
+            """ALTER TABLE tenants ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE""",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_client_id ON tenants(lower(client_id)) WHERE client_id IS NOT NULL""",
             """CREATE TABLE IF NOT EXISTS sites(id TEXT NOT NULL, tenant_id TEXT NOT NULL, name TEXT, created_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(id,tenant_id))""",
+            """ALTER TABLE sites ADD COLUMN IF NOT EXISTS counter_code TEXT""",
+            """ALTER TABLE sites ADD COLUMN IF NOT EXISTS company_code TEXT""",
+            """ALTER TABLE sites ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE""",
+            """CREATE INDEX IF NOT EXISTS idx_sites_counter_scope ON sites(tenant_id,counter_code,active)""",
             """CREATE TABLE IF NOT EXISTS edge_machines(id TEXT NOT NULL, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, last_seen_at TIMESTAMPTZ NOT NULL, company_code TEXT, shop_id TEXT, PRIMARY KEY(id,tenant_id,site_id))""",
             """CREATE TABLE IF NOT EXISTS edge_heartbeats(tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, received_at TIMESTAMPTZ NOT NULL, status_json JSONB NOT NULL, company_code TEXT, shop_id TEXT, PRIMARY KEY(tenant_id,site_id,edge_id))""",
             """ALTER TABLE edge_machines ADD COLUMN IF NOT EXISTS company_code TEXT""",
@@ -419,34 +427,40 @@ class PostgresPortalStore:
         return dict(row) if row else None
 
     def client_login_options(self, client_id: str) -> dict[str, Any]:
-        """Return non-secret login choices for one client/company code."""
+        """Return non-secret login choices for a first-class Camera Eye client."""
         client=(client_id or "").strip()
         with self._conn() as conn:
             users=conn.execute(text("""SELECT DISTINCT u.id,u.display_name
-                FROM portal_users u
-                JOIN portal_user_sites s ON s.user_id=u.id AND s.tenant_id=u.tenant_id
-                WHERE u.enabled=TRUE AND s.enabled=TRUE AND lower(COALESCE(u.company_code,''))=lower(:client)
+                FROM tenants t
+                JOIN portal_user_sites s ON s.tenant_id=t.id AND s.enabled=TRUE
+                JOIN portal_users u ON u.id=s.user_id AND u.enabled=TRUE
+                WHERE t.active=TRUE AND lower(COALESCE(t.client_id,''))=lower(:client)
                 ORDER BY u.display_name,u.id"""),{"client":client}).mappings().all()
             sites=conn.execute(text("""SELECT DISTINCT s.shop_id,
-                       COALESCE(NULLIF(si.name,''),s.shop_id) AS name
-                FROM portal_user_sites s
-                JOIN portal_users u ON u.id=s.user_id AND u.tenant_id=s.tenant_id
-                LEFT JOIN sites si ON si.tenant_id=s.tenant_id AND (si.id=s.shop_id OR si.id='site-'||s.shop_id)
-                WHERE u.enabled=TRUE AND s.enabled=TRUE AND lower(COALESCE(u.company_code,''))=lower(:client)
+                       COALESCE(NULLIF(si.name,''),NULLIF(si.counter_code,''),s.shop_id) AS name,
+                       COALESCE(NULLIF(si.counter_code,''),s.shop_id) AS counter_code
+                FROM tenants t
+                JOIN portal_user_sites s ON s.tenant_id=t.id AND s.enabled=TRUE
+                LEFT JOIN sites si ON si.tenant_id=s.tenant_id
+                  AND (si.id=s.shop_id OR si.id='site-'||s.shop_id OR si.counter_code=s.shop_id)
+                WHERE t.active=TRUE AND lower(COALESCE(t.client_id,''))=lower(:client)
+                  AND COALESCE(si.active,TRUE)=TRUE
                 ORDER BY name,s.shop_id"""),{"client":client}).mappings().all()
         return {"users":[dict(row) for row in users],"sites":[dict(row) for row in sites]}
 
     def portal_user_for_client_site(self, client_id: str, user_id: str, shop_id: str) -> dict[str, Any] | None:
         with self._conn() as conn:
-            row=conn.execute(text("""SELECT u.*,s.role AS site_role
-                FROM portal_users u JOIN portal_user_sites s
-                  ON s.user_id=u.id AND s.tenant_id=u.tenant_id
-                WHERE u.id=:user AND u.enabled=TRUE AND s.enabled=TRUE
-                  AND lower(COALESCE(u.company_code,''))=lower(:client)
+            row=conn.execute(text("""SELECT u.*,s.role AS site_role,t.client_id
+                FROM tenants t
+                JOIN portal_user_sites s ON s.tenant_id=t.id AND s.enabled=TRUE
+                JOIN portal_users u ON u.id=s.user_id AND u.enabled=TRUE
+                WHERE u.id=:user AND t.active=TRUE
+                  AND lower(COALESCE(t.client_id,''))=lower(:client)
                   AND s.shop_id=:shop LIMIT 1"""),
                 {"client":(client_id or "").strip(),"user":user_id,"shop":shop_id}).mappings().first()
         if not row: return None
-        data=dict(row); data["shop_id"]=shop_id; data["role"]=data.pop("site_role") or data.get("role") or "USER"
+        data=dict(row); data["tenant_id"]=row["tenant_id"]; data["shop_id"]=shop_id
+        data["role"]=data.pop("site_role") or data.get("role") or "USER"
         return data
 
     def create_portal_session(self, session: dict[str, Any]) -> None:
