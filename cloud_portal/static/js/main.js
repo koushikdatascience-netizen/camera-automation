@@ -605,18 +605,8 @@
         "<td><strong>"+escapeHtml(person.full_name||"")+"</strong><br><small>"+face+" · "+sync+" · "+crm+"</small></td>"+
         "<td>"+escapeHtml(person.employee_code||"")+"</td><td>"+escapeHtml(person.role||"")+"</td>"+
         "<td>"+(person.active?"Active":"Inactive")+"</td><td>"+escapeHtml(String(person.created_at||"").slice(0,10))+"</td>"+
-        "<td><button class='btn deactivate-person' data-person-id='"+escapeHtml(person.person_id)+"'>"+(person.active?"Deactivate":"Inactive")+"</button></td></tr>";
+        "<td><span>"+(person.face_enrolled?"Face ready":"Face not registered")+"</span></td></tr>";
     }).join("");
-    body.querySelectorAll(".deactivate-person").forEach(button=>button.addEventListener("click",async()=>{
-      if(button.textContent==="Inactive") return;
-      try{
-        const scope=requireScope(["tenant_id"]);
-        const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel/"+encodeURIComponent(button.dataset.personId),{method:"DELETE"});
-        if(!response.ok) throw new Error((await response.json()).detail||"Unable to deactivate person.");
-        showMessage("Personnel profile deactivated. The edge will receive the change automatically.");
-        await loadPersonnel();
-      }catch(error){showMessage(error.message,true);}
-    }));
   }
 
   async function loadPersonnel(){
@@ -628,72 +618,9 @@
     renderPersonnel(data.items||[]);
   }
 
-  let crmPersonnelUsers=[];
-  async function loadCrmPersonnelUsers(){
-    const select=document.getElementById("crm-person-user");if(!select)return;
-    const scope=requireScope(["tenant_id"]);
-    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/crm/users");
-    const data=await response.json();
-    if(!response.ok)throw new Error(data.detail||"Unable to load CRM users.");
-    crmPersonnelUsers=data.items||[];
-    select.innerHTML="<option value=''>Select CRM user</option>"+crmPersonnelUsers.map(user=>"<option value='"+escapeHtml(user.id)+"'>"+escapeHtml(user.name||user.user_name||user.id)+(user.role_name?" · "+escapeHtml(user.role_name):"")+"</option>").join("");
-    select.addEventListener("change",()=>{
-      const user=crmPersonnelUsers.find(x=>x.id===select.value);if(!user)return;
-      document.getElementById("person-name").value=user.name||user.user_name||"";
-      document.getElementById("employee-code").value=user.employee_code||user.user_name||user.id;
-      const role=String(user.role_name||"WORKER").toUpperCase();
-      document.getElementById("person-role").value=role==="OWNER"||role==="MANAGER"?role:"WORKER";
-    });
-  }
-
-  async function addPersonnel(){
-    const button=document.getElementById("add-person-btn");
-    try{
-      const scope=requireScope(["tenant_id"]);
-      const crmUserId=document.getElementById("crm-person-user")?.value||"";
-      const name=document.getElementById("person-name").value.trim();
-      const code=document.getElementById("employee-code").value.trim();
-      const role=document.getElementById("person-role").value;
-      const file=document.getElementById("face-image").files[0];
-      if(!crmUserId) throw new Error("Select the existing CRM user first.");
-      if(!name||!code||!role) throw new Error("Name, employee code and role are required.");
-      if(!file) throw new Error("Upload one clear front-facing face image.");
-      button.disabled=true; button.textContent="Creating & enrolling…";
-      let response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel",{
-        method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({full_name:name,employee_code:code,role})
-      });
-      let person=await response.json();
-      if(!response.ok) throw new Error(person.detail||"Unable to create personnel.");
-      const form=new FormData(); form.append("file",file);
-      response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel/"+encodeURIComponent(person.id)+"/faces",{method:"POST",body:form,timeoutMs:120000});
-      const face=await response.json();
-      if(!response.ok){
-        await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel/"+encodeURIComponent(person.id),{method:"DELETE"});
-        throw new Error(face.detail||"Face enrollment failed.");
-      }
-      response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/crm/person-mappings/"+encodeURIComponent(person.id),{
-        method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({local_person_id:person.id,crm_user_id:crmUserId,employee_code:code})
-      });
-      const mapping=await response.json();
-      if(!response.ok){
-        await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel/"+encodeURIComponent(person.id),{method:"DELETE"});
-        throw new Error(mapping.detail||"CRM user mapping failed.");
-      }
-      ["person-name","employee-code","face-image"].forEach(id=>document.getElementById(id).value="");
-      document.getElementById("crm-person-user").value="";
-      document.getElementById("person-role").value="";
-      showMessage("Person enrolled successfully. The assigned edge will sync the face automatically.");
-      await loadPersonnel();
-    }catch(error){showMessage(error.message,true);}
-    finally{if(button){button.disabled=false;button.textContent="+ Add Person";}}
-  }
-
   function wirePersonnelPage(){
-    const button=document.getElementById("add-person-btn");
-    if(!button) return;
-    button.addEventListener("click",addPersonnel);
-    document.getElementById("focus-add-person-btn")?.addEventListener("click",()=>document.getElementById("person-name")?.focus());
-    Promise.all([loadPersonnel(),loadCrmPersonnelUsers()]).catch(error=>showMessage(error.message,true));
+    if(!document.getElementById("personnel-table-body")) return;
+    loadPersonnel().catch(error=>showMessage(error.message,true));
   }
 
   function fmtTime(value){if(!value)return "—";const d=new Date(value);return Number.isNaN(d.getTime())?"—":d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});}
