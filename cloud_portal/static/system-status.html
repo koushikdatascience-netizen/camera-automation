@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>SnapKey Eye | System Status</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <div class="logo"><img src="/static/assets/snapkey.png" alt="SnapKey Eye"><div class="logo-text"><strong>SnapKey Eye</strong><span>Admin Dashboard</span></div></div>
+  <nav class="nav-menu">
+    <a href="/portal" class="nav-item">⌂ <span>Overview</span></a>
+    <a href="/portal/system-status.html" class="nav-item active">⚡ <span>System Status</span></a>
+    <a href="/portal/live.html" class="nav-item">◉ <span>Live Cameras</span></a>
+    <a href="/portal/cameras.html" class="nav-item">📷 <span>Camera Setup</span></a>
+    <a href="/portal/personnel.html" class="nav-item">👥 <span>Personnel</span></a>
+    <a href="/portal/attendance.html" class="nav-item">📋 <span>Attendance</span></a>
+    <a href="/portal/alerts.html" class="nav-item">⚠ <span>Alerts</span></a>
+  </nav>
+</aside>
+<main class="main">
+<header class="header"><div class="header-date">Loading date…</div><div class="profile"><div class="avatar">CE</div><div class="profile-info"><strong>Camera Eye User</strong><span>User</span></div></div></header>
+<section class="content overview-content">
+  <div class="page-title"><h1>System Status</h1><p>Edge connectivity, camera runtime health and Camera Eye PC pairing.</p></div>
+  <div class="status-grid">
+    <div class="status-card"><div class="card-top"><h3>Cloud Portal</h3><div class="card-icon">⚡</div></div><div class="status-value" id="application-status">Checking</div><div class="status-description">Camera Eye cloud service</div></div>
+    <div class="status-card"><div class="card-top"><h3>Database</h3><div class="card-icon">▣</div></div><div class="status-value" id="database-status">Checking</div><div class="status-description">Portal database connection</div></div>
+    <div class="status-card"><div class="card-top"><h3>Configured Cameras</h3><div class="card-icon">📷</div></div><div class="status-value" id="configured-cameras">—</div><div class="status-description">Cameras in this site</div></div>
+    <div class="status-card"><div class="card-top"><h3>Online Cameras</h3><div class="card-icon">●</div></div><div class="status-value" id="online-cameras">—</div><div class="status-description">Reporting from edge devices</div></div>
+    <div class="status-card"><div class="card-top"><h3>Active Personnel</h3><div class="card-icon">👥</div></div><div class="status-value" id="active-personnel">—</div><div class="status-description">Currently present</div></div>
+    <div class="status-card"><div class="card-top"><h3>Unknown Incidents Today</h3><div class="card-icon">⚠</div></div><div class="status-value" id="unknown-incidents">—</div><div class="status-description">Today's incidents</div></div>
+  </div>
+  <div class="camera-panel" style="margin-top:24px">
+    <div class="panel-heading" style="display:flex;justify-content:space-between;gap:16px;align-items:center"><div><h2>Connected Edge Devices</h2><p>Camera Eye PCs connected to this site and their locally reported cameras.</p></div><button class="btn" id="setup-edge-btn" type="button">+ Pair Camera Eye PC</button></div>
+    <div id="edge-setup-panel" style="display:none;margin:16px 0;padding:18px;border:1px solid #e5e7eb;border-radius:10px;background:#fffdf5">
+      <h3 style="margin:0 0 6px">Pair a Camera Eye PC</h3><p style="margin:0 0 14px">Generate a one-time Integration Code and enter it in Camera Eye on the client PC. It expires automatically.</p>
+      <div id="edge-activation-result"></div>
+      <button class="btn" id="generate-edge-code-btn" type="button">Generate Integration Code</button>
+      <button class="btn btn-light" id="close-edge-setup-btn" type="button">Close</button>
+    </div>
+    <div id="edge-device-list"><p>Loading edge devices…</p></div>
+  </div>
+</section></main>
+<script src="/static/js/main.js"></script>
+</body></html>
