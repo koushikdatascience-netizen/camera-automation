@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -23,6 +24,8 @@ from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
 from cloud_portal.crm_client import crm_client
 from camera_service.face_service import FaceService
+
+logger = logging.getLogger("camera_eye.portal")
 
 
 def build_portal_store():
