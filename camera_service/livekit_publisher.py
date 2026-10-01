@@ -34,8 +34,8 @@ class LiveKitCameraPublisher:
         camera = self.camera_manager.get_camera(camera_id)
         if not camera:
             raise RuntimeError(f"Camera {camera_id} was not found on this edge")
-        if str(getattr(camera.camera_role, "value", camera.camera_role)).upper() != "ENTRANCE_EXIT":
-            raise RuntimeError("Remote live view is restricted to attendance cameras")
+        # Live Cameras supports every configured camera. Attendance cameras use
+        # the same annotated edge frame, so names/unknown boxes match the local EXE.
         ttl = max(30, min(1800, int(ttl_seconds)))
         self.stop(session_id)
         stop_event = threading.Event()
