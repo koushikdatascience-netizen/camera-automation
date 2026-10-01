@@ -913,6 +913,36 @@ def attendance_station_live_stop(tenant_id: str, request: AttendanceLiveStopRequ
         "command_type":"LIVE_VIEW_STOP","request":{"session_id":request.session_id,"camera_id":request.camera_id}})
     return {"ok":True,"session_id":request.session_id,"command_id":command.get("id")}
 
+@app.post("/portal/v1/tenants/{tenant_id}/live/start")
+def portal_live_start(tenant_id: str, request: AttendanceLiveStartRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    """Start an on-demand AI-annotated stream for any online Camera Eye camera."""
+    _portal_scope(tenant_id,principal)
+    camera=_portal_camera_lookup(tenant_id,principal.shop_id,request.edge_id,request.camera_id)
+    if not camera:
+        raise HTTPException(404,"Camera not found")
+    livekit_url=os.getenv("SNAPKEY_LIVEKIT_URL","").strip()
+    if not livekit_url:
+        raise HTTPException(503,"Camera Eye live view is not configured")
+    session_id=secrets.token_urlsafe(18)
+    room="camera-eye-"+secrets.token_urlsafe(18)
+    publisher_token=_livekit_token(room,"edge-"+secrets.token_urlsafe(12),publish=True,subscribe=False,ttl_seconds=request.ttl_seconds)
+    viewer_token=_livekit_token(room,"viewer-"+secrets.token_urlsafe(12),publish=False,subscribe=True,ttl_seconds=request.ttl_seconds)
+    command=store.create_edge_command({"tenant_id":tenant_id,"shop_id":principal.shop_id,"edge_id":request.edge_id,
+        "command_type":"LIVE_VIEW_START","request":{"session_id":session_id,"camera_id":request.camera_id,"url":livekit_url,
+        "publisher_token":publisher_token,"ttl_seconds":request.ttl_seconds}})
+    return {"session_id":session_id,"camera_id":request.camera_id,"edge_id":request.edge_id,"url":livekit_url,
+        "viewer_token":viewer_token,"ttl_seconds":request.ttl_seconds,"command_id":command.get("id"),"transport":"webrtc"}
+
+@app.post("/portal/v1/tenants/{tenant_id}/live/stop")
+def portal_live_stop(tenant_id: str, request: AttendanceLiveStopRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    camera=_portal_camera_lookup(tenant_id,principal.shop_id,request.edge_id,request.camera_id)
+    if not camera:
+        raise HTTPException(404,"Camera not found")
+    command=store.create_edge_command({"tenant_id":tenant_id,"shop_id":principal.shop_id,"edge_id":request.edge_id,
+        "command_type":"LIVE_VIEW_STOP","request":{"session_id":request.session_id,"camera_id":request.camera_id}})
+    return {"ok":True,"session_id":request.session_id,"command_id":command.get("id")}
+
 
 @app.get("/portal/v1/tenants/{tenant_id}/attendance-station/candidate")
 def attendance_station_candidate(tenant_id: str, camera_id: str, edge_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
