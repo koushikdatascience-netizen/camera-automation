@@ -758,6 +758,57 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
             crm_client.end_break(crm_user_id)
 
 
+def _attendance_session_id(person_id: str, when: datetime) -> str:
+    return f"attendance-{person_id}-{when.astimezone(timezone.utc).date().isoformat()}"
+
+def _has_attendance_entry_today(tenant_id: str, shop_id: str, person_id: str, when: datetime) -> bool:
+    day=when.astimezone(timezone.utc).date()
+    for event in store.list_events(tenant_id,event_type="ATTENDANCE_ENTRY",limit=500,shop_id=shop_id):
+        payload=event.get("payload") or {}
+        inner=payload.get("payload") if isinstance(payload.get("payload"),dict) else payload
+        if str(inner.get("person_id") or "")!=person_id:
+            continue
+        stamp=event.get("event_time")
+        dt=stamp if isinstance(stamp,datetime) else datetime.fromisoformat(str(stamp).replace("Z","+00:00"))
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+        if dt.astimezone(timezone.utc).date()==day:
+            return True
+    return False
+
+def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
+    """Immediately check in a recognized CRM person once per UTC day."""
+    if str(envelope.get("event_type") or "")!="PERSON_RECOGNIZED" or not crm_client.configured:
+        return
+    payload=envelope.get("payload") or {}
+    person_id=str(payload.get("person_id") or "").strip()
+    if not person_id:
+        return
+    tenant_id=str(envelope.get("tenant_id") or "")
+    shop_id=str(envelope.get("shop_id") or "")
+    mapping=store.crm_person_mapping(tenant_id,shop_id,person_id)
+    if not mapping:
+        return
+    stamp=envelope.get("event_time")
+    when=datetime.fromisoformat(str(stamp).replace("Z","+00:00"))
+    if when.tzinfo is None: when=when.replace(tzinfo=timezone.utc)
+    when=when.astimezone(timezone.utc)
+    if _has_attendance_entry_today(tenant_id,shop_id,person_id,when):
+        return
+    crm_date=when.date().isoformat()
+    crm_time=when.strftime("%H:%M:%S")
+    location="Camera Eye - "+str(envelope.get("site_id") or shop_id)
+    crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_date,
+        "actualStartTime":crm_time,"actualOffTime":None,"loginLocation":location,"logoutLocation":None})
+    event_id="auto-attendance-"+secrets.token_urlsafe(12)
+    store.record_portal_event({"event_id":event_id,"tenant_id":tenant_id,
+        "company_code":envelope.get("company_code"),"shop_id":shop_id,
+        "site_id":str(envelope.get("site_id") or shop_id),"edge_id":envelope.get("edge_id"),
+        "camera_id":envelope.get("camera_id"),"event_type":"ATTENDANCE_ENTRY",
+        "event_time":when.isoformat(timespec="milliseconds").replace("+00:00","Z"),
+        "payload":{"person_id":person_id,"event_type":"ATTENDANCE_ENTRY",
+        "metadata":{"attendance_session_id":_attendance_session_id(person_id,when),
+        "recognition_event_id":envelope.get("event_id"),"automatic":True}}})
+
 @app.post("/edge/v1/events")
 def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTasks,
                       principal: EdgePrincipal = Depends(require_edge_token)):
@@ -773,7 +824,10 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
     # downstream CRM mutation; retries of the same event_id are acknowledged without
     # scheduling another login/logout/break call.
     if result.get("inserted", True):
-        background_tasks.add_task(_deliver_crm_attendance_event,envelope)
+        if str(envelope.get("event_type") or "")=="PERSON_RECOGNIZED":
+            background_tasks.add_task(_auto_attend_recognized_person,envelope)
+        else:
+            background_tasks.add_task(_deliver_crm_attendance_event,envelope)
     return result
 
 
@@ -1050,10 +1104,13 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
     except httpx.HTTPError as exc:
         raise HTTPException(502,f"CRM attendance action failed: {exc}") from exc
     audit_id="manual-"+secrets.token_urlsafe(12)
+    canonical_type={"CHECK_IN":"ATTENDANCE_ENTRY","CHECK_OUT":"ATTENDANCE_EXIT",
+        "BREAK_START":"BREAK_START","BREAK_END":"BREAK_END"}[action]
     store.record_portal_event({"event_id":audit_id,"tenant_id":tenant_id,"company_code":principal.company_code,"shop_id":principal.shop_id,
         "site_id":str(camera.get("site_id") or principal.shop_id),"edge_id":request.edge_id,"camera_id":request.camera_id,
-        "event_type":"MANUAL_"+action,"event_time":crm_timestamp,"payload":{"person_id":person_id,"event_type":"MANUAL_"+action,
-        "event_time":crm_timestamp,"metadata":{"recognition_event_id":request.recognition_event_id,"confirmed_by_user_id":principal.user_id,
+        "event_type":canonical_type,"event_time":crm_timestamp,"payload":{"person_id":person_id,"event_type":canonical_type,
+        "event_time":crm_timestamp,"metadata":{"attendance_session_id":_attendance_session_id(person_id,now),
+        "recognition_event_id":request.recognition_event_id,"manual":True,"confirmed_by_user_id":principal.user_id,
         "confirmed_by_name":principal.display_name,"confirmed_by_role":principal.role,"camera_name":camera.get("name")}}})
     return {"ok":True,"audit_event_id":audit_id,"action":action,"person_id":person_id,"recognition_event_id":request.recognition_event_id,"confirmed_at":crm_timestamp,
         "confirmed_by":{"user_id":principal.user_id,"display_name":principal.display_name,"role":principal.role},"crm_result":result}
