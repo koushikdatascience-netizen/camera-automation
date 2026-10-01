@@ -628,14 +628,34 @@
     renderPersonnel(data.items||[]);
   }
 
+  let crmPersonnelUsers=[];
+  async function loadCrmPersonnelUsers(){
+    const select=document.getElementById("crm-person-user");if(!select)return;
+    const scope=requireScope(["tenant_id"]);
+    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/crm/users");
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.detail||"Unable to load CRM users.");
+    crmPersonnelUsers=data.items||[];
+    select.innerHTML="<option value=''>Select CRM user</option>"+crmPersonnelUsers.map(user=>"<option value='"+escapeHtml(user.id)+"'>"+escapeHtml(user.name||user.user_name||user.id)+(user.role_name?" · "+escapeHtml(user.role_name):"")+"</option>").join("");
+    select.addEventListener("change",()=>{
+      const user=crmPersonnelUsers.find(x=>x.id===select.value);if(!user)return;
+      document.getElementById("person-name").value=user.name||user.user_name||"";
+      document.getElementById("employee-code").value=user.employee_code||user.user_name||user.id;
+      const role=String(user.role_name||"WORKER").toUpperCase();
+      document.getElementById("person-role").value=role==="OWNER"||role==="MANAGER"?role:"WORKER";
+    });
+  }
+
   async function addPersonnel(){
     const button=document.getElementById("add-person-btn");
     try{
       const scope=requireScope(["tenant_id"]);
+      const crmUserId=document.getElementById("crm-person-user")?.value||"";
       const name=document.getElementById("person-name").value.trim();
       const code=document.getElementById("employee-code").value.trim();
       const role=document.getElementById("person-role").value;
       const file=document.getElementById("face-image").files[0];
+      if(!crmUserId) throw new Error("Select the existing CRM user first.");
       if(!name||!code||!role) throw new Error("Name, employee code and role are required.");
       if(!file) throw new Error("Upload one clear front-facing face image.");
       button.disabled=true; button.textContent="Creating & enrolling…";
@@ -651,7 +671,16 @@
         await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel/"+encodeURIComponent(person.id),{method:"DELETE"});
         throw new Error(face.detail||"Face enrollment failed.");
       }
+      response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/crm/person-mappings/"+encodeURIComponent(person.id),{
+        method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({local_person_id:person.id,crm_user_id:crmUserId,employee_code:code})
+      });
+      const mapping=await response.json();
+      if(!response.ok){
+        await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel/"+encodeURIComponent(person.id),{method:"DELETE"});
+        throw new Error(mapping.detail||"CRM user mapping failed.");
+      }
       ["person-name","employee-code","face-image"].forEach(id=>document.getElementById(id).value="");
+      document.getElementById("crm-person-user").value="";
       document.getElementById("person-role").value="";
       showMessage("Person enrolled successfully. The assigned edge will sync the face automatically.");
       await loadPersonnel();
@@ -664,7 +693,7 @@
     if(!button) return;
     button.addEventListener("click",addPersonnel);
     document.getElementById("focus-add-person-btn")?.addEventListener("click",()=>document.getElementById("person-name")?.focus());
-    loadPersonnel().catch(error=>showMessage(error.message,true));
+    Promise.all([loadPersonnel(),loadCrmPersonnelUsers()]).catch(error=>showMessage(error.message,true));
   }
 
   function fmtTime(value){if(!value)return "—";const d=new Date(value);return Number.isNaN(d.getTime())?"—":d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});}
