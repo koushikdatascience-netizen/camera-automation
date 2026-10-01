@@ -78,146 +78,20 @@
 
       <div>
         <h1>Personnel Management</h1>
-        <p>Add and manage personnel profiles for recognition and attendance.</p>
+        <p>CRM-managed personnel available for recognition and attendance.</p>
       </div>
+</div>
 
-      <button class="btn btn-primary" id="focus-add-person-btn">+ Personnel</button>
-
-    </div>
-
-
-    <!-- ADD PERSON CARD -->
 
     <div class="personnel-card">
-
       <div class="panel-heading">
-
         <div>
-          <h2>Personnel</h2>
-          <p>Create a new personnel profile for your monitoring system.</p>
+          <h2>CRM Personnel Directory</h2>
+          <p>Personnel are managed in SnapKey CRM and synchronized automatically for Camera Eye recognition and attendance.</p>
         </div>
-
-        <span class="configuration-badge">
-          New Profile
-        </span>
-
+        <span class="configuration-badge">CRM Managed</span>
       </div>
-
-
-      <div class="personnel-form">
-
-        <div class="form-group">
-          <label for="crm-person-user">CRM User <span>*</span></label>
-          <select id="crm-person-user">
-            <option value="">Loading CRM users…</option>
-          </select>
-          <small>Select the existing CRM employee. Camera Eye will keep its own face enrollment and recognition profile.</small>
-        </div>
-
-        <!-- NAME -->
-
-        <div class="form-group">
-
-          <label for="person-name">
-            Name
-            <span>*</span>
-          </label>
-
-          <input
-            id="person-name"
-            type="text"
-            placeholder="Enter full name"
-          >
-
-        </div>
-
-
-        <!-- EMPLOYEE CODE -->
-
-        <div class="form-group">
-
-          <label for="employee-code">
-            Employee Code
-            <span>*</span>
-          </label>
-
-          <input
-            id="employee-code"
-            type="text"
-            placeholder="e.g. EMP-001"
-          >
-
-        </div>
-
-
-        <!-- ROLE -->
-
-        <div class="form-group">
-
-          <label for="person-role">
-            Role
-            <span>*</span>
-          </label>
-
-          <select id="person-role">
-
-            <option value="">Select role</option>
-            <option value="WORKER">Worker</option>
-            <option value="MANAGER">Manager</option>
-            <option value="OWNER">Owner</option>
-
-          </select>
-
-        </div>
-
-
-        <!-- FACE IMAGE -->
-
-        <div class="form-group">
-
-          <label>
-            Face Image
-            <span>*</span>
-          </label>
-
-          <label class="upload-box">
-
-            <input
-              id="face-image"
-              type="file"
-              accept="image/*"
-            >
-
-            <span class="upload-icon">↑</span>
-
-            <span class="upload-text">
-              <strong>Upload face image</strong>
-              <small>PNG or JPG • Clear front-facing image recommended</small>
-            </span>
-
-            <span class="browse-btn">
-              Browse
-            </span>
-
-          </label>
-
-        </div>
-
-
-        <!-- BUTTON -->
-
-        <div class="personnel-form-action">
-
-          <button class="btn btn-primary add-person-button" id="add-person-btn">
-            + Personnel
-          </button>
-
-        </div>
-
-      </div>
-
     </div>
-
 
     <!-- PERSONNEL LIST -->
 
@@ -227,7 +101,7 @@
 
         <div>
           <h2>Personnel List</h2>
-          <p>View and manage registered personnel.</p>
+          <p>Synced from SnapKey CRM. Employee identity and face registration are managed in CRM.</p>
         </div>
 
         <div class="personnel-count" id="personnel-count">0 Personnel</div>
@@ -267,10 +141,10 @@
                     👥
                   </div>
 
-                  <h3>No personnel added yet</h3>
+                  <h3>No CRM personnel available</h3>
 
                   <p>
-                    Add your first person using the form above.
+                    Personnel will appear automatically when available in SnapKey CRM.
                   </p>
 
                 </div>
