@@ -162,6 +162,28 @@ class PostgresPortalStore:
                 {"tenant":tenant_id,"shop":shop_id,"edge":edge_id})
         return int(result.rowcount or 0)
 
+    def delete_edge(self, tenant_id: str, shop_id: str, edge_id: str) -> bool:
+        """Remove a stale edge registration while preserving historical events."""
+        with self._conn() as conn:
+            params={"tenant":tenant_id,"shop":shop_id,"edge":edge_id}
+            rows=conn.execute(text("""SELECT id,site_id FROM edge_machines
+                WHERE tenant_id=:tenant AND shop_id=:shop AND id=:edge"""),params).mappings().all()
+            if not rows:
+                return False
+            # Revoke/delete credentials first so a removed installation cannot silently
+            # re-register; it must be explicitly paired again.
+            conn.execute(text("""DELETE FROM edge_credentials
+                WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge"""),params)
+            conn.execute(text("""DELETE FROM edge_commands
+                WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge"""),params)
+            conn.execute(text("""DELETE FROM camera_configs
+                WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge"""),params)
+            conn.execute(text("""DELETE FROM edge_heartbeats
+                WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge"""),params)
+            conn.execute(text("""DELETE FROM edge_machines
+                WHERE tenant_id=:tenant AND shop_id=:shop AND id=:edge"""),params)
+        return True
+
     def ingest_event(self, envelope: dict[str, Any]) -> dict[str, Any]:
         tenant_id=str(envelope["tenant_id"]); site_id=str(envelope["site_id"]); edge_id=str(envelope["edge_id"]); event_id=str(envelope["event_id"]); now=self.now()
         with self._conn() as conn:
