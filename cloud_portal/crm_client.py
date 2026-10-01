@@ -36,6 +36,10 @@ class SnapKeyCrmClient:
         except ValueError:
             return {"ok":True,"text":response.text[:1000]}
 
+    def all_users(self) -> Any:
+        # CRM personnel directory. Keep this server-side so the CRM bearer token is never exposed to the browser.
+        return self._request("GET","/api/User/AllUser")
+
     def my_breaks(self) -> Any:
         return self._request("GET","/api/BreakMaster/my-breaks")
 
