@@ -754,8 +754,18 @@
     document.getElementById('refresh-alerts').addEventListener('click',refresh);refresh();setInterval(refresh,15000);
   }
   document.querySelectorAll('.nav-menu').forEach(nav=>{
-    if(nav.querySelector('a[href="/portal/alerts.html"]'))return;
-    const link=document.createElement('a');link.className='nav-item';link.href='/portal/alerts.html';link.textContent='Alerts';nav.appendChild(link);
+    if(!nav.querySelector('a[href="/portal/system-status.html"]')){
+      const link=document.createElement('a');link.className='nav-item';link.href='/portal/system-status.html';link.innerHTML='⚡ <span>System Status</span>';
+      const overview=nav.querySelector('a[href="/portal"]');overview?.insertAdjacentElement('afterend',link);
+    }
+    if(!nav.querySelector('a[href="/portal/alerts.html"]')){
+      const link=document.createElement('a');link.className='nav-item';link.href='/portal/alerts.html';link.innerHTML='⚠ <span>Alerts</span>';nav.appendChild(link);
+    }
   });
-  bootstrapCrmSession().then(()=>{wireOverviewActivity();wireEdgeSetup();wireCameraPage();wireCloudLivePage();wirePersonnelPage();wireAttendancePage();wireAlertsPage();}).catch(error=>showMessage(error.message,true));
+  function wireSystemStatusPage(){
+    if(!document.getElementById("edge-device-list") || document.getElementById("overview-activity-list"))return;
+    loadSystemStatus().catch(error=>showMessage(error.message,true));
+    setInterval(loadSystemStatus,15000);
+  }
+  bootstrapCrmSession().then(()=>{wireOverviewActivity();wireSystemStatusPage();wireEdgeSetup();wireCameraPage();wireCloudLivePage();wirePersonnelPage();wireAttendancePage();wireAlertsPage();}).catch(error=>showMessage(error.message,true));
 })();
