@@ -793,12 +793,21 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     if when.tzinfo is None: when=when.replace(tzinfo=timezone.utc)
     when=when.astimezone(timezone.utc)
     if _has_attendance_entry_today(tenant_id,shop_id,person_id,when):
+        logger.info("CRM_AUTO_LOGIN_SKIPPED person_id=%s reason=attendance_already_exists",person_id)
         return
     crm_date=when.date().isoformat()
     crm_time=when.strftime("%H:%M:%S")
     location="Camera Eye - "+str(envelope.get("site_id") or shop_id)
-    crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_date,
-        "actualStartTime":crm_time,"actualOffTime":None,"loginLocation":location,"logoutLocation":None})
+    logger.info("CRM_AUTO_LOGIN_ATTEMPT person_id=%s crm_user_id=%s date=%s time=%s",
+        person_id,mapping["crm_user_id"],crm_date,crm_time)
+    try:
+        crm_result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_date,
+            "actualStartTime":crm_time,"actualOffTime":None,"loginLocation":location,"logoutLocation":None})
+    except Exception:
+        logger.exception("CRM_AUTO_LOGIN_FAILED person_id=%s crm_user_id=%s",person_id,mapping["crm_user_id"])
+        return
+    logger.info("CRM_AUTO_LOGIN_SUCCESS person_id=%s crm_user_id=%s result=%s",
+        person_id,mapping["crm_user_id"],crm_result)
     event_id="auto-attendance-"+secrets.token_urlsafe(12)
     store.record_portal_event({"event_id":event_id,"tenant_id":tenant_id,
         "company_code":envelope.get("company_code"),"shop_id":shop_id,
