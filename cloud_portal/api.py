@@ -808,15 +808,29 @@ def _refresh_crm_personnel(tenant_id: str, shop_id: str) -> None:
         uid=str(user["id"])
         name=str(user.get("name") or user.get("userName") or uid)
         role=str(user.get("roleName") or ("ADMIN" if user.get("isAdmin") else "WORKER")).upper()
-        store.upsert_crm_cloud_person({
-            "id":uid,"tenant_id":tenant_id,"shop_id":shop_id,
-            "employee_code":str(user.get("employeeCode") or user.get("userName") or uid),
-            "full_name":name,"role":role,"phone":user.get("phoneNumber"),"email":user.get("email"),
-            "active":bool(user.get("isActive",True)),
-        })
-        # CRM user id is also the Camera Eye person id, so attendance never needs name matching.
-        store.upsert_crm_person_mapping({"tenant_id":tenant_id,"shop_id":shop_id,"local_person_id":uid,
-            "crm_user_id":uid,"employee_code":user.get("employeeCode") or user.get("userName")})
+        employee_code=str(user.get("employeeCode") or user.get("userName") or uid)
+        # Older Camera Eye rows may already own the same employee_code. Reuse that row
+        # instead of violating the unique (tenant, shop, employee_code) constraint.
+        existing_person=next((p for p in store.list_cloud_people(tenant_id,shop_id)
+                              if str(p.get("employee_code") or "").strip().lower()==employee_code.strip().lower()),None)
+        local_person_id=str(existing_person["id"]) if existing_person else uid
+        if existing_person:
+            store.update_cloud_person(tenant_id,shop_id,local_person_id,{
+                "full_name":name,"role":role,"phone":user.get("phoneNumber"),"email":user.get("email"),
+                "active":bool(user.get("isActive",True)),
+            })
+        else:
+            store.upsert_crm_cloud_person({
+                "id":local_person_id,"tenant_id":tenant_id,"shop_id":shop_id,
+                "employee_code":employee_code,"full_name":name,"role":role,
+                "phone":user.get("phoneNumber"),"email":user.get("email"),
+                "active":bool(user.get("isActive",True)),
+            })
+        # Preserve a pre-existing Camera Eye person id when present, but map it to the
+        # authoritative CRM user id for LoginLogout and future attendance mutations.
+        store.upsert_crm_person_mapping({"tenant_id":tenant_id,"shop_id":shop_id,"local_person_id":local_person_id,
+            "crm_user_id":uid,"employee_code":employee_code})
+        uid=local_person_id
         existing=store.list_cloud_faces(tenant_id,shop_id,uid,include_embedding=True)
         existing_vectors={json.dumps(face.get("embedding") or [],separators=(",",":")) for face in existing}
         vectors=user.get("faceEmbeddings") or []
