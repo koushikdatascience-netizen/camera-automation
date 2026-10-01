@@ -242,6 +242,21 @@ class PostgresPortalStore:
                  "name":item["full_name"],"role":item["role"],"phone":item.get("phone"),"email":item.get("email"),"now":now}).mappings().one()
         return dict(row)
 
+    def upsert_crm_cloud_person(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Mirror CRM identity into Camera Eye without creating a second employee identity."""
+        now=self.now()
+        with self._conn() as conn:
+            row=conn.execute(text("""INSERT INTO cloud_personnel(id,tenant_id,shop_id,employee_code,full_name,role,phone,email,active,created_at,updated_at)
+                VALUES(:id,:tenant,:shop,:code,:name,:role,:phone,:email,:active,:now,:now)
+                ON CONFLICT(id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id,shop_id=EXCLUDED.shop_id,
+                employee_code=EXCLUDED.employee_code,full_name=EXCLUDED.full_name,role=EXCLUDED.role,
+                phone=EXCLUDED.phone,email=EXCLUDED.email,active=EXCLUDED.active,updated_at=EXCLUDED.updated_at
+                RETURNING *"""),
+                {"id":item["id"],"tenant":item["tenant_id"],"shop":item["shop_id"],"code":item["employee_code"],
+                 "name":item["full_name"],"role":item["role"],"phone":item.get("phone"),"email":item.get("email"),
+                 "active":bool(item.get("active",True)),"now":now}).mappings().one()
+        return dict(row)
+
     def list_cloud_people(self, tenant_id: str, shop_id: str) -> list[dict[str, Any]]:
         with self._conn() as conn:
             rows=conn.execute(text("""SELECT p.*,COUNT(f.id) AS face_count FROM cloud_personnel p
