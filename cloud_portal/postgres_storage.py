@@ -450,16 +450,22 @@ class PostgresPortalStore:
 
     def portal_user_for_client_site(self, client_id: str, user_id: str, shop_id: str) -> dict[str, Any] | None:
         with self._conn() as conn:
-            row=conn.execute(text("""SELECT u.*,s.role AS site_role,t.client_id
+            row=conn.execute(text("""SELECT u.*,s.role AS site_role,t.id AS login_tenant_id,t.client_id,
+                       COALESCE(si.company_code,u.company_code) AS login_company_code
                 FROM tenants t
                 JOIN portal_user_sites s ON s.tenant_id=t.id AND s.enabled=TRUE
                 JOIN portal_users u ON u.id=s.user_id AND u.enabled=TRUE
+                LEFT JOIN sites si ON si.tenant_id=t.id AND si.active=TRUE
+                  AND (si.id=s.shop_id OR si.id='site-'||s.shop_id OR si.counter_code=s.shop_id)
                 WHERE u.id=:user AND t.active=TRUE
                   AND lower(COALESCE(t.client_id,''))=lower(:client)
                   AND s.shop_id=:shop LIMIT 1"""),
                 {"client":(client_id or "").strip(),"user":user_id,"shop":shop_id}).mappings().first()
         if not row: return None
-        data=dict(row); data["tenant_id"]=row["tenant_id"]; data["shop_id"]=shop_id
+        data=dict(row)
+        data["tenant_id"]=data.pop("login_tenant_id")
+        data["company_code"]=data.pop("login_company_code")
+        data["shop_id"]=shop_id
         data["role"]=data.pop("site_role") or data.get("role") or "USER"
         return data
 
