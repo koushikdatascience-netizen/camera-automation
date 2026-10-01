@@ -443,7 +443,7 @@ def portal_login():
 
 @app.get("/portal/{page_name}", include_in_schema=False)
 def portal_page(page_name: str):
-    allowed = {"index.html", "cameras.html", "personnel.html", "attendance.html", "live.html", "alerts.html"}
+    allowed = {"index.html", "system-status.html", "cameras.html", "personnel.html", "attendance.html", "live.html", "alerts.html"}
     if page_name not in allowed:
         raise HTTPException(404, "Portal page not found")
     return FileResponse(PORTAL_STATIC_DIR / page_name)
