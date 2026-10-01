@@ -52,8 +52,9 @@ class SnapKeyCrmClient:
         # API contract supplied by SnapKey uses userId in the query string.
         return self._request("POST","/api/UserBreak/end-break",params={"userId":user_id})
 
-    def face_embeddings(self, employee_code: str) -> Any:
-        return self._request("GET","/api/User/face-embeddings/"+employee_code)
+    def face_embeddings(self, tenant_code: str) -> Any:
+        # Tenant-scoped CRM personnel/face directory used by Camera Eye.
+        return self._request("GET","/api/User/face-embeddings/"+tenant_code)
 
     def login_logout(self, payload: dict[str,Any]) -> Any:
         # Keep the CRM-owned attendance payload explicit. Camera Eye callers build
