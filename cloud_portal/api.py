@@ -1049,7 +1049,9 @@ def crm_users(tenant_id: str, principal: PortalPrincipal = Depends(require_porta
     try:
         raw=crm_client.all_users()
         users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
-        tenant_code=(principal.company_code or "").strip().lower()
+        # CRM AllUser identifies the customer with tenantCode (for example ABM-46-775).
+        # Camera Eye tenant_id carries that same external tenant code; company_code may be an internal CRM company identifier.
+        tenant_code=(tenant_id or "").strip().lower()
         items=[]
         for user in users:
             if not isinstance(user,dict) or user.get("isActive") is False: continue
