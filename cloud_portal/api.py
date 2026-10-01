@@ -1042,6 +1042,31 @@ def crm_status(tenant_id: str, principal: PortalPrincipal = Depends(require_port
     return {"configured":crm_client.configured,"base_url":crm_client.base_url,
             "mapping_count":len(store.list_crm_person_mappings(tenant_id,principal.shop_id))}
 
+@app.get("/portal/v1/tenants/{tenant_id}/crm/users")
+def crm_users(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id, principal)
+    if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
+    try:
+        raw=crm_client.all_users()
+        users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
+        tenant_code=(principal.company_code or "").strip().lower()
+        items=[]
+        for user in users:
+            if not isinstance(user,dict) or user.get("isActive") is False: continue
+            if tenant_code and str(user.get("tenantCode") or "").strip().lower()!=tenant_code: continue
+            items.append({
+                "id":str(user.get("id") or ""),
+                "name":user.get("name") or user.get("userName") or "CRM User",
+                "user_name":user.get("userName"),
+                "employee_code":user.get("employeeCode"),
+                "role_name":user.get("roleName"),
+                "department_name":user.get("departmentName"),
+                "tenant_code":user.get("tenantCode"),
+                "is_admin":bool(user.get("isAdmin")),
+            })
+        return {"items":[x for x in items if x["id"]]}
+    except httpx.HTTPError as exc: raise HTTPException(502,f"SnapKey CRM user lookup failed: {exc}") from exc
+
 @app.get("/portal/v1/tenants/{tenant_id}/crm/breaks")
 def crm_breaks(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
