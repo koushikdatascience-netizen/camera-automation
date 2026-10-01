@@ -691,10 +691,24 @@
   async function loadAttendanceStationCameras(){
     const select=document.getElementById("station-camera");if(!select)return;
     const scope=requireScope(["tenant_id","shop_id"]);
-    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id));
-    const data=await response.json();if(!response.ok)throw new Error(data.detail||"Unable to load attendance cameras.");
-    const cameras=(data.items||[]).filter(c=>String(c.camera_role||"").toUpperCase()==="ENTRANCE_EXIT" && c.enabled!==false);
-    select.innerHTML=cameras.length?cameras.map(c=>"<option value='"+escapeHtml((c.edge_id||"")+"::"+c.camera_id)+"'>"+escapeHtml(c.name||c.camera_id)+(c.online===false?" · Offline":"")+"</option>").join(""):"<option value=''>No attendance camera configured</option>";
+    const [cameraResponse,edgeResponse]=await Promise.all([
+      authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras?shop_id="+encodeURIComponent(scope.shop_id)),
+      authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edges")
+    ]);
+    const data=await cameraResponse.json(),edgeData=await edgeResponse.json();
+    if(!cameraResponse.ok)throw new Error(data.detail||"Unable to load attendance cameras.");
+    if(!edgeResponse.ok)throw new Error(edgeData.detail||"Unable to load current edge inventory.");
+    // Attendance must target the camera identity advertised by the currently-online
+    // edge. Cloud camera_configs may legitimately contain an older camera id after
+    // reinstall/reconfiguration, and must never win over the live heartbeat.
+    const runtime=[];
+    (edgeData.items||[]).filter(edge=>edgeOnline(edge)).forEach(edge=>{
+      (edge.status?.cameras||[]).forEach(camera=>runtime.push({...camera,edge_id:edge.edge_id||edge.id}));
+    });
+    const configured=data.items||[],configuredByKey=new Map(configured.map(c=>[(c.edge_id||"")+"::"+c.camera_id,c]));
+    const cameras=runtime.map(camera=>({...configuredByKey.get((camera.edge_id||"")+"::"+camera.camera_id),...camera}))
+      .filter(c=>String(c.camera_role||"").toUpperCase()==="ENTRANCE_EXIT" && c.enabled!==false && c.online!==false);
+    select.innerHTML=cameras.length?cameras.map(c=>"<option value='"+escapeHtml((c.edge_id||"")+"::"+c.camera_id)+"'>"+escapeHtml(c.name||c.camera_id)+" · Online</option>").join(""):"<option value=''>No online attendance camera configured</option>";
   }
   function renderStationCandidate(candidate){
     attendanceStationCandidate=candidate||null;const box=document.getElementById("station-candidate"),expiry=document.getElementById("station-expiry");
