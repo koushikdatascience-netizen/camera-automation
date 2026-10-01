@@ -793,10 +793,72 @@ def delete_portal_edge(tenant_id: str, edge_id: str, principal: PortalPrincipal 
     return {"deleted":True,"edge_id":edge_id,"credentials_revoked":True}
 
 
+def _refresh_crm_personnel(tenant_id: str, shop_id: str) -> None:
+    """CRM is authoritative for people; Camera Eye only mirrors identity + AI face data."""
+    if not crm_client.configured:
+        raise HTTPException(503,"SnapKey CRM API token is not configured")
+    try:
+        raw=crm_client.face_embeddings(tenant_id)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502,f"SnapKey CRM personnel lookup failed: {exc}") from exc
+    users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
+    for user in users:
+        if not isinstance(user,dict) or not str(user.get("id") or "").strip():
+            continue
+        uid=str(user["id"])
+        name=str(user.get("name") or user.get("userName") or uid)
+        role=str(user.get("roleName") or ("ADMIN" if user.get("isAdmin") else "WORKER")).upper()
+        store.upsert_crm_cloud_person({
+            "id":uid,"tenant_id":tenant_id,"shop_id":shop_id,
+            "employee_code":str(user.get("employeeCode") or user.get("userName") or uid),
+            "full_name":name,"role":role,"phone":user.get("phoneNumber"),"email":user.get("email"),
+            "active":bool(user.get("isActive",True)),
+        })
+        # CRM user id is also the Camera Eye person id, so attendance never needs name matching.
+        store.upsert_crm_person_mapping({"tenant_id":tenant_id,"shop_id":shop_id,"local_person_id":uid,
+            "crm_user_id":uid,"employee_code":user.get("employeeCode") or user.get("userName")})
+        existing=store.list_cloud_faces(tenant_id,shop_id,uid,include_embedding=True)
+        existing_vectors={json.dumps(face.get("embedding") or [],separators=(",",":")) for face in existing}
+        vectors=user.get("faceEmbeddings") or []
+        if vectors and isinstance(vectors,list) and vectors and isinstance(vectors[0],(int,float)):
+            vectors=[vectors]
+        for vector in vectors:
+            if not isinstance(vector,list) or not vector or not all(isinstance(x,(int,float)) for x in vector):
+                continue
+            # InsightFace buffalo_l recognition embeddings are 512-D. Never mix another model's vector space.
+            if len(vector)!=512:
+                continue
+            key=json.dumps(vector,separators=(",",":"))
+            if key in existing_vectors:
+                continue
+            store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":uid,"tenant_id":tenant_id,"shop_id":shop_id,
+                "embedding":[float(x) for x in vector],"quality":1.0,"image_path":None})
+            existing_vectors.add(key)
+        # If CRM has no compatible vector, derive Camera Eye embeddings from every embedded face image.
+        # profileImage is also accepted when CRM returns it as a data URL. Remote relative profile paths remain display-only.
+        image_sources=list(user.get("faceImages") or [])+list(user.get("profileImage") or [])
+        if not existing_vectors:
+            import base64
+            for source in image_sources:
+                if not isinstance(source,str) or not source.startswith("data:image/") or "," not in source:
+                    continue
+                try:
+                    raw_image=base64.b64decode(source.split(",",1)[1],validate=False)
+                    image=cv2.imdecode(np.frombuffer(raw_image,np.uint8),cv2.IMREAD_COLOR)
+                    if image is None: continue
+                    embedding,quality=_cloud_face_enroller().enroll(image)
+                    key=json.dumps(embedding,separators=(",",":"))
+                    if key in existing_vectors: continue
+                    store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":uid,"tenant_id":tenant_id,"shop_id":shop_id,
+                        "embedding":embedding,"quality":quality,"image_path":None})
+                    existing_vectors.add(key)
+                except Exception:
+                    continue
+
 @app.get("/portal/v1/tenants/{tenant_id}/personnel")
 def portal_personnel(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
-    mappings={str(x["local_person_id"]):x for x in store.list_crm_person_mappings(tenant_id,principal.shop_id)}
+    _refresh_crm_personnel(tenant_id,principal.shop_id)
     edge_people={}
     for edge in store.list_edges(tenant_id,shop_id=principal.shop_id):
         for person in (edge.get("status") or {}).get("personnel") or []:
@@ -805,68 +867,10 @@ def portal_personnel(tenant_id: str, principal: PortalPrincipal = Depends(requir
     for person in store.list_cloud_people(tenant_id,principal.shop_id):
         pid=str(person["id"]); item=dict(person)
         item["person_id"]=pid; item["edge_ids"]=sorted(set(edge_people.get(pid,[])))
-        item["edge_synced"]=bool(item["edge_ids"]); item["crm_mapping"]=mappings.get(pid)
-        item["face_enrolled"]=int(item.get("face_count") or 0)>0
+        item["edge_synced"]=bool(item["edge_ids"]); item["face_enrolled"]=int(item.get("face_count") or 0)>0
+        item["crm_user_id"]=pid
         items.append(item)
     return {"items":items}
-
-@app.post("/portal/v1/tenants/{tenant_id}/personnel")
-def create_portal_person(tenant_id: str, request: CloudPersonCreate, principal: PortalPrincipal = Depends(require_portal_session)):
-    _portal_admin(principal)
-    _portal_scope(tenant_id,principal)
-    role=request.role.strip().upper()
-    if role not in {"OWNER","MANAGER","WORKER"}: raise HTTPException(400,"Role must be OWNER, MANAGER, or WORKER")
-    try:
-        return store.create_cloud_person({"id":secrets.token_urlsafe(18),"tenant_id":tenant_id,"shop_id":principal.shop_id,
-            "employee_code":request.employee_code.strip(),"full_name":request.full_name.strip(),"role":role,
-            "phone":request.phone,"email":request.email})
-    except Exception as exc:
-        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower(): raise HTTPException(409,"Employee code already exists in this shop")
-        raise
-
-@app.patch("/portal/v1/tenants/{tenant_id}/personnel/{person_id}")
-def patch_portal_person(tenant_id: str, person_id: str, request: CloudPersonPatch, principal: PortalPrincipal = Depends(require_portal_session)):
-    _portal_admin(principal)
-    _portal_scope(tenant_id,principal)
-    item=store.update_cloud_person(tenant_id,principal.shop_id,person_id,request.model_dump(exclude_unset=True))
-    if not item: raise HTTPException(404,"Person not found")
-    return item
-
-@app.delete("/portal/v1/tenants/{tenant_id}/personnel/{person_id}")
-def deactivate_portal_person(tenant_id: str, person_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
-    _portal_admin(principal)
-    _portal_scope(tenant_id,principal)
-    item=store.update_cloud_person(tenant_id,principal.shop_id,person_id,{"active":False})
-    if not item: raise HTTPException(404,"Person not found")
-    return {"ok":True}
-
-@app.post("/portal/v1/tenants/{tenant_id}/personnel/{person_id}/faces")
-async def enroll_portal_face(tenant_id: str, person_id: str, file: UploadFile=File(...), principal: PortalPrincipal=Depends(require_portal_session)):
-    _portal_admin(principal)
-    _portal_scope(tenant_id,principal)
-    if not store.get_cloud_person(tenant_id,principal.shop_id,person_id): raise HTTPException(404,"Person not found")
-    if (file.content_type or "").lower() not in {"image/jpeg","image/jpg","image/png","image/webp"}: raise HTTPException(415,"Unsupported image type")
-    raw=await file.read(8*1024*1024+1)
-    if len(raw)>8*1024*1024: raise HTTPException(413,"Image exceeds 8 MB")
-    image=cv2.imdecode(np.frombuffer(raw,np.uint8),cv2.IMREAD_COLOR)
-    if image is None: raise HTTPException(400,"Invalid image")
-    try: embedding,quality=_cloud_face_enroller().enroll(image)
-    except ValueError as exc: raise HTTPException(400,str(exc))
-    face_id=secrets.token_urlsafe(18)
-    root=Path(os.getenv("SNAPKEY_EVIDENCE_ROOT","/app/data/evidence"))/"personnel"/tenant_id/principal.shop_id/person_id
-    root.mkdir(parents=True,exist_ok=True); path=root/(face_id+".jpg")
-    cv2.imwrite(str(path),image)
-    face=store.add_cloud_face({"id":face_id,"person_id":person_id,"tenant_id":tenant_id,"shop_id":principal.shop_id,
-        "embedding":embedding,"quality":quality,"image_path":str(path)})
-    return {**face,"image_url":f"/portal/v1/tenants/{tenant_id}/personnel/{person_id}/faces/{face_id}/image"}
-
-@app.get("/portal/v1/tenants/{tenant_id}/personnel/{person_id}/faces/{face_id}/image")
-def portal_face_image(tenant_id: str,person_id: str,face_id: str,principal: PortalPrincipal=Depends(require_portal_session)):
-    _portal_scope(tenant_id,principal)
-    faces=store.list_cloud_faces(tenant_id,principal.shop_id,person_id)
-    face=next((x for x in faces if str(x["id"])==face_id),None)
-    if not face or not face.get("image_path") or not Path(face["image_path"]).is_file(): raise HTTPException(404,"Face image not found")
-    return FileResponse(face["image_path"],media_type="image/jpeg")
 
 @app.get("/portal/v1/tenants/{tenant_id}/attendance")
 def portal_attendance(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
