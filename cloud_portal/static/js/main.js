@@ -119,9 +119,20 @@
       return "<div style='padding:14px 0;border-bottom:1px solid #e5e7eb'>"+
         "<div style='display:flex;justify-content:space-between;gap:12px'><div><strong>"+escapeHtml(edge.edge_id)+"</strong>"+
         "<br><small>"+escapeHtml(edge.shop_id||"")+" · "+escapeHtml(edge.site_id||"")+"</small></div>"+
-        "<strong style='color:"+(online?"#166534":"#b91c1c")+"'>● "+(online?"Online":"Offline")+"</strong></div>"+
+        "<div style='display:flex;align-items:center;gap:8px'><strong style='color:"+(online?"#166534":"#b91c1c")+"'>● "+(online?"Online":"Offline")+"</strong>"+
+        (!online?"<button class='btn btn-light delete-edge-device' data-edge-id='"+escapeHtml(edge.edge_id)+"' style='padding:6px 10px'>Remove</button>":"")+"</div></div>"+
         "<div style='margin-top:8px'><small>"+cameraText+"</small></div></div>";
     }).join("");
+    container.querySelectorAll(".delete-edge-device").forEach(button=>button.addEventListener("click",async()=>{
+      const edgeId=button.dataset.edgeId;if(!edgeId||!confirm("Remove this offline edge device? Its credentials will be revoked and it must be paired again to reconnect."))return;
+      const scope=requireScope(["tenant_id"]);button.disabled=true;
+      try{
+        const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/edges/"+encodeURIComponent(edgeId),{method:"DELETE"});
+        const body=await response.json();if(!response.ok)throw new Error(body.detail||"Unable to remove edge device.");
+        if(sessionStorage.getItem("snapkey_edge_id")===edgeId)sessionStorage.removeItem("snapkey_edge_id");
+        showMessage("Offline edge device removed.");await loadSystemStatus();
+      }catch(error){showMessage(error.message,true);button.disabled=false;}
+    }));
   }
 
   function wireEdgeSetup() {
@@ -702,7 +713,7 @@
     if(attendanceStationTimer){clearInterval(attendanceStationTimer);attendanceStationTimer=null;}
     const session=attendanceLiveSession;attendanceLiveSession=null;
     if(session){
-      try{const scope=requireScope(["tenant_id"]);await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-station/live/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:session.cameraId,edge_id:session.edgeId,session_id:session.sessionId})});}catch(_){}
+      try{const scope=requireScope(["tenant_id"]);await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/live/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:session.cameraId,edge_id:session.edgeId,session_id:session.sessionId})});}catch(_){}
     }
     if(attendanceLiveRoom){try{await attendanceLiveRoom.disconnect();}catch(_){}attendanceLiveRoom=null;}
     const video=document.getElementById("station-live-video");if(video){video.replaceChildren();video.srcObject=null;video.style.display="none";}
@@ -714,7 +725,7 @@
     await stopAttendanceStation();
     const [edgeId,cameraId]=value.split("::"),scope=requireScope(["tenant_id"]);
     document.getElementById("station-state").textContent="● Starting WebRTC…";document.getElementById("start-attendance-station").disabled=true;document.getElementById("stop-attendance-station").disabled=false;
-    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-station/live/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:cameraId,edge_id:edgeId,ttl_seconds:600})});
+    const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/live/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:cameraId,edge_id:edgeId,ttl_seconds:600})});
     const session=await response.json();if(!response.ok)throw new Error(session.detail||"Unable to start secure live view.");
     if(!window.LivekitClient)throw new Error("LiveKit browser client failed to load.");
     const room=new LivekitClient.Room({adaptiveStream:true,dynacast:true});
