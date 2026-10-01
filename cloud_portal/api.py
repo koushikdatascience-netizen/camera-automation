@@ -723,6 +723,8 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
     # actualStartTime; EXIT fills actualOffTime. The unused fields are empty
     # strings, matching the CRM contract supplied by the customer.
     crm_timestamp=event_time.isoformat(timespec="milliseconds").replace("+00:00","Z")
+    crm_date=event_time.date().isoformat()
+    crm_time=event_time.strftime("%H:%M:%S")
     crm_user_id=mapping["crm_user_id"]
     # Automatic CRM mutations are deliberately split. The customer has now
     # confirmed the LoginLogout contract for automatic login, while automatic
@@ -735,15 +737,15 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
     if event_type=="ATTENDANCE_ENTRY":
         if not auto_login_enabled:
             return
-        crm_client.login_logout({"userId":crm_user_id,"date":crm_timestamp,
-            "actualStartTime":crm_timestamp,"actualOffTime":"",
-            "loginLocation":location,"logoutLocation":""})
+        crm_client.login_logout({"userId":crm_user_id,"date":crm_date,
+            "actualStartTime":crm_time,"actualOffTime":None,
+            "loginLocation":location,"logoutLocation":None})
     elif event_type=="ATTENDANCE_EXIT":
         if not auto_logout_enabled:
             return
-        crm_client.login_logout({"userId":crm_user_id,"date":crm_timestamp,
-            "actualStartTime":"","actualOffTime":crm_timestamp,
-            "loginLocation":"","logoutLocation":location})
+        crm_client.login_logout({"userId":crm_user_id,"date":crm_date,
+            "actualStartTime":None,"actualOffTime":crm_time,
+            "loginLocation":None,"logoutLocation":location})
     elif event_type=="BREAK_START":
         # Current edge track-loss events are not sufficiently strong evidence of a real break.
         # Only explicitly confirmed break events may mutate CRM break state.
@@ -1036,10 +1038,11 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
     if not mapping: raise HTTPException(409,"Recognized person is not mapped to a CRM user")
     if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
     now=datetime.now(timezone.utc); crm_timestamp=now.isoformat(timespec="milliseconds").replace("+00:00","Z")
+    crm_date=now.date().isoformat(); crm_time=now.strftime("%H:%M:%S")
     location="Camera Eye - "+str(camera.get("name") or request.camera_id)
     try:
-        if action=="CHECK_IN": result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_timestamp,"actualStartTime":crm_timestamp,"actualOffTime":"","loginLocation":location,"logoutLocation":""})
-        elif action=="CHECK_OUT": result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_timestamp,"actualStartTime":"","actualOffTime":crm_timestamp,"loginLocation":"","logoutLocation":location})
+        if action=="CHECK_IN": result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_date,"actualStartTime":crm_time,"actualOffTime":None,"loginLocation":location,"logoutLocation":None})
+        elif action=="CHECK_OUT": result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_date,"actualStartTime":None,"actualOffTime":crm_time,"loginLocation":None,"logoutLocation":location})
         elif action=="BREAK_START":
             if not mapping.get("break_master_id"): raise HTTPException(409,"No CRM break type is mapped for this person")
             result=crm_client.start_break(mapping["crm_user_id"],mapping["break_master_id"])
