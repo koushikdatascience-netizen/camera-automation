@@ -723,14 +723,23 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
     # strings, matching the CRM contract supplied by the customer.
     crm_timestamp=event_time.isoformat(timespec="milliseconds").replace("+00:00","Z")
     crm_user_id=mapping["crm_user_id"]
-    if event_type in {"ATTENDANCE_ENTRY", "ATTENDANCE_EXIT"} and os.getenv("SNAPKEY_CRM_ATTENDANCE_ENABLED", "0").strip() != "1":
-        return
+    # Automatic CRM mutations are deliberately split. The customer has now
+    # confirmed the LoginLogout contract for automatic login, while automatic
+    # logout remains opt-in until its business rule is confirmed. Manual portal
+    # CHECK_IN/CHECK_OUT/BREAK actions remain available independently.
+    auto_login_enabled=os.getenv("SNAPKEY_CRM_AUTO_LOGIN_ENABLED",
+        os.getenv("SNAPKEY_CRM_ATTENDANCE_ENABLED","0")).strip()=="1"
+    auto_logout_enabled=os.getenv("SNAPKEY_CRM_AUTO_LOGOUT_ENABLED","0").strip()=="1"
     location="Camera Eye - "+str(envelope.get("site_id") or shop_id)
     if event_type=="ATTENDANCE_ENTRY":
+        if not auto_login_enabled:
+            return
         crm_client.login_logout({"userId":crm_user_id,"date":crm_timestamp,
             "actualStartTime":crm_timestamp,"actualOffTime":"",
             "loginLocation":location,"logoutLocation":""})
     elif event_type=="ATTENDANCE_EXIT":
+        if not auto_logout_enabled:
+            return
         crm_client.login_logout({"userId":crm_user_id,"date":crm_timestamp,
             "actualStartTime":"","actualOffTime":crm_timestamp,
             "loginLocation":"","logoutLocation":location})
