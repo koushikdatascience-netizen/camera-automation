@@ -774,6 +774,25 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
     return result
 
 
+@app.delete("/portal/v1/tenants/{tenant_id}/edges/{edge_id}")
+def delete_portal_edge(tenant_id: str, edge_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal)
+    _portal_scope(tenant_id,principal)
+    edge=next((item for item in store.list_edges(tenant_id,shop_id=principal.shop_id)
+               if str(item.get("edge_id") or "")==edge_id),None)
+    if not edge:
+        raise HTTPException(404,"Edge device not found")
+    stamp=edge.get("received_at") or edge.get("last_seen_at")
+    if stamp:
+        seen=datetime.fromisoformat(str(stamp).replace("Z","+00:00"))
+        if seen.tzinfo is None: seen=seen.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc)-seen).total_seconds()<90:
+            raise HTTPException(409,"Online edge devices cannot be removed. Stop the edge service first and wait until it is offline.")
+    if not store.delete_edge(tenant_id,principal.shop_id,edge_id):
+        raise HTTPException(404,"Edge device not found")
+    return {"deleted":True,"edge_id":edge_id,"credentials_revoked":True}
+
+
 @app.get("/portal/v1/tenants/{tenant_id}/personnel")
 def portal_personnel(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
