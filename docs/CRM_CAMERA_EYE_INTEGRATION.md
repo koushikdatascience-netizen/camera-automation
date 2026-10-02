@@ -53,3 +53,48 @@ Relevant persistent tables are documented in CRM_INTEGRATION_ARCHITECTURE.md. Cl
 ## Security And Rollout
 
 Production uses PostgreSQL and scoped device credentials. Readiness, scoped activation, deletion commands, image evidence, enrollment and real data delivery must be tested on the deployment before rollout. Existing data is not migrated destructively. Filesystem admins can still read local data; encrypted-at-rest secret management and server-enforced subscription entitlements are separate hardening work, not claimed as completed here.
+
+
+## Automatic face attendance and manual attendance controls
+
+### Authoritative personnel source
+
+Camera Eye Cloud reads the CRM face directory with:
+
+`GET /api/User/face-embeddings/{tenantCode}`
+
+The Camera Eye tenant identifier is the CRM tenant code (for example `ABM-46-775`). The directory response's per-user `tenantId` is the CRM tenant UUID and is the identifier required by CRM face login. Do not hardcode the UUID.
+
+### Automatic entrance login
+
+For an enabled `ENTRANCE_EXIT` camera, the edge performs local face recognition and saves the current recognized face crop. The durable edge queue uploads that image as event evidence before posting `PERSON_RECOGNIZED`.
+
+Camera Eye Cloud then calls CRM:
+
+`POST /api/Auth/loginUsingFaceTenant`
+
+```json
+{
+  "base64Image": "<raw JPEG base64 from the current camera recognition>",
+  "tenantId": "<CRM tenant UUID from the face directory>"
+}
+```
+
+The stored CRM profile image is not used for production attendance. Camera Eye records `ATTENDANCE_ENTRY` only after the CRM face-login request succeeds. The first valid recognition is sent immediately; duplicate successful attendance for the same person/day is suppressed.
+
+### CRM frontend / manual controls
+
+The CRM frontend may use the existing Camera Eye portal API surface after creating a scoped CRM session:
+
+- `GET /portal/v1/tenants/{tenant_id}/personnel` — CRM-synced personnel.
+- `GET /portal/v1/tenants/{tenant_id}/attendance` — attendance records, current presence and person events.
+- `GET /portal/v1/tenants/{tenant_id}/attendance-station/candidate?camera_id=...&edge_id=...` — fresh recognized candidate.
+- `POST /portal/v1/tenants/{tenant_id}/attendance-station/action` — explicit `CHECK_IN`, `CHECK_OUT`, `BREAK_START`, or `BREAK_END`.
+- `POST /portal/v1/tenants/{tenant_id}/attendance-station/live/start` and `/live/stop` — attendance-camera WebRTC viewing.
+- `GET /portal/v1/tenants/{tenant_id}/crm/status` — CRM integration status.
+
+Manual actions remain explicit user operations and are intentionally separate from automatic `loginUsingFaceTenant`. This lets the CRM team expose only the controls required by its UI without changing the edge recognition pipeline.
+
+### Security and failure behavior
+
+CRM credentials stay in Camera Eye Cloud and are never sent to the edge or browser. RTSP credentials remain edge-local. Face Base64 is never written to application logs. If CRM face login fails or rejects the request, Camera Eye retains the recognition event for diagnostics but does not create a successful automatic attendance entry.
