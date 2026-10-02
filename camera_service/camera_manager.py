@@ -1092,10 +1092,23 @@ class CameraManager:
                                 if match:
                                     active_known_tracks.add(str(track_id))
                                     snapshot_path = self._save_event_snapshot(frame, camera_id, "recognized")
+                                    # Preserve the actual face that triggered recognition. The cloud
+                                    # forwards this current camera image to CRM loginUsingFaceTenant;
+                                    # a stored CRM profile image must never be substituted here.
+                                    face_snapshot_path = None
+                                    face_bbox = best.get("bbox")
+                                    if face_bbox is not None and len(face_bbox) >= 4:
+                                        fx1, fy1, fx2, fy2 = [int(v) for v in face_bbox[:4]]
+                                        fx1=max(0,min(fx1,roi.shape[1]-1)); fx2=max(0,min(fx2,roi.shape[1]))
+                                        fy1=max(0,min(fy1,roi.shape[0]-1)); fy2=max(0,min(fy2,roi.shape[0]))
+                                        if fx2>fx1 and fy2>fy1:
+                                            face_crop=roi[fy1:fy2,fx1:fx2]
+                                            if face_crop.size:
+                                                face_snapshot_path=self._save_event_snapshot(face_crop,camera_id,"recognized_face")
                                     recognized_name = match["full_name"]
                                     recognized_text = f"{recognized_name} {score:.2f}"
                                     if store and self._should_emit_alert(f"recognized:{camera_id}:{match['person_id']}", 5 if camera_config.features.attendance else 60):
-                                        store.add_person_event(match["person_id"], getattr(attendance_engine, "store_id", "store-1"), camera_id, "PERSON_RECOGNIZED", datetime.now(timezone.utc), {"track_id": str(track_id), "confidence": score, "snapshot_path": snapshot_path})
+                                        store.add_person_event(match["person_id"], getattr(attendance_engine, "store_id", "store-1"), camera_id, "PERSON_RECOGNIZED", datetime.now(timezone.utc), {"track_id": str(track_id), "confidence": score, "snapshot_path": snapshot_path, "face_path": face_snapshot_path or snapshot_path})
                                     if runtime_camera_config.features.attendance and runtime_camera_config.attendance_active and track_id is not None:
                                         attendance_engine.on_identity(IdentitySeen(
                                             store_id=attendance_engine.store_id,
