@@ -56,9 +56,25 @@ class SnapKeyCrmClient:
         # Tenant-scoped CRM personnel/face directory used by Camera Eye.
         return self._request("GET","/api/User/face-embeddings/"+tenant_code)
 
+    def login_using_face_tenant(self, base64_image: str, tenant_id: str) -> Any:
+        """Ask CRM to identify/login the person from a current camera face image."""
+        image=(base64_image or "").strip()
+        crm_tenant_id=(tenant_id or "").strip()
+        if not image:
+            raise ValueError("base64_image is required")
+        if not crm_tenant_id:
+            raise ValueError("tenant_id is required")
+        # CRM's supplied contract expects raw image Base64, not a data-URL prefix.
+        if image.startswith("data:") and "," in image:
+            image=image.split(",",1)[1]
+        return self._request("POST","/api/Auth/loginUsingFaceTenant",json={
+            "base64Image":image,
+            "tenantId":crm_tenant_id,
+        })
+
     def login_logout(self, payload: dict[str,Any]) -> Any:
-        # Keep the CRM-owned attendance payload explicit. Camera Eye callers build
-        # this from a confirmed ENTRY/EXIT event; no edge credential is forwarded.
+        # Retained for explicit/manual attendance operations. Automatic camera
+        # attendance uses login_using_face_tenant instead.
         return self._request("POST","/api/UserRoster/LoginLogout",json=payload)
 
 
