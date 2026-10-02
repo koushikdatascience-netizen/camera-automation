@@ -13,6 +13,13 @@ class SnapKeyCrmClient:
     def __init__(self, base_url: str | None = None, token: str | None = None, timeout: float = 15.0):
         self.base_url=(base_url or os.getenv("SNAPKEY_CRM_API_BASE_URL","https://apis.snapkey.in")).rstrip("/")
         self.token=(token or os.getenv("SNAPKEY_CRM_API_TOKEN","")).strip()
+        # The supplied face-login contract currently lives on a separate CRM
+        # service endpoint. Keep it configurable instead of hardcoding an IP in
+        # the automatic attendance workflow.
+        self.face_login_url=os.getenv(
+            "SNAPKEY_CRM_FACE_LOGIN_URL",
+            self.base_url + "/api/Auth/loginUsingFaceTenant",
+        ).strip()
         self.timeout=timeout
 
     @property
@@ -67,10 +74,19 @@ class SnapKeyCrmClient:
         # CRM's supplied contract expects raw image Base64, not a data-URL prefix.
         if image.startswith("data:") and "," in image:
             image=image.split(",",1)[1]
-        return self._request("POST","/api/Auth/loginUsingFaceTenant",json={
-            "base64Image":image,
-            "tenantId":crm_tenant_id,
-        })
+        headers={**self._headers(),"Content-Type":"application/json"}
+        with httpx.Client(timeout=self.timeout,follow_redirects=True) as client:
+            response=client.post(self.face_login_url,headers=headers,json={
+                "base64Image":image,
+                "tenantId":crm_tenant_id,
+            })
+        response.raise_for_status()
+        if not response.content:
+            return {"ok":True}
+        try:
+            return response.json()
+        except ValueError:
+            return {"ok":True,"text":response.text[:1000]}
 
     def login_logout(self, payload: dict[str,Any]) -> Any:
         # Retained for explicit/manual attendance operations. Automatic camera
