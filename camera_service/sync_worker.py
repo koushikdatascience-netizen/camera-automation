@@ -178,11 +178,12 @@ class EdgeSyncWorker:
                     # so image + video evidence reach the cloud in one durable event.
                     if metadata.get("evidence_pending"):
                         continue
-                    snapshot_path = (
-                        metadata.get("snapshot_path")
-                        or metadata.get("person_path")
-                        or metadata.get("face_path")
-                    )
+                    # Face login must use the current recognition face crop when one
+                    # exists. Other event types keep their normal snapshot priority.
+                    if str(event.get("event_type") or "") == "PERSON_RECOGNIZED":
+                        snapshot_path = metadata.get("face_path") or metadata.get("snapshot_path") or metadata.get("person_path")
+                    else:
+                        snapshot_path = metadata.get("snapshot_path") or metadata.get("person_path") or metadata.get("face_path")
                     clip_path = metadata.get("clip_path")
                     cloud_metadata = dict(metadata)
                     if snapshot_path and Path(snapshot_path).is_file():
