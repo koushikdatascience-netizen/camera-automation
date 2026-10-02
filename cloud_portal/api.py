@@ -778,8 +778,58 @@ def _has_attendance_entry_today(tenant_id: str, shop_id: str, person_id: str, wh
             return True
     return False
 
+def _crm_tenant_uuid_for_user(tenant_code: str, crm_user_id: str) -> str:
+    """Resolve CRM's tenant UUID from the authoritative face directory.
+
+    Camera Eye tenant_id is the CRM tenant code (for example ABM-46-775), while
+    loginUsingFaceTenant requires the CRM tenant UUID returned on each CRM user.
+    """
+    raw=crm_client.face_embeddings(tenant_code)
+    users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
+    fallback=""
+    for user in users:
+        if not isinstance(user,dict):
+            continue
+        candidate=str(user.get("tenantId") or "").strip()
+        if candidate and not fallback:
+            fallback=candidate
+        if str(user.get("id") or "").strip()==str(crm_user_id or "").strip() and candidate:
+            return candidate
+    if fallback:
+        return fallback
+    raise RuntimeError("CRM face directory did not return tenantId")
+
+def _recognition_image_base64(payload: dict[str, Any]) -> str:
+    """Load uploaded recognition evidence and return raw JPEG Base64."""
+    metadata=payload.get("metadata") or {}
+    evidence=metadata.get("cloud_evidence") or {}
+    evidence_id=str(evidence.get("evidence_id") or "").strip() if isinstance(evidence,dict) else ""
+    if not evidence_id:
+        raise RuntimeError("Recognition event has no uploaded face evidence")
+    root=Path(os.getenv("SNAPKEY_EVIDENCE_ROOT","/app/data/evidence")).resolve()
+    target=(root/evidence_id).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        raise RuntimeError("Recognition face evidence is unavailable")
+    data=target.read_bytes()
+    suffix=target.suffix.lower()
+    if suffix not in {".jpg",".jpeg"}:
+        image=cv2.imdecode(np.frombuffer(data,np.uint8),cv2.IMREAD_COLOR)
+        if image is None:
+            raise RuntimeError("Recognition face evidence is not a valid image")
+        ok,encoded=cv2.imencode(".jpg",image,[int(cv2.IMWRITE_JPEG_QUALITY),90])
+        if not ok:
+            raise RuntimeError("Unable to encode recognition face evidence as JPEG")
+        data=encoded.tobytes()
+    return base64.b64encode(data).decode("ascii")
+
+def _crm_face_login_succeeded(result: Any) -> bool:
+    if isinstance(result,dict):
+        if result.get("success") is False or result.get("ok") is False:
+            return False
+    return True
+
 def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
-    """Immediately check in a recognized CRM person once per UTC day."""
+    """Immediately face-login a recognized person from an entrance camera."""
     if str(envelope.get("event_type") or "")!="PERSON_RECOGNIZED" or not crm_client.configured:
         return
     payload=envelope.get("payload") or {}
@@ -788,38 +838,54 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         return
     tenant_id=str(envelope.get("tenant_id") or "")
     shop_id=str(envelope.get("shop_id") or "")
+    edge_id=str(envelope.get("edge_id") or "")
+    camera_id=str(envelope.get("camera_id") or "")
+    camera=_portal_camera_lookup(tenant_id,shop_id,edge_id,camera_id)
+    if not camera or str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
+        logger.info("CRM_FACE_LOGIN_SKIPPED person_id=%s camera_id=%s reason=not_attendance_camera",person_id,camera_id)
+        return
     mapping=store.crm_person_mapping(tenant_id,shop_id,person_id)
     if not mapping:
+        logger.warning("CRM_FACE_LOGIN_SKIPPED person_id=%s reason=no_crm_mapping",person_id)
         return
     stamp=envelope.get("event_time")
     when=datetime.fromisoformat(str(stamp).replace("Z","+00:00"))
-    if when.tzinfo is None: when=when.replace(tzinfo=timezone.utc)
+    if when.tzinfo is None:
+        when=when.replace(tzinfo=timezone.utc)
     when=when.astimezone(timezone.utc)
+    # This is duplicate protection, not a recognition debounce: the first valid
+    # recognition is sent to CRM immediately, then further successful logins for
+    # the same person/day are suppressed.
     if _has_attendance_entry_today(tenant_id,shop_id,person_id,when):
-        logger.info("CRM_AUTO_LOGIN_SKIPPED person_id=%s reason=attendance_already_exists",person_id)
+        logger.info("CRM_FACE_LOGIN_SKIPPED person_id=%s reason=attendance_already_exists",person_id)
         return
-    crm_date=when.date().isoformat()
-    crm_time=when.strftime("%H:%M:%S")
-    location="Camera Eye - "+str(envelope.get("site_id") or shop_id)
-    logger.info("CRM_AUTO_LOGIN_ATTEMPT person_id=%s crm_user_id=%s date=%s time=%s",
-        person_id,mapping["crm_user_id"],crm_date,crm_time)
     try:
-        crm_result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_date,
-            "actualStartTime":crm_time,"actualOffTime":None,"loginLocation":location,"logoutLocation":None})
+        crm_tenant_id=_crm_tenant_uuid_for_user(tenant_id,mapping["crm_user_id"])
+        image_base64=_recognition_image_base64(payload)
+        logger.info("CRM_FACE_LOGIN_ATTEMPT person_id=%s crm_user_id=%s camera_id=%s tenant_id=%s",
+            person_id,mapping["crm_user_id"],camera_id,crm_tenant_id)
+        crm_result=crm_client.login_using_face_tenant(image_base64,crm_tenant_id)
+        if not _crm_face_login_succeeded(crm_result):
+            logger.warning("CRM_FACE_LOGIN_REJECTED person_id=%s crm_user_id=%s result=%s",
+                person_id,mapping["crm_user_id"],crm_result)
+            return
     except Exception:
-        logger.exception("CRM_AUTO_LOGIN_FAILED person_id=%s crm_user_id=%s",person_id,mapping["crm_user_id"])
+        # Never log the Base64 face image.
+        logger.exception("CRM_FACE_LOGIN_FAILED person_id=%s crm_user_id=%s camera_id=%s",
+            person_id,mapping["crm_user_id"],camera_id)
         return
-    logger.info("CRM_AUTO_LOGIN_SUCCESS person_id=%s crm_user_id=%s result=%s",
+    logger.info("CRM_FACE_LOGIN_SUCCESS person_id=%s crm_user_id=%s result=%s",
         person_id,mapping["crm_user_id"],crm_result)
     event_id="auto-attendance-"+secrets.token_urlsafe(12)
     store.record_portal_event({"event_id":event_id,"tenant_id":tenant_id,
         "company_code":envelope.get("company_code"),"shop_id":shop_id,
-        "site_id":str(envelope.get("site_id") or shop_id),"edge_id":envelope.get("edge_id"),
-        "camera_id":envelope.get("camera_id"),"event_type":"ATTENDANCE_ENTRY",
+        "site_id":str(envelope.get("site_id") or shop_id),"edge_id":edge_id,
+        "camera_id":camera_id,"event_type":"ATTENDANCE_ENTRY",
         "event_time":when.isoformat(timespec="milliseconds").replace("+00:00","Z"),
         "payload":{"person_id":person_id,"event_type":"ATTENDANCE_ENTRY",
         "metadata":{"attendance_session_id":_attendance_session_id(person_id,when),
-        "recognition_event_id":envelope.get("event_id"),"automatic":True}}})
+        "recognition_event_id":envelope.get("event_id"),"automatic":True,
+        "crm_operation":"loginUsingFaceTenant","crm_tenant_id":crm_tenant_id}}})
 
 @app.post("/edge/v1/events")
 def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTasks,
