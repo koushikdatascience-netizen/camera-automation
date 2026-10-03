@@ -873,16 +873,39 @@ def _crm_mutation_succeeded(result: Any) -> bool:
 
 def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     """Immediately face-login a recognized person from an entrance camera."""
-    if str(envelope.get("event_type") or "")!="PERSON_RECOGNIZED" or not crm_client.configured:
-        return
-    payload=envelope.get("payload") or {}
-    person_id=str(payload.get("person_id") or "").strip()
-    if not person_id:
-        return
+    event_id=str(envelope.get("event_id") or "")
+    event_type=str(envelope.get("event_type") or "")
     tenant_id=str(envelope.get("tenant_id") or "")
     shop_id=str(envelope.get("shop_id") or "")
     edge_id=str(envelope.get("edge_id") or "")
     camera_id=str(envelope.get("camera_id") or "")
+    if event_type!="PERSON_RECOGNIZED":
+        logger.info("AUTO_ATTENDANCE_SKIPPED event_id=%s reason=event_type event_type=%s",event_id,event_type)
+        return
+    if not crm_client.configured:
+        logger.error("AUTO_ATTENDANCE_SKIPPED event_id=%s tenant_code=%s camera_id=%s reason=crm_not_configured",
+                     event_id,tenant_id,camera_id)
+        return
+
+    # Edge envelopes intentionally wrap the local event payload:
+    # envelope.payload = { ..., "payload": {person_id, metadata, ...}, ... }.
+    # Older edge versions may send the local payload directly, so support both.
+    outer_payload=envelope.get("payload") or {}
+    nested_payload=outer_payload.get("payload") if isinstance(outer_payload,dict) else None
+    payload=nested_payload if isinstance(nested_payload,dict) else outer_payload
+    person_id=str(payload.get("person_id") or "").strip() if isinstance(payload,dict) else ""
+    logger.info(
+        "AUTO_ATTENDANCE_RECEIVED event_id=%s tenant_code=%s shop_id=%s edge_id=%s camera_id=%s person_id=%s payload_shape=%s",
+        event_id,tenant_id,shop_id,edge_id,camera_id,person_id or "-",
+        "nested" if isinstance(nested_payload,dict) else "direct",
+    )
+    if not person_id:
+        safe_keys=sorted(str(k) for k in payload.keys()) if isinstance(payload,dict) else []
+        logger.error(
+            "AUTO_ATTENDANCE_SKIPPED event_id=%s tenant_code=%s camera_id=%s reason=missing_person_id payload_keys=%s",
+            event_id,tenant_id,camera_id,safe_keys,
+        )
+        return
     camera=_portal_camera_lookup(tenant_id,shop_id,edge_id,camera_id)
     if not camera or str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
         logger.info("CRM_FACE_LOGIN_SKIPPED person_id=%s camera_id=%s reason=not_attendance_camera",person_id,camera_id)
