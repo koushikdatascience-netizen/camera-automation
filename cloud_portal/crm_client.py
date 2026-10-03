@@ -94,9 +94,32 @@ class SnapKeyCrmClient:
         return self._request("GET","/api/UserRoster/GetUsersRoster",params=params)
 
     def login_logout(self, payload: dict[str,Any]) -> Any:
-        # Retained for explicit/manual attendance operations. Automatic camera
-        # attendance uses login_using_face_tenant instead.
+        # Retained for explicit/manual attendance operations using the configured
+        # server-side CRM service token.
         return self._request("POST","/api/UserRoster/LoginLogout",json=payload)
+
+    def login_logout_with_face_token(self, payload: dict[str,Any], face_token: str) -> Any:
+        """Register attendance using the token returned by loginUsingFaceTenant.
+
+        The supplied n8n contract forwards the returned token verbatim in the
+        Authorization header (it does not prepend Bearer).
+        """
+        token=(face_token or "").strip()
+        if not token:
+            raise ValueError("face_token is required")
+        with httpx.Client(base_url=self.base_url,timeout=self.timeout,follow_redirects=True) as client:
+            response=client.post(
+                "/api/UserRoster/LoginLogout",
+                headers={"Authorization":token,"Accept":"application/json"},
+                json=payload,
+            )
+        response.raise_for_status()
+        if not response.content:
+            return {"ok":True}
+        try:
+            return response.json()
+        except ValueError:
+            return {"ok":True,"text":response.text[:1000]}
 
 
 crm_client=SnapKeyCrmClient()
