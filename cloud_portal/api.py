@@ -26,7 +26,8 @@ from cloud_portal.storage import PortalStore
 from cloud_portal.crm_client import crm_client
 from camera_service.face_service import FaceService
 
-logger = logging.getLogger("camera_eye.portal")\nlogger.setLevel(logging.INFO)
+logger = logging.getLogger("camera_eye.portal")
+logger.setLevel(logging.INFO)
 
 
 def build_portal_store():
