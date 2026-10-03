@@ -2,12 +2,15 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import cv2, numpy as np
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query, Form, Request
+from fastapi.responses import JSONResponse
+from urllib.parse import urlsplit
 from camera_service.config import load_config, save_edge_activation
 from camera_service.models import PersonnelCreate, PersonnelPatch
 from camera_service.storage import SQLiteStore
 from camera_service.face_service import FaceService
 from camera_service.attendance_engine import AttendanceEngine
+from camera_service.attendance_station import AttendanceStation
 from camera_service.camera.supervisor import CameraSupervisor
 from camera_service.camera_manager import CameraManager, CameraConfig, CameraStatus, CameraState
 from camera_service.camera.onvif import probe_onvif, select_profile, OnvifUnavailable
@@ -23,7 +26,8 @@ from camera_service.object_security.roi import apply_roi, map_box_from_offset
 from camera_service.object_security.tiling import suppress_duplicates, tiles_for_shape
 from camera_service.person_model_registry import PersonModelRegistry
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 import json
 import os
 import requests
@@ -95,19 +99,89 @@ def get_face_service():
         face_service=FaceService(store)
     return face_service
 
-if _should_initialize_face_service():
-    face_service=get_face_service()
-supervisor=CameraSupervisor(config,store,face_service,attendance_engine,camera_manager=camera_manager)
+_face_init_lock = threading.Lock()
+
+
+class _DeferredFaceService:
+    def detect(self, frame):
+        try:
+            return face_service.detect(frame) if face_service is not None else []
+        except Exception:
+            return []
+    def quality(self, face, shape):
+        try:
+            return face_service.quality(face, shape) if face_service is not None else 0
+        except Exception:
+            return 0
+    def recognize(self, embedding, threshold):
+        try:
+            return face_service.recognize(embedding, threshold) if face_service is not None else (None, 0)
+        except Exception:
+            return (None, 0)
+
+
+def _initialize_background_face():
+    if not _face_init_lock.acquire(blocking=False):
+        return
+    try:
+        get_face_service()
+    except Exception:
+        pass
+    finally:
+        _face_init_lock.release()
+
+
+def _shared_pipeline(camera, stop_event, publish):
+    needs_face = _camera_needs_face(camera)
+    if needs_face and face_service is None:
+        threading.Thread(target=_initialize_background_face, name="face-initializer", daemon=True).start()
+    security_path = object_security_registry.active_model_path("scissors") if camera.features.object_security else None
+    return camera_manager.iter_tracking_mjpeg(camera, config.yolo_model,
+        _DeferredFaceService() if needs_face else None, config.recognition, attendance_engine, store,
+        str(security_path) if security_path else None, max(0.55, float(config.object_security.inference.confidence or 0.55)),
+        stop_event=stop_event, publish_callback=publish)
+
+
+def _camera_runtime_allowed(camera):
+    try:
+        _enforce_runtime_license({'tracking'} | _camera_feature_names(camera.features))
+        enabled = sorted(c.camera_id for c in camera_manager.list_cameras() if c.enabled)
+        if camera.camera_id not in enabled[:license_manager.status().max_cameras]:
+            return False
+        return True
+    except HTTPException:
+        return False
+
+
+supervisor=CameraSupervisor(config,store,face_service,attendance_engine,camera_manager=camera_manager,
+                            pipeline=_shared_pipeline, allowed=_camera_runtime_allowed)
 sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,license_manager,camera_manager=camera_manager,camera_supervisor=supervisor)
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
+    store.configure_event_scope(config.edge.tenant_id, config.edge.company_code, config.edge.shop_id, config.edge.edge_id)
+    for camera in config.cameras:
+        if camera.enabled and not camera_manager.get_camera(camera.camera_id):
+            camera_manager.create_camera({**camera.model_dump(), 'rtsp_url': camera.source})
     supervisor.start(); sync_worker.start()
     try:
         yield
     finally:
         sync_worker.shutdown(); supervisor.shutdown()
 app=FastAPI(title='SnapKey Vision AI',lifespan=lifespan)
+
+
+@app.middleware("http")
+async def protect_local_origin(request: Request, call_next):
+    if request.client and request.client.host not in {'127.0.0.1','::1','testclient'}:
+        return JSONResponse({'detail':'Local service requires a loopback connection'}, status_code=403)
+    hostname = urlsplit("//" + request.headers.get("host", "")).hostname
+    if hostname not in {"localhost", "127.0.0.1", "::1", "testserver"}:
+        return JSONResponse({"detail": "Invalid local service host"}, status_code=403)
+    origin = request.headers.get("origin")
+    if origin and origin != str(request.base_url).rstrip('/'):
+        return JSONResponse({"detail": "Cross-origin local API access is denied"}, status_code=403)
+    return await call_next(request)
 
 def get_store(): return store
 
@@ -359,12 +433,21 @@ def health():
             'person_model_reason': person_model_selection.get('reason'),
             'person_model_diagnostic_disabled': person_model_selection.get('diagnostic_disabled', []),
             'person_model_hardware': person_model_selection.get('hardware'),
+            'active_backends': [{
+                'camera_id': key[1], 'backend': getattr(getattr(backend,'backend_type',None),'value','UNKNOWN'),
+                'model': Path(getattr(backend,'model_path',config.yolo_model)).name,
+                'fallback_reason': getattr(backend,'fallback_reason',None),
+            } for key,backend in list(camera_manager._inference_backends.items()) if isinstance(key,tuple)],
+            'face_recognition_ready': face_service is not None and getattr(face_service,'_app',None) is not None,
             'tracking_fps_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_FPS'),
             'tracking_imgsz_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_IMGSZ'),
             'tracking_quality_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_QUALITY'),
         },
         'cameras':len(camera_manager.list_cameras()),
         'online_cameras':sum(1 for status in statuses if status and status.online),
+        'camera_workers':supervisor.status(),
+        'cloud_sync':sync_worker.status(),
+        'license':{'active':license_manager.status().active,'mode':license_manager.status().mode},
         'object_security_enabled':config.object_security.enabled or config.features.object_security,
         'object_security_ready':bool(active_model and active_model.get("has_model")),
         'object_security_model_loaded':object_security_detector._model is not None,
@@ -384,11 +467,17 @@ def ready():
 @app.get('/api/v1/edge/status')
 def edge_status():
     license_status = license_manager.status()
+    edge_data = config.edge.model_dump(exclude={'activation_token'})
+    # activation_required is a configuration policy, not the current activation
+    # state. Expose an effective value so the setup UI never asks an already
+    # licensed machine to pair again after a reboot.
+    edge_data['activation_required'] = bool(config.edge.activation_required and not license_status.active)
+    edge_data['plan'] = license_status.plan
     return {
-        'edge': config.edge.model_dump(),
+        'edge': edge_data,
         'license': license_status.model_dump(),
         'cloud_sync_enabled': cloud_client.enabled(),
-        'cloud_sync_allowed': cloud_client.enabled() and license_status.active,
+        'cloud_sync_allowed': cloud_client.enabled() and license_status.active and license_status.allows_feature('cloud_sync'),
         'cloud_sync_worker': sync_worker.status(),
         'runtime': {
             'profile': config.runtime.profile,
@@ -429,6 +518,7 @@ class EdgeActivationRequest(BaseModel):
 def install_license(request: LicenseInstallRequest):
     try:
         status = license_manager.install_signed_license(request.license, request.signature)
+        return status.model_dump()
     except Exception as exc:
         raise HTTPException(400, str(exc))
 
@@ -451,6 +541,12 @@ def activate_edge(request: EdgeActivationRequest):
         )
         response.raise_for_status()
         activation = response.json()
+        candidate_edge = config.edge.model_copy(update={**activation["edge"],
+            "activation_required": True, "license_public_key": activation["license_public_key"]})
+        candidate_manager = LicenseManager(candidate_edge)
+        candidate_manager._validate_signed_license(activation["license"], activation["signature"])
+        if not candidate_manager._status_from_payload(activation["license"]).active:
+            raise ValueError("Activation returned an expired license")
         config_path = save_edge_activation(activation)
         config = load_config()
         cloud_client.config = config.cloud_sync
@@ -458,6 +554,7 @@ def activate_edge(request: EdgeActivationRequest):
         sync_worker.edge_config = config.edge
         sync_worker.sync_config = config.cloud_sync
         license_status = license_manager.install_signed_license(activation["license"], activation["signature"])
+        store.configure_event_scope(config.edge.tenant_id, config.edge.company_code, config.edge.shop_id, config.edge.edge_id)
         sync_result = sync_worker.run_once()
         return {
             "ok": True,
@@ -474,11 +571,9 @@ def activate_edge(request: EdgeActivationRequest):
             "sync": sync_result.model_dump(),
         }
     except requests.HTTPError as exc:
-        detail = exc.response.text if exc.response is not None else str(exc)
-        raise HTTPException(400, detail)
+        raise HTTPException(400, "Cloud activation was rejected. Verify the one-time code and server configuration.")
     except Exception as exc:
         raise HTTPException(400, str(exc))
-    return status.model_dump()
 
 @app.get('/api/v1/alerts/preview')
 def alert_preview():
@@ -505,7 +600,7 @@ def alert_preview():
 
 # Setup UI Route
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
 
 
 def _web_asset_dir() -> Path:
@@ -569,8 +664,52 @@ class CameraCreate(BaseModel):
     tracking_fps: float = 3.0
     tracking_imgsz: int = 384
     tracking_quality: int = 65
+    rotation_degrees: Literal[0, 90, 180, 270] = 0
+    attendance_active: bool = True
     tracking_mode: str = "detect"
     features: dict = {}
+
+class SecurityZoneRequest(BaseModel):
+    id: str | None = None
+    name: str = Field(default="Detection Zone", min_length=1, max_length=80)
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+    enabled: bool = True
+
+@app.get('/api/v1/cameras/{camera_id}/security-zones')
+def list_security_zones(camera_id: str):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    return {'items': camera_manager.list_security_zones(camera_id)}
+
+@app.post('/api/v1/cameras/{camera_id}/security-zones')
+def save_security_zone(camera_id: str, body: SecurityZoneRequest):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    if camera.camera_role.value != 'SECURITY':
+        raise HTTPException(409, 'Detection zones are available only for Security cameras')
+    try:
+        return camera_manager.save_security_zone(camera_id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+@app.delete('/api/v1/cameras/{camera_id}/security-zones/{zone_id}')
+def delete_security_zone(camera_id: str, zone_id: str):
+    if not camera_manager.delete_security_zone(camera_id, zone_id):
+        raise HTTPException(404, 'Security zone not found')
+    return {'deleted': True}
+
+@app.get('/api/v1/safety/capabilities')
+def safety_capabilities():
+    # Fire/smoke are deliberately unavailable until a validated safety model is installed.
+    return {
+        'fire': {'available': False, 'reason': 'Safety model not installed'},
+        'smoke': {'available': False, 'reason': 'Safety model not installed'},
+    }
 
 class OnvifProbeRequest(BaseModel):
     host: str
@@ -628,7 +767,7 @@ def get_camera(camera_id: str, include_secret: bool = False):
     camera = camera_manager.get_camera(camera_id)
     if not camera:
         raise HTTPException(404, 'Camera not found')
-    rtsp_url = camera.rtsp_url if include_secret else camera_manager._mask_rtsp_password(camera.rtsp_url)
+    rtsp_url = camera_manager._mask_rtsp_password(camera.rtsp_url)
     return {
         **camera.model_dump(),
         'rtsp_url': rtsp_url
@@ -640,7 +779,12 @@ def update_camera(camera_id: str, updates: dict):
     if not existing:
         raise HTTPException(404, 'Camera not found')
     _enforce_camera_license(_merged_camera_features(existing, updates), creating=False)
-    camera = camera_manager.update_camera(camera_id, updates)
+    if updates.get('rtsp_url') == camera_manager._mask_rtsp_password(existing.rtsp_url):
+        updates.pop('rtsp_url', None)
+    try:
+        camera = camera_manager.update_camera(camera_id, updates, mark_local_override=True)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
     if not camera:
         raise HTTPException(404, 'Camera not found')
     return {
@@ -658,9 +802,41 @@ def delete_camera(camera_id: str):
 # RTSP Test Connection API
 class RTSPTestRequest(BaseModel):
     rtsp_url: str
+    camera_id: str | None = None
 
 @app.post('/api/v1/cameras/test')
 def test_rtsp_connection(request: RTSPTestRequest):
+    if request.camera_id:
+        camera = camera_manager.get_camera(request.camera_id)
+        if not camera:
+            raise HTTPException(404, 'Camera not found')
+        status = camera_manager.get_camera_status(request.camera_id)
+        runtime_frame = supervisor.snapshot(request.camera_id)
+        if runtime_frame:
+            return {
+                'success': True,
+                'message': 'Camera runtime is receiving frames; existing worker reused',
+                'source': camera_manager._mask_rtsp_password(camera.rtsp_url),
+                'fps': status.capture_fps if status else 0,
+                'frames_received': status.frames_received if status else 1,
+                'connection_ms': 0,
+                'reused_runtime': True,
+            }
+        # Never reopen an enabled webcam already owned by this service. DirectShow
+        # permits exclusive access on many devices and a second probe produces a
+        # misleading "device in use" failure.
+        if camera.enabled and camera.source_type == 'webcam':
+            return {
+                'success': False,
+                'message': 'No recent frame from the existing camera worker. The service did not reopen the webcam.',
+                'source': camera_manager._mask_rtsp_password(camera.rtsp_url),
+                'fps': status.capture_fps if status else 0,
+                'frames_received': status.frames_received if status else 0,
+                'connection_ms': 0,
+                'reused_runtime': True,
+                'attempts': [],
+            }
+        return camera_manager.test_rtsp_connection(camera.rtsp_url)
     result = camera_manager.test_rtsp_connection(request.rtsp_url)
     return result
 
@@ -670,6 +846,14 @@ def test_rtsp_snapshot(url: str = Query(...)):
     if not snapshot:
         raise HTTPException(404, 'No snapshot available')
     return Response(content=snapshot, media_type='image/jpeg')
+
+@app.post('/api/v1/cameras/test/snapshot')
+def test_camera_snapshot(request: dict):
+    camera_id = request.get('camera_id')
+    snapshot = supervisor.snapshot(camera_id) if camera_id else camera_manager.read_rtsp_snapshot(str(request.get('rtsp_url') or ''))
+    if not snapshot:
+        raise HTTPException(404, 'No snapshot available')
+    return Response(content=snapshot, media_type='image/jpeg', headers={'Cache-Control':'no-store'})
 
 # Camera Status API
 @app.get('/api/v1/cameras/{camera_id}/status')
@@ -686,30 +870,17 @@ def start_camera(camera_id: str):
     if not camera:
         raise HTTPException(404, 'Camera not found')
     _enforce_runtime_license(_camera_feature_names(camera.features))
-    result = camera_manager.test_rtsp_connection(camera.rtsp_url)
-    state = CameraState.ONLINE if result.get('success') else CameraState.DEGRADED
-    camera_manager.update_camera_status(camera_id, CameraStatus(
-        camera_id=camera_id,
-        name=camera.name,
-        state=state,
-        online=bool(result.get('success')),
-        capture_fps=float(result.get('fps') or 0),
-        frames_received=int(result.get('frames_received') or 0),
-        last_error=None if result.get('success') else result.get('message', 'Unable to open stream'),
-    ))
-    return {'status': state.value.lower(), 'camera_id': camera_id, 'diagnostics': result}
+    camera_manager.update_camera(camera_id, {'enabled': True})
+    supervisor.reconcile()
+    return {'status': 'starting', 'camera_id': camera_id}
 
 @app.post('/api/v1/cameras/{camera_id}/stop')
 def stop_camera(camera_id: str):
     camera = camera_manager.get_camera(camera_id)
     if not camera:
         raise HTTPException(404, 'Camera not found')
-    camera_manager.update_camera_status(camera_id, CameraStatus(
-        camera_id=camera_id,
-        name=camera.name,
-        state=CameraState.STOPPED,
-        online=False,
-    ))
+    camera_manager.update_camera(camera_id, {'enabled': False})
+    supervisor.reconcile()
     return {'status': 'stopping', 'camera_id': camera_id}
 
 @app.post('/api/v1/cameras/{camera_id}/restart')
@@ -722,7 +893,7 @@ def restart_camera(camera_id: str):
 # Camera Snapshot API
 @app.get('/api/v1/cameras/{camera_id}/snapshot')
 def get_camera_snapshot(camera_id: str):
-    snapshot = camera_manager.get_camera_snapshot(camera_id)
+    snapshot = supervisor.snapshot(camera_id)
     if not snapshot:
         raise HTTPException(404, 'No snapshot available')
     return Response(content=snapshot, media_type='image/jpeg')
@@ -733,7 +904,7 @@ def stream_camera(camera_id: str):
     if not camera:
         raise HTTPException(404, 'Camera not found')
     return StreamingResponse(
-        camera_manager.iter_rtsp_mjpeg(camera.rtsp_url),
+        supervisor.stream(camera_id, overlay=False),
         media_type='multipart/x-mixed-replace; boundary=frame',
     )
 
@@ -743,14 +914,8 @@ def stream_camera_tracking(camera_id: str):
     if not camera:
         raise HTTPException(404, 'Camera not found')
     _enforce_runtime_license({"tracking"} | _camera_feature_names(camera.features))
-    active_face_service = get_face_service() if _camera_needs_face(camera) else None
-    security_model_path = None
-    if camera.features.object_security or camera.features.shoplifting_enabled:
-        active_security_model = object_security_registry.active_model_path("scissors")
-        security_model_path = str(active_security_model) if active_security_model else None
-    security_confidence=max(0.55,float(config.object_security.inference.confidence or 0.55))
     return StreamingResponse(
-        camera_manager.iter_tracking_mjpeg(camera, config.yolo_model, active_face_service, config.recognition, attendance_engine, store, security_model_path, security_confidence),
+        supervisor.stream(camera_id, overlay=True),
         media_type='multipart/x-mixed-replace; boundary=frame',
     )
 
@@ -853,15 +1018,128 @@ def end_person_break(person_id: str, body: BreakActionRequest, s=Depends(get_sto
     except ValueError as exc:
         raise HTTPException(409, str(exc))
 
+# Local Attendance Station (no CRM mutations)
+class StationActionRequest(BaseModel):
+    person_id: str
+    token: str
+    action: str
+    expected_state: str
+    request_id: str = Field(min_length=1, max_length=100)
+
+station = AttendanceStation(attendance_engine, camera_manager)
+
+def _attendance_camera(camera_id):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera or camera.camera_role.value != 'ENTRANCE_EXIT':
+        raise HTTPException(404, 'Attendance camera not found')
+    return camera
+
+def _attendance_profile_image(person_id: str, s):
+    faces = s.list_faces(person_id)
+    primary = faces[0] if faces else None
+    if primary and primary.get('image_path'):
+        return _face_image_url(person_id, primary['id'])
+    return None
+
+def _capture_attendance_evidence(camera_id: str, person_id: str):
+    raw = supervisor.snapshot(camera_id)
+    if not raw:
+        return None
+    root = Path(config.evidence_dir) / camera_id
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+    path = root / f"attendance_{person_id}_{stamp}.jpg"
+    path.write_bytes(raw)
+    return str(path)
+
+@app.post('/api/v1/cameras/{camera_id}/attendance-station/start')
+def attendance_station_start(camera_id: str):
+    camera = _attendance_camera(camera_id)
+    camera_manager.update_camera(camera_id, {'attendance_active': True})
+    return {'camera_id': camera_id, 'attendance_active': True}
+
+@app.post('/api/v1/cameras/{camera_id}/attendance-station/stop')
+def attendance_station_stop(camera_id: str):
+    _attendance_camera(camera_id)
+    camera_manager.update_camera(camera_id, {'attendance_active': False})
+    return {'camera_id': camera_id, 'attendance_active': False}
+
+@app.get('/api/v1/cameras/{camera_id}/attendance-station')
+def attendance_station(camera_id: str, s=Depends(get_store)):
+    camera = _attendance_camera(camera_id)
+    candidate = station.candidate(camera_id)
+    if candidate:
+        candidate = {**candidate, 'profile_image_url': _attendance_profile_image(candidate['person_id'], s)}
+        candidate.pop('recognition_snapshot_path', None)
+    return {
+        'attendance_active': bool(camera.attendance_active),
+        'candidate': candidate,
+        'recent': [_public_attendance(item) for item in s.attendance(limit=25, camera_id=camera_id)],
+    }
+
+@app.post('/api/v1/cameras/{camera_id}/attendance-station/action')
+def attendance_station_action(camera_id: str, body: StationActionRequest):
+    camera = _attendance_camera(camera_id)
+    if not camera.attendance_active:
+        raise HTTPException(409, 'Attendance camera is stopped')
+    evidence_path = _capture_attendance_evidence(camera_id, body.person_id)
+    try:
+        return station.apply(camera_id, evidence_path=evidence_path, **body.model_dump())
+    except ValueError as exc:
+        if evidence_path:
+            try:
+                Path(evidence_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise HTTPException(409, str(exc))
+
+@app.get('/api/v1/cameras/{camera_id}/attendance-station/snapshot')
+def attendance_station_snapshot(camera_id: str, s=Depends(get_store)):
+    _attendance_camera(camera_id)
+    with attendance_engine._lock:
+        candidate = station.candidate(camera_id)
+        if not candidate:
+            raise HTTPException(404, 'Recognition expired')
+        identities = [ev for (cam, _), ev in attendance_engine.identities.items() if cam == camera_id and ev.person_id == candidate['person_id']]
+        ev = max(identities, key=lambda item: item.timestamp)
+        return _saved_evidence(ev.snapshot_path, s)
+
+def _public_attendance(record):
+    item = dict(record)
+    for side in ('arrival', 'exit'):
+        item[f'{side}_snapshot'] = bool(item.get(f'{side}_snapshot'))
+        item[f'{side}_snapshot_url'] = f"/api/v1/attendance/{item['id']}/snapshots/{side}" if item[f'{side}_snapshot'] else None
+    item['attendance_state'] = 'OUT' if item.get('exit_time') or not item.get('entry_confirmed') else ('ON_BREAK' if item.get('break_started_at') else 'IN')
+    return item
+
 # Attendance APIs
 @app.get('/api/v1/attendance')
-def attendance(person_id:str|None=None,s=Depends(get_store)): return {'items':s.attendance(person_id)}
+def attendance(person_id:str|None=None,limit:int|None=Query(default=None,ge=1,le=1000),camera_id:str|None=None,s=Depends(get_store)):
+    return {'items':[_public_attendance(item) for item in s.attendance(person_id,limit=limit,camera_id=camera_id)]}
+
+def _saved_evidence(path_value, s, media_type='image/jpeg'):
+    if not path_value:
+        raise HTTPException(404,'Snapshot unavailable')
+    path=Path(path_value).resolve()
+    roots=(Path(config.evidence_dir).resolve(), (Path(s.path).parent/'evidence').resolve())
+    if not any(path.is_relative_to(root) for root in roots) or not path.is_file():
+        raise HTTPException(404,'Snapshot unavailable')
+    return FileResponse(path,media_type=media_type,headers={'Cache-Control':'no-store'})
+
+@app.get('/api/v1/attendance/{session_id}/snapshots/{side}')
+def attendance_snapshot(session_id:str,side:str,s=Depends(get_store)):
+    if side not in {'arrival','exit'}:
+        raise HTTPException(404,'Snapshot unavailable')
+    record=s.get_attendance_id(session_id)
+    if not record:
+        raise HTTPException(404,'Attendance record not found')
+    return _saved_evidence(record.get(f'{side}_snapshot'),s)
 
 @app.get('/api/v1/attendance/today')
-def attendance_today(s=Depends(get_store)): return {'items':s.attendance()}
+def attendance_today(s=Depends(get_store)): return {'items':[_public_attendance(item) for item in s.attendance()]}
 
 @app.get('/api/v1/attendance/{person_id}')
-def attendance_person(person_id:str,s=Depends(get_store)): return {'items':s.attendance(person_id)}
+def attendance_person(person_id:str,s=Depends(get_store)): return {'items':[_public_attendance(item) for item in s.attendance(person_id)]}
 
 # Presence API
 @app.get('/api/v1/presence')
@@ -884,15 +1162,18 @@ def object_security_status(object_class:str='scissors'):
     object_class=_validate_object_class(object_class)
     models=object_security_registry.list_models(object_class)
     active=models.get('active')
+    ready=bool(active and active.get('has_model'))
     return {
         'enabled':config.object_security.enabled or config.features.object_security,
         'object_class':object_class,
-        'ready':bool(active and active.get('has_model')),
+        'ready':ready,
         'model_loaded':object_security_detector._model is not None,
         'active_model':active,
         'previous_model':models.get('previous'),
         'candidate_count':len(models.get('candidates',[])),
-        'message':None if active else 'No custom scissors model installed.',
+        # Registry metadata may contain an active selection even when its model
+        # artifact is absent. The API message must follow actual readiness.
+        'message':None if ready else f'No custom {object_class} model installed.',
         'last_error':object_security_detector.last_error,
         'config':config.object_security.model_dump(exclude={'model_storage_dir'}),
     }
@@ -995,49 +1276,90 @@ def object_security_test_stream(
 def object_security_events(s=Depends(get_store)): return {'items':s.object_security_events()}
 
 # Security Alert APIs
+def _public_incident(record, kind, s):
+    if not record:
+        return record
+    item = dict(record)
+    roots = (Path(config.evidence_dir).resolve(), (Path(s.path).parent / 'evidence').resolve())
+    def available(value):
+        if not value:
+            return False
+        try:
+            path = Path(value).resolve()
+            return any(path.is_relative_to(root) for root in roots) and path.is_file() and path.stat().st_size > 0
+        except OSError:
+            return False
+    for key in ('clip_path', 'snapshot_path', 'best_face_snapshot', 'best_person_snapshot'):
+        if key in item:
+            item[key] = available(item[key])
+    item['clip_available'] = bool(item.get('clip_path'))
+    item['snapshot_available'] = bool(item.get('snapshot_path') or item.get('best_face_snapshot') or item.get('best_person_snapshot'))
+    base = f"/api/v1/{kind}/{item['id']}"
+    item['clip_url'] = base + '/clip' if item['clip_available'] else None
+    item['snapshot_url'] = base + '/snapshot' if item['snapshot_available'] else None
+    # Evidence paths inside internal metadata are not browser-facing data.
+    item.pop('metadata_json', None)
+    return item
+
 @app.get('/api/v1/security-alerts')
-def security_alerts(s=Depends(get_store)): return {'items':s.security_alerts()}
+def security_alerts(limit:int|None=Query(default=None,ge=1,le=1000),s=Depends(get_store)): return {'items':[_public_incident(item, 'security-alerts', s) for item in s.security_alerts(limit=limit)]}
 
 @app.get('/api/v1/security-alerts/{alert_id}')
 def security_alert(alert_id:str,s=Depends(get_store)):
     alert=s.security_alert(alert_id)
     if not alert: raise HTTPException(404,'Security alert not found')
-    return alert
+    return _public_incident(alert, 'security-alerts', s)
 
 @app.get('/api/v1/security-alerts/{alert_id}/snapshot')
 def security_alert_snapshot(alert_id:str,s=Depends(get_store)):
     alert=s.security_alert(alert_id)
     if not alert or not alert.get('snapshot_path'): raise HTTPException(404,'Snapshot not found')
-    path=Path(alert['snapshot_path'])
-    if not path.exists() or not path.is_file(): raise HTTPException(404,'Snapshot not found')
-    return Response(content=path.read_bytes(),media_type='image/jpeg')
+    return _saved_evidence(alert.get('snapshot_path'),s)
 
 @app.get('/api/v1/security-alerts/{alert_id}/clip')
 def security_alert_clip(alert_id:str,s=Depends(get_store)):
     alert=s.security_alert(alert_id)
     if not alert or not alert.get('clip_path'): raise HTTPException(404,'Clip not found')
-    path=Path(alert['clip_path'])
-    if not path.exists() or not path.is_file(): raise HTTPException(404,'Clip not found')
-    return Response(content=path.read_bytes(),media_type='video/mp4')
+    return _saved_evidence(alert.get('clip_path'),s,media_type='video/mp4')
 
 @app.post('/api/v1/security-alerts/{alert_id}/acknowledge')
 def acknowledge_security_alert(alert_id:str,s=Depends(get_store)):
     alert=s.acknowledge_security_alert(alert_id)
     if not alert: raise HTTPException(404,'Security alert not found')
-    return alert
+    return _public_incident(alert, 'security-alerts', s)
 
 # Unknown Incidents APIs
 @app.get('/api/v1/unknown-incidents')
-def unknowns(s=Depends(get_store)): return {'items':s.unknowns()}
+def unknowns(limit:int|None=Query(default=None,ge=1,le=1000),s=Depends(get_store)): return {'items':[_public_incident(item, 'unknown-incidents', s) for item in s.unknowns(limit=limit)]}
+
+@app.get('/api/v1/unknown-incidents/{incident_id}/snapshot')
+def unknown_snapshot(incident_id:str,s=Depends(get_store)):
+    incident=s.unknown(incident_id)
+    if not incident:
+        raise HTTPException(404,'Incident not found')
+    for key in ('best_face_snapshot', 'best_person_snapshot'):
+        try:
+            return _saved_evidence(incident.get(key), s)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+    raise HTTPException(404, 'Snapshot unavailable')
+
+@app.get('/api/v1/unknown-incidents/{incident_id}/clip')
+def unknown_clip(incident_id:str,s=Depends(get_store)):
+    incident=s.unknown(incident_id)
+    if not incident or not incident.get('clip_path'):
+        raise HTTPException(404,'Clip not found')
+    return _saved_evidence(incident.get('clip_path'),s,media_type='video/mp4')
 
 @app.get('/api/v1/unknown-incidents/{incident_id}')
 def unknown(incident_id:str,s=Depends(get_store)):
     i=s.unknown(incident_id)
     if not i: raise HTTPException(404,'Incident not found')
-    return i
+    return _public_incident(i, 'unknown-incidents', s)
 
 @app.post('/api/v1/unknown-incidents/{incident_id}/acknowledge')
 def ack(incident_id:str,s=Depends(get_store)):
     i=s.acknowledge_unknown(incident_id)
     if not i: raise HTTPException(404,'Incident not found')
-    return i
+    return _public_incident(i, 'unknown-incidents', s)

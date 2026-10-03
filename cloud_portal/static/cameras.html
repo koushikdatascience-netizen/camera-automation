@@ -25,13 +25,10 @@
 
   <nav class="nav-menu">
 
-    <a href="/portal" class="nav-item">
-      ⚡ <span>System Status</span>
-    </a>
+    <a href="/portal" class="nav-item">⌂ <span>Overview</span></a>
 
-    <a href="/portal/cameras.html" class="nav-item active">
-      📷 <span>Cameras</span>
-    </a>
+    <a href="/portal/live.html" class="nav-item">◉ <span>Live Cameras</span></a>
+      <a href="/portal/cameras.html" class="nav-item active">📷 <span>Camera Setup</span></a>
 
     <a href="/portal/personnel.html" class="nav-item">
       👥 <span>Personnel</span>
@@ -208,9 +205,8 @@
 
             <select id="camera-role">
               <option value="">Select role</option>
-              <option>Entry</option>
-              <option>Exit</option>
-              <option>General</option>
+              <option value="ENTRANCE_EXIT">Attendance / Entrance-Exit</option>
+              <option value="SECURITY">Security / Monitoring</option>
             </select>
           </div>
 
@@ -314,8 +310,8 @@
             <span class="feature-icon">⚠</span>
 
             <span class="feature-text">
-              <strong>Crowd Monitoring</strong>
-              <small>Monitor crowd levels using the configured threshold.</small>
+              <strong>Unknown Person Detection</strong>
+              <small>Alert when a person cannot be matched to registered personnel.</small>
             </span>
 
           </label>
@@ -328,8 +324,8 @@
             <span class="feature-icon">◇</span>
 
             <span class="feature-text">
-              <strong>Object Detection</strong>
-              <small>Detect configured objects within the camera feed.</small>
+              <strong>Object Security</strong>
+              <small>Monitor configured security objects.</small>
             </span>
 
           </label>
@@ -343,10 +339,10 @@
 
       <div class="form-section">
 
-        <h3>Tracking Performance</h3>
+        <h3>AI Performance</h3>
 
         <p class="section-description">
-          Fine-tune how often tracking and detection are processed.
+          Balanced is recommended for most shop PCs. Advanced controls remain available for tuning.
         </p>
 
 

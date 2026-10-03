@@ -25,11 +25,15 @@ if (Test-Path $RepoVenvPython) {
 # Clean previous build if requested
 if ($CleanBuild) {
     Write-Host "Cleaning previous build..."
-    if (Test-Path "$OutputDir") {
-        Remove-Item "$OutputDir" -Recurse -Force
-    }
-    if (Test-Path "build") {
-        Remove-Item "build" -Recurse -Force
+    $RootPath = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\') + '\'
+    foreach ($Target in @((Join-Path $OutputDir $ProjectName), 'build')) {
+        $TargetPath = [IO.Path]::GetFullPath((Join-Path $ProjectRoot $Target))
+        if (-not $TargetPath.StartsWith($RootPath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing cleanup outside the repository: $TargetPath"
+        }
+        if (Test-Path -LiteralPath $TargetPath) {
+            Remove-Item -LiteralPath $TargetPath -Recurse -Force -ErrorAction Stop
+        }
     }
 }
 

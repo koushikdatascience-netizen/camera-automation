@@ -45,3 +45,4 @@ class LineCrossingEvent(BaseModel):
     direction: str  # ENTRY or EXIT
     timestamp: datetime
     bbox: tuple[float, float, float, float]
+    snapshot_path: Optional[str] = None

@@ -42,6 +42,8 @@ class SQLiteStore:
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','entry_confirmed','INTEGER NOT NULL DEFAULT 0')
+            for column in ('break_started_at', 'last_break_start', 'last_break_end'):
+                self._ensure_column(c,'attendance_sessions',column,'TEXT')
             self._ensure_column(c,'edge_event_queue','next_attempt_at','TEXT')
             self._ensure_column(c,'edge_event_queue','claimed_at','TEXT')
     def _ensure_column(self,conn,table,column,definition):
@@ -159,10 +161,14 @@ class SQLiteStore:
             return self.get_attendance_id(s['id']),True
     def get_attendance_id(self,sid):
         with self._conn() as c: r=c.execute("SELECT * FROM attendance_sessions WHERE id=?",(sid,)).fetchone(); return dict(r) if r else None
-    def attendance(self,person_id=None):
+    def attendance(self,person_id=None,limit=None,camera_id=None):
         q='''SELECT a.*,p.employee_code,p.full_name,p.role FROM attendance_sessions a JOIN personnel p ON p.id=a.person_id'''; args=[]
-        if person_id: q+=' WHERE a.person_id=?'; args.append(person_id)
+        filters=[]
+        if person_id: filters.append('a.person_id=?'); args.append(person_id)
+        if camera_id: filters.append('(a.arrival_camera=? OR a.exit_camera=?)'); args.extend([camera_id,camera_id])
+        if filters: q+=' WHERE '+' AND '.join(filters)
         q+=' ORDER BY a.arrival_time DESC'
+        if limit is not None: q+=' LIMIT ?'; args.append(int(limit))
         with self._conn() as c: return [dict(r) for r in c.execute(q,args)]
     def add_person_event(self,person_id,store_id,camera_id,event_type,ts,metadata=None):
         eid=str(uuid.uuid4())
@@ -186,11 +192,25 @@ class SQLiteStore:
                     c.execute("UPDATE unknown_incidents SET last_seen=?,recognition_attempts=?,best_similarity=COALESCE(?,best_similarity),best_face_snapshot=COALESCE(?,best_face_snapshot),best_person_snapshot=COALESCE(?,best_person_snapshot),clip_path=COALESCE(?,clip_path) WHERE id=?",(last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path,row['id']))
                     return row['id'],False
                 iid=str(uuid.uuid4()); c.execute("INSERT INTO unknown_incidents(id,store_id,camera_id,track_id,first_seen,confirmed_unknown_at,last_seen,recognition_attempts,best_similarity,best_face_snapshot,best_person_snapshot,clip_path,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')",(iid,store_id,camera_id,track_id,first_seen.isoformat(),confirmed.isoformat(),last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path))
-                payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path}}
+                payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path,'evidence_pending':clip_path is None}}
                 self._enqueue_edge_event(c,iid,'UNKNOWN_INCIDENT',payload)
                 return iid,True
-    def unknowns(self):
-        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM unknown_incidents ORDER BY confirmed_unknown_at DESC")]
+    def update_unknown_clip(self,iid,clip_path):
+        with self._lock,self._conn() as c:
+            c.execute("UPDATE unknown_incidents SET clip_path=? WHERE id=?",(clip_path,iid))
+            # The original queued UNKNOWN_INCIDENT payload may have been created before
+            # the asynchronous evidence clip finished. Keep pending queue payloads in
+            # sync so cloud/CRM delivery receives the final evidence path.
+            row=c.execute("SELECT payload_json,status FROM edge_event_queue WHERE id=?",(iid,)).fetchone()
+            if row and row["status"]=="PENDING":
+                payload=json.loads(row["payload_json"])
+                payload.setdefault("metadata",{})["clip_path"]=clip_path
+                payload["metadata"]["evidence_pending"]=False
+                c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),iid))
+        return self.unknown(iid)
+
+    def unknowns(self,limit=None):
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM unknown_incidents ORDER BY confirmed_unknown_at DESC LIMIT ?",(limit if limit is not None else -1,))]
     def unknown(self,iid):
         with self._conn() as c: r=c.execute("SELECT * FROM unknown_incidents WHERE id=?",(iid,)).fetchone(); return dict(r) if r else None
     def acknowledge_unknown(self,iid):
@@ -198,17 +218,26 @@ class SQLiteStore:
         return self.unknown(iid)
     def create_security_alert(self,store_id,camera_id,alert_type,object_label,confidence,event_time,snapshot_path=None,clip_path=None,metadata=None):
         aid=str(uuid.uuid4())
-        payload={'event_id':aid,'store_id':store_id,'camera_id':camera_id,'event_type':alert_type,'event_time':event_time.isoformat(),'metadata':{**(metadata or {}),'object_label':object_label,'confidence':confidence,'snapshot_path':snapshot_path,'clip_path':clip_path}}
+        payload={'event_id':aid,'store_id':store_id,'camera_id':camera_id,'event_type':alert_type,'event_time':event_time.isoformat(),'metadata':{**(metadata or {}),'object_label':object_label,'confidence':confidence,'snapshot_path':snapshot_path,'clip_path':clip_path,'evidence_pending':clip_path is None}}
         with self._lock,self._conn() as c:
             c.execute("INSERT INTO security_alerts(id,store_id,camera_id,alert_type,object_label,confidence,event_time,snapshot_path,clip_path,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)",(aid,store_id,camera_id,alert_type,object_label,confidence,event_time.isoformat(),snapshot_path,clip_path,json.dumps(metadata or {})))
             self._enqueue_edge_event(c,aid,alert_type,payload)
         return self.security_alert(aid)
-    def security_alerts(self):
-        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM security_alerts ORDER BY event_time DESC")]
+    def security_alerts(self,limit=None):
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM security_alerts ORDER BY event_time DESC LIMIT ?",(limit if limit is not None else -1,))]
     def security_alert(self,aid):
         with self._conn() as c: r=c.execute("SELECT * FROM security_alerts WHERE id=?",(aid,)).fetchone(); return dict(r) if r else None
     def update_security_alert_clip(self,aid,clip_path):
-        with self._lock,self._conn() as c: c.execute("UPDATE security_alerts SET clip_path=? WHERE id=?",(clip_path,aid))
+        with self._lock,self._conn() as c:
+            c.execute("UPDATE security_alerts SET clip_path=? WHERE id=?",(clip_path,aid))
+            # Clip generation is asynchronous. Update a still-pending queue payload so
+            # cloud/CRM sync includes the completed evidence instead of a null clip.
+            row=c.execute("SELECT payload_json,status FROM edge_event_queue WHERE id=?",(aid,)).fetchone()
+            if row and row["status"]=="PENDING":
+                payload=json.loads(row["payload_json"])
+                payload.setdefault("metadata",{})["clip_path"]=clip_path
+                payload["metadata"]["evidence_pending"]=False
+                c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),aid))
         return self.security_alert(aid)
     def acknowledge_security_alert(self,aid):
         with self._lock,self._conn() as c: c.execute("UPDATE security_alerts SET status='ACKNOWLEDGED',acknowledged_at=? WHERE id=?",(self.now(),aid))

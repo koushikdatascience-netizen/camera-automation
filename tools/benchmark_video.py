@@ -40,6 +40,8 @@ def main() -> int:
     backend = UltralyticsCPUBackend(args.model)
     latencies = []
     decoded = inferred = detections = failures = 0
+    tracked_frames = 0
+    track_ids = set()
     started = perf_counter()
 
     try:
@@ -66,6 +68,9 @@ def main() -> int:
                     continue
                 inferred += 1
                 detections += len(result.detections)
+                ids = [d.track_id for d in result.detections if d.track_id is not None]
+                tracked_frames += bool(ids)
+                track_ids.update(ids)
                 latencies.append(result.inference_latency_ms)
     finally:
         elapsed = max(perf_counter() - started, 1e-9)
@@ -84,6 +89,8 @@ def main() -> int:
         "decoded_frames": decoded,
         "inferred_frames": inferred,
         "detections": detections,
+        "frames_with_track_ids": tracked_frames,
+        "unique_track_ids": sorted(track_ids),
         "failures": failures,
         "wall_seconds": round(elapsed, 3),
         "effective_inference_fps": round(inferred / elapsed, 3),

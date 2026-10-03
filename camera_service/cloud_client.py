@@ -39,18 +39,20 @@ class CloudSyncClient:
             "payload": event,
         }
 
-    def upload_event_evidence(self, event_id: str, snapshot_path: str) -> dict[str, Any]:
+    def upload_event_evidence(self, event_id: str, evidence_path: str) -> dict[str, Any]:
         if not self.enabled():
             raise RuntimeError("cloud sync is disabled")
-        path = Path(snapshot_path)
+        path = Path(evidence_path)
         if not path.is_file():
             raise FileNotFoundError(f"event evidence not found: {path}")
+        suffix=path.suffix.lower()
+        content_type={".jpg":"image/jpeg",".jpeg":"image/jpeg",".png":"image/png",".webp":"image/webp",".mp4":"video/mp4"}.get(suffix,"application/octet-stream")
         with path.open("rb") as stream:
             response = requests.post(
                 self.config.base_url.rstrip("/") + f"/edge/v1/events/{event_id}/evidence",
-                files={"file": (path.name, stream, "image/jpeg")},
+                files={"file": (path.name, stream, content_type)},
                 headers={"Authorization": f"Bearer {self.config.api_token}"},
-                timeout=max(float(self.config.timeout_seconds), 30.0),
+                timeout=max(float(self.config.timeout_seconds), 60.0 if content_type=="video/mp4" else 30.0),
             )
         response.raise_for_status()
         return response.json()

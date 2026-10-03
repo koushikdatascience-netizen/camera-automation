@@ -30,10 +30,16 @@ services:
       SNAPKEY_CRM_INTEGRATION_KEY: ${SNAPKEY_CRM_INTEGRATION_KEY:?set SNAPKEY_CRM_INTEGRATION_KEY}
       SNAPKEY_CRM_API_BASE_URL: ${SNAPKEY_CRM_API_BASE_URL:-https://apis.snapkey.in}
       SNAPKEY_CRM_API_TOKEN: ${SNAPKEY_CRM_API_TOKEN:-}
-      # Keep roster mutation disabled until the customer's LoginLogout payload
-      # contract is smoke-tested against SnapKey CRM.
-      SNAPKEY_CRM_ATTENDANCE_ENABLED: ${SNAPKEY_CRM_ATTENDANCE_ENABLED:-0}
+      # Automatic camera attendance posts the current face crop to the CRM
+      # face-login service. Override this while that service is hosted separately.
+      SNAPKEY_CRM_FACE_LOGIN_URL: ${SNAPKEY_CRM_FACE_LOGIN_URL:-https://apis.snapkey.in/api/Auth/loginUsingFaceTenant}
+      # Auto-logout stays disabled until its business rule is explicitly confirmed.
+      SNAPKEY_CRM_AUTO_LOGIN_ENABLED: ${SNAPKEY_CRM_AUTO_LOGIN_ENABLED:-1}
+      SNAPKEY_CRM_AUTO_LOGOUT_ENABLED: ${SNAPKEY_CRM_AUTO_LOGOUT_ENABLED:-0}
       SNAPKEY_PUBLIC_BASE_URL: ${SNAPKEY_PUBLIC_BASE_URL:-https://camera.snapkey.ai}
+      SNAPKEY_LIVEKIT_URL: ${SNAPKEY_LIVEKIT_URL:-wss://livekit.snapkeystudio.com}
+      SNAPKEY_LIVEKIT_API_KEY: ${SNAPKEY_LIVEKIT_API_KEY:-}
+      SNAPKEY_LIVEKIT_API_SECRET: ${SNAPKEY_LIVEKIT_API_SECRET:-}
       SNAPKEY_EDGE_ACTIVATION_CODE: ${SNAPKEY_EDGE_ACTIVATION_CODE:?set SNAPKEY_EDGE_ACTIVATION_CODE}
       SNAPKEY_LICENSE_PRIVATE_KEY: ${SNAPKEY_LICENSE_PRIVATE_KEY:?set SNAPKEY_LICENSE_PRIVATE_KEY}
       SNAPKEY_LICENSE_PUBLIC_KEY: ${SNAPKEY_LICENSE_PUBLIC_KEY:?set SNAPKEY_LICENSE_PUBLIC_KEY}
