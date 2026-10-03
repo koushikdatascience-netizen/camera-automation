@@ -1254,6 +1254,14 @@ def attendance_station_candidate(tenant_id: str, camera_id: str, edge_id: str, p
 
 @app.post("/portal/v1/tenants/{tenant_id}/attendance-station/action")
 def attendance_station_action(tenant_id: str, request: AttendanceStationActionRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    """Execute a CRM-backed manual attendance action for the current recognized person.
+
+    CHECK_IN mirrors the automatic face flow: authenticate the current camera face
+    first, then use CRM's returned token/user id for LoginLogout. CHECK_OUT also
+    authenticates the current face before LoginLogout. Break actions use the
+    server-side CRM integration because the supplied break endpoints do not return
+    or consume the face-login token in the provided contract.
+    """
     _portal_scope(tenant_id,principal)
     action=request.action.strip().upper()
     if action not in {"CHECK_IN","CHECK_OUT","BREAK_START","BREAK_END"}:
@@ -1273,17 +1281,45 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
     if not mapping: raise HTTPException(409,"Recognized person is not mapped to a CRM user")
     if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
     now=datetime.now(timezone.utc); crm_timestamp=now.isoformat(timespec="milliseconds").replace("+00:00","Z")
-    crm_date=now.date().isoformat(); crm_time=now.strftime("%H:%M:%S")
+    crm_date=crm_timestamp; crm_time=now.strftime("%H:%M:%S")
     location="Camera Eye - "+str(camera.get("name") or request.camera_id)
+    authenticated_user_id=str(mapping["crm_user_id"])
     try:
-        if action=="CHECK_IN": result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_date,"actualStartTime":crm_time,"actualOffTime":None,"loginLocation":location,"logoutLocation":None})
-        elif action=="CHECK_OUT": result=crm_client.login_logout({"userId":mapping["crm_user_id"],"date":crm_date,"actualStartTime":None,"actualOffTime":crm_time,"loginLocation":None,"logoutLocation":location})
+        if action in {"CHECK_IN","CHECK_OUT"}:
+            crm_tenant_id=_crm_tenant_uuid_for_user(tenant_id,mapping["crm_user_id"])
+            image_base64=_recognition_image_base64(payload)
+            face_result=crm_client.login_using_face_tenant(image_base64,crm_tenant_id)
+            if not _crm_face_login_succeeded(face_result) or not isinstance(face_result,dict):
+                raise HTTPException(409,"CRM face authentication was rejected")
+            face_token=str(face_result.get("token") or "").strip()
+            crm_user=face_result.get("user") if isinstance(face_result.get("user"),dict) else {}
+            authenticated_user_id=str(crm_user.get("id") or "").strip()
+            if not face_token or not authenticated_user_id:
+                raise HTTPException(502,"CRM face authentication did not return token and user identity")
+            if authenticated_user_id!=str(mapping["crm_user_id"]):
+                raise HTTPException(409,"CRM face identity does not match the recognized Camera Eye person")
+            if action=="CHECK_IN":
+                crm_payload={"userId":authenticated_user_id,"date":crm_date,"actualStartTime":crm_time}
+            else:
+                crm_payload={"userId":authenticated_user_id,"date":crm_date,"actualOffTime":crm_time}
+            result=crm_client.login_logout_with_face_token(crm_payload,face_token)
         elif action=="BREAK_START":
-            if not mapping.get("break_master_id"): raise HTTPException(409,"No CRM break type is mapped for this person")
-            result=crm_client.start_break(mapping["crm_user_id"],mapping["break_master_id"])
-        else: result=crm_client.end_break(mapping["crm_user_id"])
+            if not mapping.get("break_master_id"):
+                raise HTTPException(409,"No CRM break type is mapped for this person")
+            result=crm_client.start_break(authenticated_user_id,mapping["break_master_id"])
+        else:
+            result=crm_client.end_break(authenticated_user_id)
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as exc:
+        status=exc.response.status_code if exc.response is not None else 502
+        # Do not leak CRM response bodies/tokens/biometric data to the frontend.
+        raise HTTPException(502,f"CRM attendance action failed (upstream HTTP {status})") from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(502,f"CRM attendance action failed: {exc}") from exc
+        raise HTTPException(502,"CRM attendance action failed") from exc
+    except Exception as exc:
+        logger.exception("CRM_MANUAL_ATTENDANCE_FAILED action=%s person_id=%s camera_id=%s",action,person_id,request.camera_id)
+        raise HTTPException(502,"CRM attendance action failed") from exc
     audit_id="manual-"+secrets.token_urlsafe(12)
     canonical_type={"CHECK_IN":"ATTENDANCE_ENTRY","CHECK_OUT":"ATTENDANCE_EXIT",
         "BREAK_START":"BREAK_START","BREAK_END":"BREAK_END"}[action]
@@ -1292,9 +1328,12 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
         "event_type":canonical_type,"event_time":crm_timestamp,"payload":{"person_id":person_id,"event_type":canonical_type,
         "event_time":crm_timestamp,"metadata":{"attendance_session_id":_attendance_session_id(person_id,now),
         "recognition_event_id":request.recognition_event_id,"manual":True,"confirmed_by_user_id":principal.user_id,
-        "confirmed_by_name":principal.display_name,"confirmed_by_role":principal.role,"camera_name":camera.get("name")}}})
-    return {"ok":True,"audit_event_id":audit_id,"action":action,"person_id":person_id,"recognition_event_id":request.recognition_event_id,"confirmed_at":crm_timestamp,
+        "confirmed_by_name":principal.display_name,"confirmed_by_role":principal.role,"camera_name":camera.get("name"),
+        "crm_user_id":authenticated_user_id}}})
+    return {"ok":True,"audit_event_id":audit_id,"action":action,"person_id":person_id,"crm_user_id":authenticated_user_id,
+        "recognition_event_id":request.recognition_event_id,"confirmed_at":crm_timestamp,
         "confirmed_by":{"user_id":principal.user_id,"display_name":principal.display_name,"role":principal.role},"crm_result":result}
+
 
 @app.get("/portal/v1/tenants/{tenant_id}/attendance/roster")
 def crm_attendance_roster(tenant_id: str, year: int, month: int, user_id: str | None = None,
