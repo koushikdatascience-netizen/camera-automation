@@ -88,6 +88,11 @@ class SnapKeyCrmClient:
         except ValueError:
             return {"ok":True,"text":response.text[:1000]}
 
+    def users_roster(self, year: int, month: int, user_id: str | None = None) -> Any:
+        """Return the CRM roster, which is authoritative for business attendance/history."""
+        params={"year":int(year),"month":int(month),"userId":(user_id or "").strip()}
+        return self._request("GET","/api/UserRoster/GetUsersRoster",params=params)
+
     def login_logout(self, payload: dict[str,Any]) -> Any:
         # Retained for explicit/manual attendance operations. Automatic camera
         # attendance uses login_using_face_tenant instead.
