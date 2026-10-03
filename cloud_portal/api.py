@@ -871,16 +871,42 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
             person_id,mapping["crm_user_id"],camera_id,crm_tenant_id)
         crm_result=crm_client.login_using_face_tenant(image_base64,crm_tenant_id)
         if not _crm_face_login_succeeded(crm_result):
-            logger.warning("CRM_FACE_LOGIN_REJECTED person_id=%s crm_user_id=%s result=%s",
-                person_id,mapping["crm_user_id"],crm_result)
+            logger.warning("CRM_FACE_LOGIN_REJECTED person_id=%s crm_user_id=%s",
+                person_id,mapping["crm_user_id"])
             return
+
+        # Match the supplied n8n workflow exactly: loginUsingFaceTenant identifies
+        # the person and returns a short-lived CRM token; that returned token is
+        # then used as the Authorization header for UserRoster/LoginLogout.
+        if not isinstance(crm_result,dict):
+            raise RuntimeError("CRM face login returned an unexpected response")
+        face_token=str(crm_result.get("token") or "").strip()
+        crm_user=crm_result.get("user") if isinstance(crm_result.get("user"),dict) else {}
+        authenticated_user_id=str(crm_user.get("id") or "").strip()
+        if not face_token:
+            raise RuntimeError("CRM face login succeeded without returning token")
+        if not authenticated_user_id:
+            raise RuntimeError("CRM face login succeeded without returning user.id")
+        expected_user_id=str(mapping.get("crm_user_id") or "").strip()
+        if expected_user_id and authenticated_user_id!=expected_user_id:
+            logger.warning("CRM_FACE_IDENTITY_MISMATCH person_id=%s expected_crm_user_id=%s authenticated_crm_user_id=%s",
+                person_id,expected_user_id,authenticated_user_id)
+            return
+
+        crm_date=when.isoformat(timespec="milliseconds").replace("+00:00","Z")
+        crm_time=when.strftime("%H:%M:%S")
+        attendance_result=crm_client.login_logout_with_face_token({
+            "userId":authenticated_user_id,
+            "date":crm_date,
+            "actualStartTime":crm_time,
+        },face_token)
     except Exception:
-        # Never log the Base64 face image.
+        # Never log the Base64 face image or the face-login token.
         logger.exception("CRM_FACE_LOGIN_FAILED person_id=%s crm_user_id=%s camera_id=%s",
             person_id,mapping["crm_user_id"],camera_id)
         return
-    logger.info("CRM_FACE_LOGIN_SUCCESS person_id=%s crm_user_id=%s result=%s",
-        person_id,mapping["crm_user_id"],crm_result)
+    logger.info("CRM_AUTO_ATTENDANCE_SUCCESS person_id=%s crm_user_id=%s camera_id=%s",
+        person_id,authenticated_user_id,camera_id)
     event_id="auto-attendance-"+secrets.token_urlsafe(12)
     store.record_portal_event({"event_id":event_id,"tenant_id":tenant_id,
         "company_code":envelope.get("company_code"),"shop_id":shop_id,
@@ -890,7 +916,8 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         "payload":{"person_id":person_id,"event_type":"ATTENDANCE_ENTRY",
         "metadata":{"attendance_session_id":_attendance_session_id(person_id,when),
         "recognition_event_id":envelope.get("event_id"),"automatic":True,
-        "crm_operation":"loginUsingFaceTenant","crm_tenant_id":crm_tenant_id}}})
+        "crm_operation":"loginUsingFaceTenant+LoginLogout","crm_tenant_id":crm_tenant_id,
+        "crm_user_id":authenticated_user_id}}})
 
 @app.post("/edge/v1/events")
 def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTasks,
