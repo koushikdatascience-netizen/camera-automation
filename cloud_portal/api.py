@@ -776,6 +776,15 @@ def _has_attendance_entry_today(tenant_id: str, shop_id: str, person_id: str, wh
         inner=payload.get("payload") if isinstance(payload.get("payload"),dict) else payload
         if str(inner.get("person_id") or "")!=person_id:
             continue
+        # Only a CRM-confirmed attendance mutation may suppress another automatic
+        # attempt. Older builds recorded ATTENDANCE_ENTRY immediately after face
+        # authentication even when UserRoster/LoginLogout had never succeeded;
+        # those legacy audit rows must not block the repaired flow.
+        metadata=inner.get("metadata") or {}
+        crm_operation=str(metadata.get("crm_operation") or "")
+        crm_confirmed=crm_operation=="loginUsingFaceTenant+LoginLogout" or metadata.get("manual") is True
+        if not crm_confirmed:
+            continue
         stamp=event.get("event_time")
         dt=stamp if isinstance(stamp,datetime) else datetime.fromisoformat(str(stamp).replace("Z","+00:00"))
         if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
