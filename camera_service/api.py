@@ -467,8 +467,14 @@ def ready():
 @app.get('/api/v1/edge/status')
 def edge_status():
     license_status = license_manager.status()
+    edge_data = config.edge.model_dump(exclude={'activation_token'})
+    # activation_required is a configuration policy, not the current activation
+    # state. Expose an effective value so the setup UI never asks an already
+    # licensed machine to pair again after a reboot.
+    edge_data['activation_required'] = bool(config.edge.activation_required and not license_status.active)
+    edge_data['plan'] = license_status.plan
     return {
-        'edge': config.edge.model_dump(exclude={'activation_token'}),
+        'edge': edge_data,
         'license': license_status.model_dump(),
         'cloud_sync_enabled': cloud_client.enabled(),
         'cloud_sync_allowed': cloud_client.enabled() and license_status.active and license_status.allows_feature('cloud_sync'),
