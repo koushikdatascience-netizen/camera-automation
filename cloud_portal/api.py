@@ -1003,9 +1003,18 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
     # scheduling another login/logout/break call.
     if result.get("inserted", True):
         if str(envelope.get("event_type") or "")=="PERSON_RECOGNIZED":
+            logger.warning(
+                "AUTO_ATTENDANCE_QUEUED event_id=%s tenant_code=%s shop_id=%s edge_id=%s camera_id=%s",
+                str(envelope.get("event_id") or ""),str(envelope.get("tenant_id") or ""),
+                str(envelope.get("shop_id") or ""),str(envelope.get("edge_id") or ""),
+                str(envelope.get("camera_id") or ""),
+            )
             background_tasks.add_task(_auto_attend_recognized_person,envelope)
         else:
             background_tasks.add_task(_deliver_crm_attendance_event,envelope)
+    else:
+        logger.info("EDGE_EVENT_DUPLICATE event_id=%s event_type=%s",
+                    str(envelope.get("event_id") or ""),str(envelope.get("event_type") or ""))
     return result
 
 
