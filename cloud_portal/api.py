@@ -800,18 +800,47 @@ def _crm_tenant_uuid_for_user(tenant_code: str, crm_user_id: str) -> str:
     """
     raw=crm_client.face_embeddings(tenant_code)
     users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
-    fallback=""
+    target=str(crm_user_id or "").strip()
     for user in users:
         if not isinstance(user,dict):
             continue
-        candidate=str(user.get("tenantId") or "").strip()
-        if candidate and not fallback:
-            fallback=candidate
-        if str(user.get("id") or "").strip()==str(crm_user_id or "").strip() and candidate:
-            return candidate
-    if fallback:
-        return fallback
-    raise RuntimeError("CRM face directory did not return tenantId")
+        candidate_user=str(user.get("id") or "").strip()
+        candidate_tenant=str(user.get("tenantId") or "").strip()
+        if candidate_user==target and candidate_tenant:
+            logger.info("CRM_TENANT_RESOLVED tenant_code=%s crm_user_id=%s crm_tenant_id=%s",
+                        tenant_code,target,candidate_tenant)
+            return candidate_tenant
+    logger.error("CRM_TENANT_RESOLUTION_FAILED tenant_code=%s crm_user_id=%s directory_users=%s",
+                 tenant_code,target,len(users))
+    raise RuntimeError("CRM face directory did not return tenantId for the requested CRM user")
+
+def _crm_allowed_user_ids(tenant_code: str) -> set[str]:
+    """Return CRM user ids explicitly belonging to the requested tenant code."""
+    raw=crm_client.face_embeddings(tenant_code)
+    users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
+    ids={str(user.get("id") or "").strip() for user in users
+         if isinstance(user,dict) and str(user.get("id") or "").strip()}
+    logger.info("CRM_TENANT_DIRECTORY tenant_code=%s user_count=%s",tenant_code,len(ids))
+    return ids
+
+def _crm_roster_user_ids(rows: Any) -> set[str]:
+    if not isinstance(rows,list):
+        return set()
+    return {str(row.get("userId") or "").strip() for row in rows
+            if isinstance(row,dict) and str(row.get("userId") or "").strip()}
+
+def _assert_crm_service_token_scope(tenant_code: str) -> None:
+    """Fail closed when the static CRM token demonstrably belongs to another tenant."""
+    allowed=_crm_allowed_user_ids(tenant_code)
+    now=datetime.now(timezone.utc)
+    rows=crm_client.users_roster(now.year,now.month)
+    roster_ids=_crm_roster_user_ids(rows)
+    if allowed and roster_ids and not (allowed & roster_ids):
+        logger.error(
+            "CRM_TENANT_SCOPE_MISMATCH tenant_code=%s directory_users=%s roster_users=%s overlap=0",
+            tenant_code,len(allowed),len(roster_ids),
+        )
+        raise RuntimeError("Configured CRM service token is scoped to a different tenant")
 
 def _recognition_image_base64(payload: dict[str, Any]) -> str:
     """Load uploaded recognition evidence and return raw JPEG Base64."""
@@ -837,10 +866,10 @@ def _recognition_image_base64(payload: dict[str, Any]) -> str:
     return base64.b64encode(data).decode("ascii")
 
 def _crm_face_login_succeeded(result: Any) -> bool:
-    if isinstance(result,dict):
-        if result.get("success") is False or result.get("ok") is False:
-            return False
-    return True
+    return crm_client.business_success(result)
+
+def _crm_mutation_succeeded(result: Any) -> bool:
+    return crm_client.business_success(result)
 
 def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     """Immediately face-login a recognized person from an entrance camera."""
@@ -909,6 +938,13 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
             "date":crm_date,
             "actualStartTime":crm_time,
         },face_token)
+        if not _crm_mutation_succeeded(attendance_result):
+            logger.error(
+                "CRM_AUTO_ATTENDANCE_REJECTED person_id=%s crm_user_id=%s camera_id=%s message=%s",
+                person_id,authenticated_user_id,camera_id,
+                str(attendance_result.get("message") or "")[:240] if isinstance(attendance_result,dict) else "",
+            )
+            return
     except Exception:
         # Never log the Base64 face image or the face-login token.
         logger.exception("CRM_FACE_LOGIN_FAILED person_id=%s crm_user_id=%s camera_id=%s",
@@ -1312,11 +1348,20 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
             else:
                 crm_payload={"userId":authenticated_user_id,"date":crm_date,"actualOffTime":crm_time}
             result=crm_client.login_logout_with_face_token(crm_payload,face_token)
+            if not _crm_mutation_succeeded(result):
+                logger.warning(
+                    "CRM_MANUAL_ATTENDANCE_REJECTED action=%s person_id=%s crm_user_id=%s camera_id=%s message=%s",
+                    action,person_id,authenticated_user_id,request.camera_id,
+                    str(result.get("message") or "")[:240] if isinstance(result,dict) else "",
+                )
+                raise HTTPException(409,"CRM rejected the attendance action")
         elif action=="BREAK_START":
             if not mapping.get("break_master_id"):
                 raise HTTPException(409,"No CRM break type is mapped for this person")
+            _assert_crm_service_token_scope(tenant_id)
             result=crm_client.start_break(authenticated_user_id,mapping["break_master_id"])
         else:
+            _assert_crm_service_token_scope(tenant_id)
             result=crm_client.end_break(authenticated_user_id)
     except HTTPException:
         raise
@@ -1339,9 +1384,13 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
         "recognition_event_id":request.recognition_event_id,"manual":True,"confirmed_by_user_id":principal.user_id,
         "confirmed_by_name":principal.display_name,"confirmed_by_role":principal.role,"camera_name":camera.get("name"),
         "crm_user_id":authenticated_user_id}}})
+    logger.info(
+        "CRM_MANUAL_ATTENDANCE_SUCCESS action=%s tenant_code=%s person_id=%s crm_user_id=%s camera_id=%s audit_event_id=%s",
+        action,tenant_id,person_id,authenticated_user_id,request.camera_id,audit_id,
+    )
     return {"ok":True,"audit_event_id":audit_id,"action":action,"person_id":person_id,"crm_user_id":authenticated_user_id,
         "recognition_event_id":request.recognition_event_id,"confirmed_at":crm_timestamp,
-        "confirmed_by":{"user_id":principal.user_id,"display_name":principal.display_name,"role":principal.role},"crm_result":result}
+        "confirmed_by":{"user_id":principal.user_id,"display_name":principal.display_name,"role":principal.role}}
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/attendance/roster")
@@ -1356,9 +1405,39 @@ def crm_attendance_roster(tenant_id: str, year: int, month: int, user_id: str | 
     if not crm_client.configured:
         raise HTTPException(503,"SnapKey CRM API token is not configured")
     try:
-        return crm_client.users_roster(year,month,user_id)
+        allowed=_crm_allowed_user_ids(tenant_id)
+        requested=(user_id or "").strip()
+        if requested and requested not in allowed:
+            logger.warning("CRM_ROSTER_BLOCKED tenant_code=%s requested_user_id=%s reason=user_not_in_tenant",
+                           tenant_id,requested)
+            raise HTTPException(404,"CRM user is not part of this tenant")
+        rows=crm_client.users_roster(year,month,requested or None)
+        if not isinstance(rows,list):
+            logger.error("CRM_ROSTER_INVALID_RESPONSE tenant_code=%s response_type=%s",
+                         tenant_id,type(rows).__name__)
+            raise HTTPException(502,"SnapKey CRM roster returned an invalid response")
+        roster_ids=_crm_roster_user_ids(rows)
+        overlap=allowed & roster_ids
+        if allowed and roster_ids and not overlap:
+            logger.error(
+                "CRM_TENANT_SCOPE_MISMATCH tenant_code=%s directory_users=%s roster_users=%s overlap=0",
+                tenant_id,len(allowed),len(roster_ids),
+            )
+            raise HTTPException(502,"SnapKey CRM service token is scoped to a different tenant")
+        scoped=[row for row in rows if isinstance(row,dict) and str(row.get("userId") or "").strip() in allowed]
+        logger.info(
+            "CRM_ROSTER_SCOPED tenant_code=%s requested_user_id=%s upstream_rows=%s returned_rows=%s",
+            tenant_id,requested or "-",len(rows),len(scoped),
+        )
+        return scoped
+    except HTTPException:
+        raise
     except httpx.HTTPError as exc:
-        raise HTTPException(502,f"SnapKey CRM roster lookup failed: {exc}") from exc
+        logger.exception("CRM_ROSTER_HTTP_FAILED tenant_code=%s year=%s month=%s",tenant_id,year,month)
+        raise HTTPException(502,"SnapKey CRM roster lookup failed") from exc
+    except RuntimeError as exc:
+        logger.exception("CRM_ROSTER_SCOPE_FAILED tenant_code=%s year=%s month=%s",tenant_id,year,month)
+        raise HTTPException(502,str(exc)) from exc
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/crm/status")
@@ -1398,8 +1477,15 @@ def crm_users(tenant_id: str, principal: PortalPrincipal = Depends(require_porta
 def crm_breaks(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
     if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
-    try: return {"items":crm_client.my_breaks()}
-    except httpx.HTTPError as exc: raise HTTPException(502,f"SnapKey CRM break lookup failed: {exc}") from exc
+    try:
+        _assert_crm_service_token_scope(tenant_id)
+        return {"items":crm_client.my_breaks()}
+    except httpx.HTTPError as exc:
+        logger.exception("CRM_BREAK_LOOKUP_HTTP_FAILED tenant_code=%s",tenant_id)
+        raise HTTPException(502,"SnapKey CRM break lookup failed") from exc
+    except RuntimeError as exc:
+        logger.exception("CRM_BREAK_LOOKUP_SCOPE_FAILED tenant_code=%s",tenant_id)
+        raise HTTPException(502,str(exc)) from exc
 
 @app.get("/portal/v1/tenants/{tenant_id}/crm/face-embeddings/{employee_code}")
 def crm_face_embeddings(tenant_id: str, employee_code: str, principal: PortalPrincipal = Depends(require_portal_session)):
