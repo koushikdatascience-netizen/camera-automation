@@ -908,7 +908,7 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         return
     camera=_portal_camera_lookup(tenant_id,shop_id,edge_id,camera_id)
     if not camera or str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
-        logger.info("CRM_FACE_LOGIN_SKIPPED person_id=%s camera_id=%s reason=not_attendance_camera",person_id,camera_id)
+        logger.warning("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s camera_id=%s reason=not_attendance_camera role=%s", event_id,person_id,camera_id,str(camera.get("camera_role") if camera else "camera_not_found"))
         return
     mapping=store.crm_person_mapping(tenant_id,shop_id,person_id)
     if not mapping:
@@ -923,7 +923,7 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     # recognition is sent to CRM immediately, then further successful logins for
     # the same person/day are suppressed.
     if _has_attendance_entry_today(tenant_id,shop_id,person_id,when):
-        logger.info("CRM_FACE_LOGIN_SKIPPED person_id=%s reason=attendance_already_exists",person_id)
+        logger.warning("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s camera_id=%s reason=attendance_already_exists", event_id,person_id,camera_id)
         return
     try:
         crm_tenant_id=_crm_tenant_uuid_for_user(tenant_id,mapping["crm_user_id"])
