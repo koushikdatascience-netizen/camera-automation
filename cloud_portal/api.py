@@ -1193,6 +1193,23 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
     return {"ok":True,"audit_event_id":audit_id,"action":action,"person_id":person_id,"recognition_event_id":request.recognition_event_id,"confirmed_at":crm_timestamp,
         "confirmed_by":{"user_id":principal.user_id,"display_name":principal.display_name,"role":principal.role},"crm_result":result}
 
+@app.get("/portal/v1/tenants/{tenant_id}/attendance/roster")
+def crm_attendance_roster(tenant_id: str, year: int, month: int, user_id: str | None = None,
+                          principal: PortalPrincipal = Depends(require_portal_session)):
+    """Proxy the authoritative CRM monthly roster through the scoped Camera Eye session."""
+    _portal_scope(tenant_id, principal)
+    if year < 2000 or year > 2100:
+        raise HTTPException(400,"year must be between 2000 and 2100")
+    if month < 1 or month > 12:
+        raise HTTPException(400,"month must be between 1 and 12")
+    if not crm_client.configured:
+        raise HTTPException(503,"SnapKey CRM API token is not configured")
+    try:
+        return crm_client.users_roster(year,month,user_id)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502,f"SnapKey CRM roster lookup failed: {exc}") from exc
+
+
 @app.get("/portal/v1/tenants/{tenant_id}/crm/status")
 def crm_status(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
