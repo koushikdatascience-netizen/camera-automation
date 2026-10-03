@@ -658,6 +658,10 @@ def edge_camera_config(principal: EdgePrincipal = Depends(require_edge_token)):
 @app.get("/edge/v1/config/personnel")
 def edge_personnel_config(principal: EdgePrincipal = Depends(require_edge_token)):
     if principal.legacy_global: raise HTTPException(403,"Scoped edge credential is required for personnel configuration")
+    # CRM is the personnel source of truth. Refresh before every edge roster response
+    # so a newly registered/updated CRM face reaches the Windows recognizer without
+    # requiring an operator to open the cloud Personnel page first.
+    _refresh_crm_personnel(str(principal.tenant_id), str(principal.shop_id))
     items=[]
     for person in store.list_cloud_people(principal.tenant_id,principal.shop_id):
         faces=store.list_cloud_faces(principal.tenant_id,principal.shop_id,str(person["id"]),include_embedding=True)
@@ -928,8 +932,64 @@ def delete_portal_edge(tenant_id: str, edge_id: str, principal: PortalPrincipal 
     return {"deleted":True,"edge_id":edge_id,"credentials_revoked":True}
 
 
+def _crm_embedding_vector(value: Any) -> list[float] | None:
+    """Extract a numeric face vector from CRM's list or object-shaped embedding payloads."""
+    if isinstance(value, list):
+        if value and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in value):
+            return [float(x) for x in value]
+        for item in value:
+            vector = _crm_embedding_vector(item)
+            if vector:
+                return vector
+        return None
+    if isinstance(value, dict):
+        # CRM versions have returned wrapper objects instead of a bare vector.
+        for key in ("embedding", "faceEmbedding", "vector", "values", "data"):
+            if key in value:
+                vector = _crm_embedding_vector(value.get(key))
+                if vector:
+                    return vector
+        # Last-resort traversal keeps this forward compatible without depending on
+        # metadata field names; only a 512-D numeric vector is accepted by caller.
+        for item in value.values():
+            vector = _crm_embedding_vector(item)
+            if vector:
+                return vector
+    return None
+
+
+def _crm_image_sources(user: dict[str, Any]) -> list[str]:
+    """Normalize CRM faceImages/profileImage values without logging biometric data."""
+    sources: list[str] = []
+    for value in (user.get("faceImages"), user.get("profileImage")):
+        if isinstance(value, str):
+            if value.strip():
+                sources.append(value.strip())
+        elif isinstance(value, list):
+            sources.extend(item.strip() for item in value if isinstance(item, str) and item.strip())
+    return sources
+
+
+def _decode_crm_face_image(source: str) -> bytes | None:
+    """Decode data-URL or raw Base64 CRM face images; remote paths remain display-only."""
+    import base64
+    value = source.strip()
+    if not value:
+        return None
+    if value.startswith("data:image/"):
+        if "," not in value:
+            return None
+        value = value.split(",", 1)[1]
+    elif value.startswith(("http://", "https://", "/")):
+        return None
+    try:
+        return base64.b64decode(value, validate=False)
+    except Exception:
+        return None
+
+
 def _refresh_crm_personnel(tenant_id: str, shop_id: str) -> None:
-    """CRM is authoritative for people; Camera Eye only mirrors identity + AI face data."""
+    """CRM is authoritative for people; Camera Eye mirrors current identity + compatible AI faces."""
     if not crm_client.configured:
         raise HTTPException(503,"SnapKey CRM API token is not configured")
     try:
@@ -937,18 +997,21 @@ def _refresh_crm_personnel(tenant_id: str, shop_id: str) -> None:
     except httpx.HTTPError as exc:
         raise HTTPException(502,f"SnapKey CRM personnel lookup failed: {exc}") from exc
     users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
+    seen_local_ids: set[str] = set()
     for user in users:
         if not isinstance(user,dict) or not str(user.get("id") or "").strip():
             continue
-        uid=str(user["id"])
-        name=str(user.get("name") or user.get("userName") or uid)
+        crm_user_id=str(user["id"])
+        name=str(user.get("name") or user.get("userName") or crm_user_id)
         role=str(user.get("roleName") or ("ADMIN" if user.get("isAdmin") else "WORKER")).upper()
-        employee_code=str(user.get("employeeCode") or user.get("userName") or uid)
-        # Older Camera Eye rows may already own the same employee_code. Reuse that row
-        # instead of violating the unique (tenant, shop, employee_code) constraint.
+        employee_code=str(user.get("employeeCode") or user.get("userName") or crm_user_id)
+
+        # Preserve an existing Camera Eye id for historical attendance/events when the
+        # employee code matches, but always update it from the current CRM identity.
         existing_person=next((p for p in store.list_cloud_people(tenant_id,shop_id)
                               if str(p.get("employee_code") or "").strip().lower()==employee_code.strip().lower()),None)
-        local_person_id=str(existing_person["id"]) if existing_person else uid
+        local_person_id=str(existing_person["id"]) if existing_person else crm_user_id
+        seen_local_ids.add(local_person_id)
         if existing_person:
             store.update_cloud_person(tenant_id,shop_id,local_person_id,{
                 "full_name":name,"role":role,"phone":user.get("phoneNumber"),"email":user.get("email"),
@@ -961,48 +1024,59 @@ def _refresh_crm_personnel(tenant_id: str, shop_id: str) -> None:
                 "phone":user.get("phoneNumber"),"email":user.get("email"),
                 "active":bool(user.get("isActive",True)),
             })
-        # Preserve a pre-existing Camera Eye person id when present, but map it to the
-        # authoritative CRM user id for LoginLogout and future attendance mutations.
         store.upsert_crm_person_mapping({"tenant_id":tenant_id,"shop_id":shop_id,"local_person_id":local_person_id,
-            "crm_user_id":uid,"employee_code":employee_code})
-        uid=local_person_id
-        existing=store.list_cloud_faces(tenant_id,shop_id,uid,include_embedding=True)
+            "crm_user_id":crm_user_id,"employee_code":employee_code})
+
+        existing=store.list_cloud_faces(tenant_id,shop_id,local_person_id,include_embedding=True)
         existing_vectors={json.dumps(face.get("embedding") or [],separators=(",",":")) for face in existing}
-        vectors=user.get("faceEmbeddings") or []
-        if vectors and isinstance(vectors,list) and vectors and isinstance(vectors[0],(int,float)):
-            vectors=[vectors]
-        for vector in vectors:
-            if not isinstance(vector,list) or not vector or not all(isinstance(x,(int,float)) for x in vector):
-                continue
-            # InsightFace buffalo_l recognition embeddings are 512-D. Never mix another model's vector space.
-            if len(vector)!=512:
+
+        # CRM currently returns faceEmbeddings as wrapper objects on some tenants.
+        # Extract only InsightFace-compatible 512-D numeric vectors.
+        raw_vectors=user.get("faceEmbeddings") or []
+        candidates=raw_vectors if isinstance(raw_vectors,list) else [raw_vectors]
+        if isinstance(raw_vectors,list) and raw_vectors and all(isinstance(x,(int,float)) and not isinstance(x,bool) for x in raw_vectors):
+            candidates=[raw_vectors]
+        for candidate in candidates:
+            vector=_crm_embedding_vector(candidate)
+            if not vector or len(vector)!=512:
                 continue
             key=json.dumps(vector,separators=(",",":"))
             if key in existing_vectors:
                 continue
-            store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":uid,"tenant_id":tenant_id,"shop_id":shop_id,
-                "embedding":[float(x) for x in vector],"quality":1.0,"image_path":None})
+            store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":local_person_id,
+                "tenant_id":tenant_id,"shop_id":shop_id,"embedding":vector,"quality":1.0,"image_path":None})
             existing_vectors.add(key)
-        # If CRM has no compatible vector, derive Camera Eye embeddings from every embedded face image.
-        # profileImage is also accepted when CRM returns it as a data URL. Remote relative profile paths remain display-only.
-        image_sources=list(user.get("faceImages") or [])+list(user.get("profileImage") or [])
+
+        # If CRM vectors are unavailable/incompatible, enroll from either data-URL or
+        # raw Base64 faceImages/profileImage. Never log the image contents.
         if not existing_vectors:
-            import base64
-            for source in image_sources:
-                if not isinstance(source,str) or not source.startswith("data:image/") or "," not in source:
+            for source in _crm_image_sources(user):
+                raw_image=_decode_crm_face_image(source)
+                if not raw_image:
                     continue
                 try:
-                    raw_image=base64.b64decode(source.split(",",1)[1],validate=False)
                     image=cv2.imdecode(np.frombuffer(raw_image,np.uint8),cv2.IMREAD_COLOR)
-                    if image is None: continue
+                    if image is None:
+                        continue
                     embedding,quality=_cloud_face_enroller().enroll(image)
+                    if len(embedding)!=512:
+                        continue
                     key=json.dumps(embedding,separators=(",",":"))
-                    if key in existing_vectors: continue
-                    store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":uid,"tenant_id":tenant_id,"shop_id":shop_id,
-                        "embedding":embedding,"quality":quality,"image_path":None})
+                    if key in existing_vectors:
+                        continue
+                    store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":local_person_id,
+                        "tenant_id":tenant_id,"shop_id":shop_id,"embedding":embedding,
+                        "quality":quality,"image_path":None})
                     existing_vectors.add(key)
                 except Exception:
                     continue
+
+    # CRM is authoritative for lifecycle as well. People that disappear from the
+    # current CRM face directory must not remain active recognition candidates.
+    for person in store.list_cloud_people(tenant_id,shop_id):
+        pid=str(person["id"])
+        if pid not in seen_local_ids and bool(person.get("active")):
+            store.update_cloud_person(tenant_id,shop_id,pid,{"active":False})
 
 @app.get("/portal/v1/tenants/{tenant_id}/personnel")
 def portal_personnel(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
