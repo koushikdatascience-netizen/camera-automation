@@ -98,3 +98,30 @@ Manual actions remain explicit user operations and are intentionally separate fr
 ### Security and failure behavior
 
 CRM credentials stay in Camera Eye Cloud and are never sent to the edge or browser. RTSP credentials remain edge-local. Face Base64 is never written to application logs. If CRM face login fails or rejects the request, Camera Eye retains the recognition event for diagnostics but does not create a successful automatic attendance entry.
+
+### Authoritative attendance roster
+
+SnapKey CRM remains the business source of truth for monthly attendance and roster state. Camera Eye events remain the AI audit/evidence layer.
+
+The CRM frontend should read official attendance through Camera Eye:
+
+`GET /portal/v1/tenants/{tenant_id}/attendance/roster?year={YYYY}&month={M}&user_id={CRM_USER_UUID}`
+
+The request uses the normal Camera Eye portal session:
+
+`Authorization: Bearer <CAMERA_EYE_SESSION_TOKEN>`
+
+`user_id` is optional. When omitted or empty, Camera Eye forwards an empty `userId` to the CRM roster endpoint. The CRM response is returned without inventing a second attendance model, preserving fields such as scheduled start/off time, actual start/off time, status, holiday/week-off/leave state, overtime, login/logout location, counter, and remarks.
+
+Camera Eye calls CRM server-side:
+
+`GET /api/UserRoster/GetUsersRoster?year={YYYY}&month={M}&userId={CRM_USER_UUID_OR_EMPTY}`
+
+Do not call the CRM proxy URL directly from Camera Eye browser code and do not expose the CRM bearer token.
+
+Use the two attendance surfaces for different purposes:
+
+- `/attendance/roster` — official CRM attendance/calendar/history.
+- `/attendance` and `/events` — Camera Eye recognition, camera events, evidence, and AI audit trail.
+
+Automatic attendance remains: entrance recognition -> current face crop -> CRM `loginUsingFaceTenant` -> successful CRM attendance -> Camera Eye audit event.
