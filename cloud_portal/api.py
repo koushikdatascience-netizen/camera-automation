@@ -1047,29 +1047,30 @@ def _refresh_crm_personnel(tenant_id: str, shop_id: str) -> None:
                 "tenant_id":tenant_id,"shop_id":shop_id,"embedding":vector,"quality":1.0,"image_path":None})
             existing_vectors.add(key)
 
-        # If CRM vectors are unavailable/incompatible, enroll from either data-URL or
-        # raw Base64 faceImages/profileImage. Never log the image contents.
-        if not existing_vectors:
-            for source in _crm_image_sources(user):
-                raw_image=_decode_crm_face_image(source)
-                if not raw_image:
+        # Also enroll CRM face images with Camera Eye's own InsightFace model. This is
+        # intentionally done even when CRM supplied vectors exist: CRM vector wrappers
+        # may come from a different model/version, while image-derived embeddings are
+        # guaranteed to match the recognizer running on the edge.
+        for source in _crm_image_sources(user):
+            raw_image=_decode_crm_face_image(source)
+            if not raw_image:
+                continue
+            try:
+                image=cv2.imdecode(np.frombuffer(raw_image,np.uint8),cv2.IMREAD_COLOR)
+                if image is None:
                     continue
-                try:
-                    image=cv2.imdecode(np.frombuffer(raw_image,np.uint8),cv2.IMREAD_COLOR)
-                    if image is None:
-                        continue
-                    embedding,quality=_cloud_face_enroller().enroll(image)
-                    if len(embedding)!=512:
-                        continue
-                    key=json.dumps(embedding,separators=(",",":"))
-                    if key in existing_vectors:
-                        continue
-                    store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":local_person_id,
-                        "tenant_id":tenant_id,"shop_id":shop_id,"embedding":embedding,
-                        "quality":quality,"image_path":None})
-                    existing_vectors.add(key)
-                except Exception:
+                embedding,quality=_cloud_face_enroller().enroll(image)
+                if len(embedding)!=512:
                     continue
+                key=json.dumps(embedding,separators=(",",":"))
+                if key in existing_vectors:
+                    continue
+                store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":local_person_id,
+                    "tenant_id":tenant_id,"shop_id":shop_id,"embedding":embedding,
+                    "quality":quality,"image_path":None})
+                existing_vectors.add(key)
+            except Exception:
+                continue
 
     # CRM is authoritative for lifecycle as well. People that disappear from the
     # current CRM face directory must not remain active recognition candidates.
