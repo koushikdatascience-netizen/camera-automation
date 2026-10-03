@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger("camera_eye.crm")
+logger = logging.getLogger("camera_eye.crm")\nlogger.setLevel(logging.INFO)
 
 
 class SnapKeyCrmClient:
