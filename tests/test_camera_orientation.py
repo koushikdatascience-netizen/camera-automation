@@ -54,19 +54,25 @@ def test_shared_pipeline_rotates_before_ai_and_publishes_same_orientation(tmp_pa
     frame = np.zeros((24, 40, 3), dtype=np.uint8)
     frame[:12, :20] = 255
     stop = threading.Event()
+    inference_seen = threading.Event()
     seen, published = [], []
     class Capture:
         def isOpened(self): return True
         def read(self): return True, frame.copy()
         def release(self): pass
     monkeypatch.setattr(manager, '_open_video_capture', lambda *a: Capture())
-    monkeypatch.setattr(manager, '_annotate_tracking_frame', lambda f, *a: seen.append(f.copy()) or f)
+    def annotate(f, *args):
+        seen.append(f.copy())
+        inference_seen.set()
+        return f
+    monkeypatch.setattr(manager, '_annotate_tracking_frame', annotate)
     monkeypatch.setattr(manager, '_draw_tracking_demo_overlay', lambda f, *a: f)
     iterator = manager.iter_tracking_mjpeg(camera, 'fake', stop_event=stop,
         publish_callback=lambda raw, annotated: published.append(cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)))
     try:
         next(iterator)
         assert published[0].shape == (40, 24, 3)
+        assert inference_seen.wait(3), 'Inference worker did not process the rotated frame'
         assert seen and np.array_equal(seen[0], np.rot90(frame, -1))
     finally:
         stop.set(); iterator.close()
