@@ -25,7 +25,7 @@ def test_camera_manager_live_ai_frame_is_copy_and_expires(tmp_path):
     assert manager.get_live_ai_frame("attendance-1", max_age_seconds=3) is None
 
 
-def test_live_view_rejects_non_attendance_camera():
+def test_live_view_supports_general_camera_without_opening_source(monkeypatch):
     class Role:
         value = "GENERAL"
 
@@ -37,12 +37,22 @@ def test_live_view_rejects_non_attendance_camera():
             return Camera()
 
     publisher = LiveKitCameraPublisher(Manager())
-    try:
-        publisher.start(session_id="s1", camera_id="cam-1", url="wss://example.test", token="token")
-    except RuntimeError as exc:
-        assert "attendance cameras" in str(exc)
-    else:
-        raise AssertionError("GENERAL camera should not start a remote live session")
+    started = threading.Event()
+    monkeypatch.setattr(publisher, '_thread_main', lambda *args: started.set())
+    result = publisher.start(session_id="s1", camera_id="cam-1", url="wss://example.test", token="token")
+    assert started.wait(1)
+    assert result['started'] is True
+    publisher.stop('s1')
+
+
+def test_live_view_rejects_missing_camera():
+    class Manager:
+        def get_camera(self, camera_id):
+            return None
+    publisher = LiveKitCameraPublisher(Manager())
+    import pytest
+    with pytest.raises(RuntimeError, match='not found'):
+        publisher.start(session_id='s1', camera_id='missing', url='wss://example.test', token='token')
 
 
 def test_live_view_start_does_not_open_camera_source(monkeypatch):

@@ -126,11 +126,13 @@ def test_crm_portal_session_is_hashed_and_scope_bound(tmp_path, monkeypatch):
 
 
 
-def test_crm_attendance_uses_verified_login_logout_contract(tmp_path, monkeypatch):
+def test_crm_attendance_deployed_payload_and_logout_opt_in(tmp_path, monkeypatch):
  monkeypatch.setenv('SNAPKEY_PORTAL_DB',str(tmp_path/'crm-attendance.db'))
  monkeypatch.delenv('SNAPKEY_DATABASE_URL',raising=False)
  monkeypatch.setenv('SNAPKEY_ENV','development')
  monkeypatch.setenv('SNAPKEY_CRM_ATTENDANCE_ENABLED','1')
+ monkeypatch.delenv('SNAPKEY_CRM_AUTO_LOGIN_ENABLED',raising=False)
+ monkeypatch.delenv('SNAPKEY_CRM_AUTO_LOGOUT_ENABLED',raising=False)
  import importlib
  import cloud_portal.api as api
  importlib.reload(api)
@@ -139,23 +141,27 @@ def test_crm_attendance_uses_verified_login_logout_contract(tmp_path, monkeypatc
   'crm_user_id':'crm-user-1','employee_code':'EMP-1','break_master_id':None,
  })
  calls=[]
- api.crm_client.token='test-token'
+ monkeypatch.setattr(api.crm_client,'token','test-token')
  monkeypatch.setattr(api.crm_client,'login_logout',lambda payload: calls.append(payload) or {'ok':True})
  base={'schema_version':'edge.event.v1','tenant_id':'tenant-a','shop_id':'shop1','site_id':'site-1',
        'edge_id':'edge-1','event_id':'evt-entry','event_type':'ATTENDANCE_ENTRY',
        'event_time':'2026-09-28T12:03:40.692Z','payload':{'person_id':'person-1'}}
  api._deliver_crm_attendance_event(base)
  assert calls[-1]=={
-  'userId':'crm-user-1','date':'2026-09-28T12:03:40.692Z',
-  'actualStartTime':'2026-09-28T12:03:40.692Z','actualOffTime':'',
-  'loginLocation':'Camera Eye - site-1','logoutLocation':'',
+  'userId':'crm-user-1','date':'2026-09-28',
+  'actualStartTime':'12:03:40','actualOffTime':None,
+  'loginLocation':'Camera Eye - site-1','logoutLocation':None,
  }
  exit_event={**base,'event_id':'evt-exit','event_type':'ATTENDANCE_EXIT','event_time':'2026-09-28T18:15:20.000Z'}
  api._deliver_crm_attendance_event(exit_event)
+ assert len(calls)==1, 'Automatic logout must remain disabled by default'
+ monkeypatch.setenv('SNAPKEY_CRM_AUTO_LOGOUT_ENABLED','1')
+ api._deliver_crm_attendance_event(exit_event)
+ assert len(calls)==2
  assert calls[-1]=={
-  'userId':'crm-user-1','date':'2026-09-28T18:15:20.000Z',
-  'actualStartTime':'','actualOffTime':'2026-09-28T18:15:20.000Z',
-  'loginLocation':'','logoutLocation':'Camera Eye - site-1',
+  'userId':'crm-user-1','date':'2026-09-28',
+  'actualStartTime':None,'actualOffTime':'18:15:20',
+  'loginLocation':None,'logoutLocation':'Camera Eye - site-1',
  }
 
 

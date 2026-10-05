@@ -1,0 +1,13 @@
+# Only application inputs enter the cloud image build context.
+**
+!Dockerfile.cloud
+!requirements-cloud.txt
+!camera_service/
+!camera_service/**
+!cloud_portal/
+!cloud_portal/**
+!tools/
+!tools/**
+**/__pycache__/
+**/*.pyc
+**/*.pyo
