@@ -168,6 +168,15 @@ def main() -> None:
         return
 
     from camera_service.api import app
+    # The updater is deliberately started only for frozen Windows builds. It uses
+    # the same scoped edge credential as normal cloud synchronization.
+    try:
+        from camera_service.api import cloud_client
+        from camera_service.updater import EdgeUpdater
+        updater = EdgeUpdater(cloud_client, interval_seconds=float(os.environ.get("CAMERA_UPDATE_INTERVAL_SECONDS", "1800")))
+        updater.start()
+    except Exception as exc:
+        print(f"Updater startup skipped: {exc}")
 
     print(f"Starting SnapKey Vision AI on http://{host}:{port}")
 
