@@ -130,3 +130,25 @@ class CloudSyncClient:
         response=requests.post(self.config.base_url.rstrip("/")+f"/edge/v1/commands/{command_id}/result",
             json=result,headers={"Authorization":f"Bearer {self.config.api_token}"},timeout=self.config.timeout_seconds)
         response.raise_for_status()
+
+    def latest_update(self, current_build_id: str) -> dict[str, Any]:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response=requests.get(self.config.base_url.rstrip("/")+"/edge/v1/updates/latest",
+            params={"current_build_id":current_build_id},headers={"Authorization":f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds)
+        response.raise_for_status()
+        return response.json()
+
+    def download_update(self, build_id: str, destination: Path) -> None:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response=requests.get(self.config.base_url.rstrip("/")+f"/edge/v1/updates/{build_id}/download",
+            headers={"Authorization":f"Bearer {self.config.api_token}"},timeout=max(120.0,float(self.config.timeout_seconds)),stream=True)
+        response.raise_for_status()
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        temporary=destination.with_suffix(destination.suffix+".part")
+        with temporary.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=1024*1024):
+                if chunk: output.write(chunk)
+        temporary.replace(destination)
