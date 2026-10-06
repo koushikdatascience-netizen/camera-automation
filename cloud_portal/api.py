@@ -4,7 +4,8 @@ import base64
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 from dataclasses import dataclass
 import hashlib
@@ -24,6 +25,8 @@ from pydantic import BaseModel, Field
 from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
 from cloud_portal.crm_client import crm_client
+from cloud_portal.attendance_policy import AttendancePolicy
+from cloud_portal.notifications import NotificationService
 from camera_service.face_service import FaceService
 
 logger = logging.getLogger("camera_eye.portal")
@@ -41,6 +44,7 @@ def build_portal_store():
 
 
 store = build_portal_store()
+notification_service = NotificationService()
 app = FastAPI(title="SnapKey Vision AI Portal")
 if os.getenv("SNAPKEY_ENABLE_CLOUD_INFERENCE", "0").strip() == "1":
     from cloud_portal.inference_api import router as inference_router
@@ -189,6 +193,17 @@ class AttendanceStationActionRequest(BaseModel):
     edge_id: str
     recognition_event_id: str
     action: str
+
+
+class AttendancePolicyRequest(BaseModel):
+    grace_period_minutes: int = Field(default=15, ge=1, le=240)
+    allowed_break_minutes: int = Field(default=60, ge=0, le=480)
+    total_working_minutes: int = Field(default=480, ge=1, le=1440)
+    max_logoff_time: str = Field(default="21:30", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    absence_auto_logout_enabled: bool = True
+    timezone: str = "Asia/Kolkata"
+    email_recipients: list[str] = Field(default_factory=list, max_length=20)
+    whatsapp_recipients: list[str] = Field(default_factory=list, max_length=20)
 
 
 class AttendanceLiveStartRequest(BaseModel):
@@ -426,6 +441,75 @@ def create_edge_activation_code(tenant_id: str, payload: EdgeActivationCodeReque
         "expires_at": expires.isoformat(),
     })
     return {"activationCode": code, "expiresAt": expires.isoformat(), "shopCode": principal.shop_id}
+
+
+def _require_crm_integration(request: Request) -> None:
+    if not _crm_integration_key_valid(request.headers.get("X-CRM-Integration-Key")):
+        raise HTTPException(401, "Invalid CRM integration key")
+
+
+@app.put("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance-policy")
+def integration_put_attendance_policy(tenant_id: str, shop_id: str, payload: AttendancePolicyRequest, request: Request):
+    _require_crm_integration(request)
+    try:
+        ZoneInfo(payload.timezone)
+    except Exception as exc:
+        raise HTTPException(400, "Invalid IANA timezone") from exc
+    policy=payload.model_dump()
+    saved=store.upsert_attendance_policy(tenant_id,shop_id,policy)
+    logger.info(
+        "ATTENDANCE_POLICY_UPDATED tenant_id=%s shop_id=%s grace=%s break=%s working=%s max_logoff=%s auto_logout=%s",
+        tenant_id,shop_id,payload.grace_period_minutes,payload.allowed_break_minutes,
+        payload.total_working_minutes,payload.max_logoff_time,payload.absence_auto_logout_enabled,
+    )
+    return {"policy":saved}
+
+
+@app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance-policy")
+def integration_get_attendance_policy(tenant_id: str, shop_id: str, request: Request):
+    _require_crm_integration(request)
+    return {"policy":store.attendance_policy(tenant_id,shop_id)}
+
+
+@app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/daily-activity")
+def integration_daily_activity(tenant_id: str, shop_id: str, crm_user_id: str, day: date, request: Request):
+    _require_crm_integration(request)
+    raw_policy=store.attendance_policy(tenant_id,shop_id)
+    zone=ZoneInfo(str(raw_policy.get("timezone") or "Asia/Kolkata"))
+    start=datetime.combine(day,time.min,tzinfo=zone).astimezone(timezone.utc)
+    end=(datetime.combine(day,time.min,tzinfo=zone)+timedelta(days=1)).astimezone(timezone.utc)
+    items=store.list_attendance_activity(tenant_id,shop_id,crm_user_id,start,end)
+    return {"tenant_id":tenant_id,"shop_id":shop_id,"crm_user_id":crm_user_id,
+            "date":day.isoformat(),"timezone":str(zone),"items":items}
+
+
+def _notify_cloud_event(envelope: dict[str, Any]) -> None:
+    event_type=str(envelope.get("event_type") or "")
+    alert_types={
+        "UNKNOWN_INCIDENT","UNKNOWN_INSIDE_ALERT","CROWD_ALERT","LONG_BREAK_ALERT",
+        "AUTO_CHECK_OUT","MAX_LOGOFF_AUTO_CHECK_OUT","ATTENDANCE_POLICY_VIOLATION",
+    }
+    if event_type not in alert_types:
+        return
+    tenant_id=str(envelope.get("tenant_id") or "")
+    shop_id=str(envelope.get("shop_id") or "")
+    if not tenant_id or not shop_id or not hasattr(store,"attendance_policy"):
+        return
+    policy=store.attendance_policy(tenant_id,shop_id)
+    payload=envelope.get("payload") or {}
+    metadata=payload.get("metadata") or {}
+    reason=str(metadata.get("reason") or metadata.get("reason_code") or event_type)
+    when=str(envelope.get("event_time") or "")
+    camera=str(envelope.get("camera_id") or payload.get("camera_id") or "-")
+    body=(f"Camera Eye alert: {event_type}\nTenant: {tenant_id}\nShop: {shop_id}\n"
+          f"Camera: {camera}\nTime: {when}\nReason: {reason}")
+    email_result=notification_service.send_email(
+        policy.get("email_recipients") or [],f"Camera Eye - {event_type}",body)
+    whatsapp_results=notification_service.send_whatsapp_text(
+        policy.get("whatsapp_recipients") or [],body)
+    logger.info("ALERT_DELIVERY event_id=%s event_type=%s email=%s whatsapp_sent=%s whatsapp_total=%s",
+        str(envelope.get("event_id") or ""),event_type,email_result.delivered,
+        sum(1 for item in whatsapp_results if item.delivered),len(whatsapp_results))
 
 
 @app.get("/health")
@@ -1003,6 +1087,9 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
     # downstream CRM mutation; retries of the same event_id are acknowledged without
     # scheduling another login/logout/break call.
     if result.get("inserted", True):
+        # Alert delivery is cloud-side and best-effort; edge event ingestion remains
+        # durable even when SMTP or WhatsApp providers are temporarily unavailable.
+        background_tasks.add_task(_notify_cloud_event,envelope)
         if str(envelope.get("event_type") or "")=="PERSON_RECOGNIZED":
             logger.warning(
                 "AUTO_ATTENDANCE_QUEUED event_id=%s tenant_code=%s shop_id=%s edge_id=%s camera_id=%s",
