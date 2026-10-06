@@ -18,7 +18,10 @@ cat > "$work/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$MOCK_DIR/docker.log"
-if [[ "$1" == load ]]; then cat >/dev/null; exit; fi
+if [[ "$1" == load ]]; then
+  if [[ "${2:-}" == -i ]]; then test -s "${3:?missing image archive}"; else cat >/dev/null; fi
+  exit
+fi
 if [[ "$1" == image ]]; then
   if [[ "$*" == *org.opencontainers.image.revision* ]]; then
     [[ ${SCENARIO:-} != mismatch ]] && echo "$REVISION" || echo wrong
