@@ -30,6 +30,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 from typing import Literal
 import json
+import logging
 import os
 import requests
 import shutil
@@ -40,6 +41,8 @@ import time
 import socket
 import sys
 from pathlib import Path
+
+logger = logging.getLogger("camera_eye.api")
 
 config=load_config()
 person_model_registry=PersonModelRegistry(config)
@@ -61,6 +64,7 @@ def _activate_cloud_person_model() -> Path | None:
     global person_model_selection
     path = model_manager.active_path("person-detection")
     if not path:
+        logger.info("No verified cloud person model is active; bundled runtime remains %s", config.yolo_model)
         return None
     config.yolo_model = str(path)
     person_model_selection = {
@@ -76,7 +80,23 @@ def _activate_cloud_person_model() -> Path | None:
         camera_manager._inference_backends.clear()
     except Exception:
         pass
+    logger.info("Activated verified cloud person model path=%s version=%s", path, person_model_selection.get("version"))
     return path
+
+def _provision_cloud_models(reason: str = "startup") -> dict:
+    """Provision cloud models without hiding failures; retain verified cache on failure."""
+    logger.info("Cloud model provisioning requested reason=%s enabled=%s", reason, cloud_client.enabled())
+    try:
+        status = model_manager.provision()
+        active = _activate_cloud_person_model()
+        logger.info("Cloud model provisioning result reason=%s ready=%s active_person_model=%s", reason, status.get("ready"), active)
+        return status
+    except Exception as exc:
+        model_manager.last_error = f"{type(exc).__name__}: {exc}"
+        model_manager.last_stage = "failed"
+        logger.exception("Cloud model provisioning failed reason=%s", reason)
+        _activate_cloud_person_model()
+        return model_manager.status()
 
 # Prefer a previously verified cached cloud model on offline/restart startup.
 _activate_cloud_person_model()
@@ -189,12 +209,7 @@ async def lifespan(app:FastAPI):
     # Activated machines refresh the manifest at startup; if the cloud is
     # unavailable, keep using the last SHA-verified cached model.
     if cloud_client.enabled():
-        try:
-            model_manager.provision()
-            _activate_cloud_person_model()
-        except Exception as exc:
-            model_manager.last_error = str(exc)
-            _activate_cloud_person_model()
+        _provision_cloud_models("startup")
     store.configure_event_scope(config.edge.tenant_id, config.edge.company_code, config.edge.shop_id, config.edge.edge_id)
     for camera in config.cameras:
         if camera.enabled and not camera_manager.get_camera(camera.camera_id):
@@ -453,6 +468,16 @@ def _save_face_preview(person_id: str, image) -> str | None:
     except Exception:
         return None
     return None
+
+@app.get('/api/v1/models/status')
+def edge_model_status():
+    return model_manager.status()
+
+@app.post('/api/v1/models/provision')
+def provision_edge_models():
+    if not cloud_client.enabled():
+        raise HTTPException(409, "Cloud sync is not configured")
+    return _provision_cloud_models("manual_api")
 
 @app.get('/health')
 def health():
