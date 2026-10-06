@@ -182,11 +182,19 @@ jobs:
           printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/key"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
           chmod 600 "$ssh_dir/key" "$ssh_dir/known_hosts"
+          # Ship the tested image and the compose definition from the same tested commit.
+          # The remote deploy handler installs the compose file atomically while preserving
+          # the server-owned .env and named volumes.
+          bundle="$RUNNER_TEMP/camera-eye-release.tar.gz"
+          mkdir -p "$RUNNER_TEMP/camera-eye-release"
+          cp docker-compose.cloud.yml "$RUNNER_TEMP/camera-eye-release/docker-compose.cloud.yml"
+          cp "$RUNNER_TEMP/camera-eye-image.tar.gz" "$RUNNER_TEMP/camera-eye-release/image.tar.gz"
+          tar -C "$RUNNER_TEMP/camera-eye-release" -czf "$bundle" docker-compose.cloud.yml image.tar.gz
           ssh -T -i "$ssh_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ssh_dir/known_hosts" \
             -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "$DEPLOY_USER@$DEPLOY_HOST" "deploy $GITHUB_SHA" < "$RUNNER_TEMP/camera-eye-image.tar.gz"
-          echo "Deployed tested commit $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+            "$DEPLOY_USER@$DEPLOY_HOST" "deploy $GITHUB_SHA" < "$bundle"
+          echo "Deployed tested commit $GITHUB_SHA with its compose definition" >> "$GITHUB_STEP_SUMMARY"
 
   publish-edge-update:
     needs: [windows-installer, deploy]
