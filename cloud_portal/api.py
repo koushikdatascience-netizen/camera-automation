@@ -1004,6 +1004,12 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     if when.tzinfo is None:
         when=when.replace(tzinfo=timezone.utc)
     when=when.astimezone(timezone.utc)
+    if hasattr(store,"touch_attendance_presence"):
+        store.touch_attendance_presence(
+            tenant_id=tenant_id,shop_id=shop_id,local_person_id=person_id,
+            crm_user_id=str(mapping["crm_user_id"]),seen_at=when,camera_id=camera_id,
+            recognition_event_id=event_id,checked_in=None,
+        )
     # This is duplicate protection, not a recognition debounce: the first valid
     # recognition is sent to CRM immediately, then further successful logins for
     # the same person/day are suppressed.
@@ -1060,6 +1066,19 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         return
     logger.info("CRM_AUTO_ATTENDANCE_SUCCESS person_id=%s crm_user_id=%s camera_id=%s",
         person_id,authenticated_user_id,camera_id)
+    if hasattr(store,"touch_attendance_presence"):
+        store.touch_attendance_presence(
+            tenant_id=tenant_id,shop_id=shop_id,local_person_id=person_id,
+            crm_user_id=authenticated_user_id,seen_at=when,camera_id=camera_id,
+            recognition_event_id=str(envelope.get("event_id") or ""),checked_in=True,
+        )
+        store.record_attendance_activity({
+            "id":"activity-"+secrets.token_urlsafe(12),"tenant_id":tenant_id,"shop_id":shop_id,
+            "crm_user_id":authenticated_user_id,"local_person_id":person_id,
+            "activity_type":"CHECK_IN","occurred_at":when,"source":"CAMERA_EYE",
+            "camera_id":camera_id,"reason_code":"FACE_RECOGNITION",
+            "metadata":{"recognition_event_id":str(envelope.get("event_id") or "")},
+        })
     event_id="auto-attendance-"+secrets.token_urlsafe(12)
     store.record_portal_event({"event_id":event_id,"tenant_id":tenant_id,
         "company_code":envelope.get("company_code"),"shop_id":shop_id,
@@ -1733,11 +1752,65 @@ def issue_license(request: LicenseIssueRequest, http_request: Request):
     )
 
 
+def _evaluate_absence_checkouts() -> None:
+    """Evaluate durable presence after heartbeats; fail closed on camera/CRM uncertainty."""
+    if not hasattr(store,"claim_due_absence_checkouts"):
+        return
+    now=datetime.now(timezone.utc)
+    for presence in store.claim_due_absence_checkouts(now,limit=50):
+        tenant_id=str(presence["tenant_id"]); shop_id=str(presence["shop_id"])
+        person_id=str(presence["local_person_id"]); crm_user_id=str(presence["crm_user_id"])
+        try:
+            if not store.attendance_camera_coverage_healthy(tenant_id,shop_id,now):
+                logger.warning("AUTO_CHECKOUT_DEFERRED tenant_id=%s shop_id=%s person_id=%s reason=camera_coverage_unhealthy",
+                               tenant_id,shop_id,person_id)
+                store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
+                continue
+            # Automatic absence checkout has no current face frame by definition.
+            # Use the configured CRM service credential only after proving that its
+            # roster scope overlaps this tenant. A cross-tenant token fails closed.
+            _assert_crm_service_token_scope(tenant_id)
+            result=crm_client.login_logout({
+                "userId":crm_user_id,
+                "date":now.date().isoformat(),
+                "actualOffTime":now.strftime("%H:%M:%S"),
+            })
+            if not _crm_mutation_succeeded(result):
+                raise RuntimeError("CRM rejected automatic checkout")
+            store.complete_presence_checkout(tenant_id,shop_id,person_id,True)
+            event_id="auto-checkout-"+secrets.token_urlsafe(12)
+            last_seen=presence["last_seen_at"]
+            store.record_attendance_activity({
+                "id":"activity-"+secrets.token_urlsafe(12),"tenant_id":tenant_id,"shop_id":shop_id,
+                "crm_user_id":crm_user_id,"local_person_id":person_id,
+                "activity_type":"CHECK_OUT","occurred_at":now,"source":"CAMERA_EYE",
+                "camera_id":presence.get("last_camera_id"),"reason_code":"ABSENCE_GRACE_EXCEEDED",
+                "metadata":{"last_seen_at":last_seen.isoformat() if hasattr(last_seen,"isoformat") else str(last_seen),
+                            "last_recognition_event_id":presence.get("last_recognition_event_id")},
+            })
+            alert={"event_id":event_id,"tenant_id":tenant_id,"shop_id":shop_id,"site_id":shop_id,
+                   "edge_id":"cloud-policy","camera_id":presence.get("last_camera_id"),
+                   "event_type":"AUTO_CHECK_OUT","event_time":now.isoformat(),
+                   "payload":{"person_id":person_id,"metadata":{"crm_user_id":crm_user_id,
+                   "reason_code":"ABSENCE_GRACE_EXCEEDED","last_recognition_event_id":presence.get("last_recognition_event_id")}}}
+            store.record_portal_event(alert)
+            _notify_cloud_event(alert)
+            logger.info("AUTO_CHECKOUT_SUCCESS tenant_id=%s shop_id=%s person_id=%s crm_user_id=%s",
+                        tenant_id,shop_id,person_id,crm_user_id)
+        except Exception:
+            store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
+            logger.exception("AUTO_CHECKOUT_FAILED tenant_id=%s shop_id=%s person_id=%s",
+                             tenant_id,shop_id,person_id)
+
+
 @app.post("/edge/v1/heartbeat")
-def edge_heartbeat(payload: dict[str, Any], principal: EdgePrincipal = Depends(require_edge_token)):
+def edge_heartbeat(payload: dict[str, Any], background_tasks: BackgroundTasks,
+                   principal: EdgePrincipal = Depends(require_edge_token)):
     required = ["tenant_id", "site_id", "edge_id", "status"]
     missing = [key for key in required if payload.get(key) is None]
     if missing:
         raise HTTPException(400, {"missing": missing})
     _enforce_edge_scope(principal, payload)
-    return store.record_heartbeat(payload)
+    result=store.record_heartbeat(payload)
+    background_tasks.add_task(_evaluate_absence_checkouts)
+    return result
