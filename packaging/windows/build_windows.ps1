@@ -86,10 +86,11 @@ try {
         $AppDistDir = Split-Path $ExpectedExePath -Parent
         $InternalDir = Join-Path $AppDistDir "_internal"
         $RequiredFiles = @(
-            (Join-Path $InternalDir "yolo11m.pt"),
             (Join-Path $InternalDir "config.example.yaml")
         )
         $OptionalFiles = @(
+            (Join-Path $InternalDir "yolo11m.pt"),
+            (Join-Path $InternalDir "yolo26n.pt"),
             (Join-Path $InternalDir "kaggle-model\scissors_yolo11m_960.pt")
         )
 
@@ -104,7 +105,7 @@ try {
                 Write-Warning "Optional packaged file missing: $OptionalFile"
             }
         }
-        Write-Host "Verified bundled yolo11m.pt and default config."
+        Write-Host "Verified required default config; optional model assets are reported when absent."
 
         # Create start/stop/open scripts inside the installable app folder
         $StartScriptContent = @"
