@@ -133,9 +133,23 @@ class EdgeUpdater:
             f"version={manifest.get('version')}\nbuild_id={latest}\nsha256={actual}\n",
             encoding="utf-8",
         )
+        # Pass the installer path as a named PowerShell parameter instead of
+        # relying on $args[0] after -Command. This keeps paths with spaces safe
+        # and makes the elevation hand-off deterministic.
+        ps_script = (
+            "param([string]$Installer) "
+            "Start-Process -FilePath $Installer "
+            "-ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS' "
+            "-Verb RunAs"
+        )
         command = [
-            "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
-            "Start-Process -FilePath $args[0] -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS' -Verb RunAs",
+            "powershell.exe",
+            "-NoProfile",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            ps_script,
+            "-Installer",
             str(installer),
         ]
         subprocess.Popen(command, close_fds=True)
