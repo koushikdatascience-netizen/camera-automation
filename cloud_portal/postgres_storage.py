@@ -128,6 +128,15 @@ class PostgresPortalStore:
                 created_at TIMESTAMPTZ NOT NULL)""",
             """CREATE INDEX IF NOT EXISTS idx_attendance_activity_daily
                 ON attendance_activity(tenant_id,shop_id,crm_user_id,occurred_at DESC)""",
+            """CREATE TABLE IF NOT EXISTS attendance_presence(
+                tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, local_person_id TEXT NOT NULL,
+                crm_user_id TEXT NOT NULL, checked_in BOOLEAN NOT NULL DEFAULT FALSE,
+                on_break BOOLEAN NOT NULL DEFAULT FALSE, last_seen_at TIMESTAMPTZ NOT NULL,
+                last_camera_id TEXT, last_recognition_event_id TEXT,
+                checkout_claimed_at TIMESTAMPTZ, updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(tenant_id,shop_id,local_person_id))""",
+            """CREATE INDEX IF NOT EXISTS idx_attendance_presence_due
+                ON attendance_presence(checked_in,on_break,last_seen_at)""",
         ]
         with self._conn() as conn:
             for statement in statements:
@@ -650,3 +659,90 @@ class PostgresPortalStore:
             item["metadata"]=item.pop("metadata_json") or {}
             result.append(item)
         return result
+
+
+    def touch_attendance_presence(self, *, tenant_id: str, shop_id: str, local_person_id: str,
+                                  crm_user_id: str, seen_at: datetime, camera_id: str,
+                                  recognition_event_id: str, checked_in: bool | None = None) -> dict[str, Any]:
+        now=self.now()
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO attendance_presence(
+                tenant_id,shop_id,local_person_id,crm_user_id,checked_in,on_break,last_seen_at,
+                last_camera_id,last_recognition_event_id,checkout_claimed_at,updated_at)
+                VALUES(:tenant,:shop,:person,:crm_user,:checked_in,FALSE,:seen,:camera,:event,NULL,:now)
+                ON CONFLICT(tenant_id,shop_id,local_person_id) DO UPDATE SET
+                crm_user_id=EXCLUDED.crm_user_id,
+                checked_in=CASE WHEN :set_checked_in THEN :checked_in ELSE attendance_presence.checked_in END,
+                last_seen_at=GREATEST(attendance_presence.last_seen_at,EXCLUDED.last_seen_at),
+                last_camera_id=EXCLUDED.last_camera_id,
+                last_recognition_event_id=EXCLUDED.last_recognition_event_id,
+                checkout_claimed_at=NULL,updated_at=:now"""),{
+                    "tenant":tenant_id,"shop":shop_id,"person":local_person_id,"crm_user":crm_user_id,
+                    "checked_in":bool(checked_in),"set_checked_in":checked_in is not None,
+                    "seen":seen_at,"camera":camera_id,"event":recognition_event_id,"now":now,
+                })
+            row=conn.execute(text("""SELECT * FROM attendance_presence
+                WHERE tenant_id=:tenant AND shop_id=:shop AND local_person_id=:person"""),
+                {"tenant":tenant_id,"shop":shop_id,"person":local_person_id}).mappings().one()
+        return dict(row)
+
+    def set_attendance_presence_break(self, tenant_id: str, shop_id: str, local_person_id: str, on_break: bool) -> None:
+        with self._conn() as conn:
+            conn.execute(text("""UPDATE attendance_presence SET on_break=:on_break,updated_at=:now
+                WHERE tenant_id=:tenant AND shop_id=:shop AND local_person_id=:person"""),{
+                "on_break":bool(on_break),"now":self.now(),"tenant":tenant_id,"shop":shop_id,"person":local_person_id})
+
+    def claim_due_absence_checkouts(self, now: datetime, limit: int = 50) -> list[dict[str, Any]]:
+        # SKIP LOCKED makes this safe when more than one API worker runs the evaluator.
+        with self._conn() as conn:
+            rows=conn.execute(text("""WITH due AS (
+                    SELECT p.tenant_id,p.shop_id,p.local_person_id
+                    FROM attendance_presence p
+                    JOIN attendance_policies ap ON ap.tenant_id=p.tenant_id AND ap.shop_id=p.shop_id
+                    WHERE p.checked_in=TRUE AND p.on_break=FALSE
+                      AND ap.absence_auto_logout_enabled=TRUE
+                      AND p.last_seen_at + (ap.grace_period_minutes * INTERVAL '1 minute') <= :now
+                      AND (p.checkout_claimed_at IS NULL OR p.checkout_claimed_at < :retry_before)
+                    ORDER BY p.last_seen_at
+                    FOR UPDATE OF p SKIP LOCKED
+                    LIMIT :limit
+                )
+                UPDATE attendance_presence p SET checkout_claimed_at=:now,updated_at=:now
+                FROM due
+                WHERE p.tenant_id=due.tenant_id AND p.shop_id=due.shop_id
+                  AND p.local_person_id=due.local_person_id
+                RETURNING p.*"""),{
+                    "now":now,"retry_before":now-timedelta(minutes=5),"limit":max(1,min(200,int(limit)))
+                }).mappings().all()
+        return [dict(row) for row in rows]
+
+    def complete_presence_checkout(self, tenant_id: str, shop_id: str, local_person_id: str, success: bool) -> None:
+        with self._conn() as conn:
+            if success:
+                conn.execute(text("""UPDATE attendance_presence SET checked_in=FALSE,on_break=FALSE,
+                    checkout_claimed_at=NULL,updated_at=:now
+                    WHERE tenant_id=:tenant AND shop_id=:shop AND local_person_id=:person"""),{
+                    "now":self.now(),"tenant":tenant_id,"shop":shop_id,"person":local_person_id})
+            else:
+                conn.execute(text("""UPDATE attendance_presence SET checkout_claimed_at=NULL,updated_at=:now
+                    WHERE tenant_id=:tenant AND shop_id=:shop AND local_person_id=:person"""),{
+                    "now":self.now(),"tenant":tenant_id,"shop":shop_id,"person":local_person_id})
+
+    def attendance_camera_coverage_healthy(self, tenant_id: str, shop_id: str, now: datetime,
+                                           heartbeat_max_age_seconds: int = 60) -> bool:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT h.received_at,h.status_json
+                FROM edge_heartbeats h
+                WHERE h.tenant_id=:tenant AND h.shop_id=:shop
+                ORDER BY h.received_at DESC"""),{"tenant":tenant_id,"shop":shop_id}).mappings().all()
+        for row in rows:
+            received=row["received_at"]
+            if received.tzinfo is None:
+                received=received.replace(tzinfo=timezone.utc)
+            if (now-received.astimezone(timezone.utc)).total_seconds()>heartbeat_max_age_seconds:
+                continue
+            status=row["status_json"] if isinstance(row["status_json"],dict) else json.loads(row["status_json"])
+            for camera in status.get("cameras") or []:
+                if str(camera.get("camera_role") or "").upper()=="ENTRANCE_EXIT" and bool(camera.get("enabled")) and bool(camera.get("online")):
+                    return True
+        return False
