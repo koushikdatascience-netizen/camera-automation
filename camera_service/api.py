@@ -25,6 +25,7 @@ from camera_service.object_security.confirmation import TemporalConfirmation
 from camera_service.object_security.roi import apply_roi, map_box_from_offset
 from camera_service.object_security.tiling import suppress_duplicates, tiles_for_shape
 from camera_service.person_model_registry import PersonModelRegistry
+from camera_service.model_manager import EdgeModelManager
 from typing import Optional
 from pydantic import BaseModel, Field
 from typing import Literal
@@ -53,6 +54,7 @@ object_security_registry=ObjectSecurityModelRegistry(config.object_security.mode
 object_security_detector=ObjectSecurityDetector()
 object_security_alerter=ObjectSecurityAlerter()
 cloud_client=CloudSyncClient(config.cloud_sync)
+model_manager=EdgeModelManager(cloud_client)
 alert_dispatcher=AlertDispatcher(config.alerts)
 license_manager=LicenseManager(config.edge)
 sync_worker=None
@@ -448,6 +450,7 @@ def health():
         'camera_workers':supervisor.status(),
         'cloud_sync':sync_worker.status(),
         'license':{'active':license_manager.status().active,'mode':license_manager.status().mode},
+        'models':model_manager.status(),
         'object_security_enabled':config.object_security.enabled or config.features.object_security,
         'object_security_ready':bool(active_model and active_model.get("has_model")),
         'object_security_model_loaded':object_security_detector._model is not None,
@@ -461,6 +464,8 @@ def ready():
     return {
         'status':'ready',
         'camera_supervisor_running':supervisor.is_running(),
+        'models':model_manager.status(),
+        'models_ready':model_manager.status().get('ready', True),
         'object_security_ready':bool(active_model and active_model.get("has_model")),
     }
 
@@ -556,6 +561,11 @@ def activate_edge(request: EdgeActivationRequest):
         license_status = license_manager.install_signed_license(activation["license"], activation["signature"])
         store.configure_event_scope(config.edge.tenant_id, config.edge.company_code, config.edge.shop_id, config.edge.edge_id)
         sync_result = sync_worker.run_once()
+        try:
+            model_status = model_manager.provision()
+        except Exception as model_exc:
+            model_manager.last_error = str(model_exc)
+            model_status = model_manager.status()
         return {
             "ok": True,
             "message": activation.get("message", "Activated successfully"),
@@ -569,6 +579,7 @@ def activate_edge(request: EdgeActivationRequest):
             },
             "license": license_status.model_dump(),
             "sync": sync_result.model_dump(),
+            "models": model_status,
         }
     except requests.HTTPError as exc:
         raise HTTPException(400, "Cloud activation was rejected. Verify the one-time code and server configuration.")
