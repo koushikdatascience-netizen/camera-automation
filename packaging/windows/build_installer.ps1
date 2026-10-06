@@ -12,6 +12,19 @@ $BuildScript = Join-Path $ProjectRoot "packaging\windows\build_windows.ps1"
 $InstallerScript = Join-Path $ProjectRoot "packaging\windows\CameraAutomationInstaller.iss"
 $ExpectedAppExe = Join-Path $ProjectRoot "dist\SnapKeyVisionAI\SnapKeyVisionAI.exe"
 $ExpectedInstaller = Join-Path $ProjectRoot "dist\installer\MadhushalaCameraAISetup.exe"
+$BuildInfo = Join-Path $ProjectRoot "camera_service\build_info.py"
+
+# CI releases must embed immutable version/build metadata so the updater can
+# distinguish the installed build from the published registry entry.
+if ($env:GITHUB_SHA -and $env:GITHUB_RUN_NUMBER) {
+    $EdgeVersion = "1.0.$($env:GITHUB_RUN_NUMBER)"
+    $BuildInfoText = '"""Build metadata stamped by CI before packaging the Windows edge release."""' + [Environment]::NewLine +
+        ('VERSION = "' + $EdgeVersion + '"') + [Environment]::NewLine +
+        ('BUILD_ID = "' + $env:GITHUB_SHA + '"') + [Environment]::NewLine
+    Set-Content -Path $BuildInfo -Value $BuildInfoText -Encoding UTF8
+    $env:CAMERA_EDGE_VERSION = $EdgeVersion
+    Write-Host "Stamped Camera Eye build metadata: $EdgeVersion / $($env:GITHUB_SHA)"
+}
 
 Write-Host "Building application package..."
 & $BuildScript -CleanBuild $CleanBuild
