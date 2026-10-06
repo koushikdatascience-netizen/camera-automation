@@ -1880,6 +1880,105 @@ async def publish_edge_update(request: Request, file: UploadFile = File(...),
         temporary.unlink(missing_ok=True)
 
 
+
+def _model_root() -> Path:
+    root = Path(os.getenv("SNAPKEY_MODEL_ROOT", "/app/data/models")).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _model_catalog() -> dict[str, Any]:
+    path = _model_root() / "manifest.json"
+    if not path.is_file():
+        return {"models": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {"models": []}
+    except (OSError, ValueError):
+        return {"models": []}
+
+
+def _model_visible(item: dict[str, Any], principal: EdgePrincipal) -> bool:
+    # The scoped edge credential is the authorization boundary. Feature filtering
+    # can be tightened to the signed license once license claims are persisted server-side.
+    return bool(item.get("required", False) or item.get("feature"))
+
+
+@app.get("/edge/v1/models/manifest")
+def edge_model_manifest(principal: EdgePrincipal = Depends(require_edge_token)):
+    items = []
+    for item in _model_catalog().get("models") or []:
+        if _model_visible(item, principal):
+            public = {key: item.get(key) for key in ("id", "version", "runtime", "feature", "required", "sha256", "size_bytes", "filename")}
+            items.append(public)
+    return {"schema_version": "camera-eye.models.v1", "models": items}
+
+
+@app.get("/edge/v1/models/{model_id}/{version}/download")
+def edge_download_model(model_id: str, version: str, principal: EdgePrincipal = Depends(require_edge_token)):
+    catalog = _model_catalog()
+    item = next((entry for entry in catalog.get("models") or []
+                 if str(entry.get("id")) == model_id and str(entry.get("version")) == version and _model_visible(entry, principal)), None)
+    if not item:
+        raise HTTPException(404, "Model artifact not found")
+    path = (_model_root() / str(item.get("storage_path") or "")).resolve()
+    if not path.is_relative_to(_model_root()) or not path.is_file():
+        raise HTTPException(404, "Model artifact file not found")
+    return FileResponse(path, media_type="application/octet-stream", filename=str(item.get("filename") or path.name),
+                        headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/internal/v1/models/publish")
+async def publish_model(request: Request, file: UploadFile = File(...),
+                        x_model_publish_key: str | None = Header(default=None)):
+    expected = os.getenv("SNAPKEY_MODEL_PUBLISH_KEY", "").strip()
+    if not expected or not x_model_publish_key or not hmac.compare_digest(expected, x_model_publish_key):
+        raise HTTPException(401, "Invalid model publishing credential")
+    qp = request.query_params
+    model_id = (qp.get("model_id") or "").strip().lower()
+    version = (qp.get("version") or "").strip()
+    runtime = (qp.get("runtime") or "").strip().upper()
+    feature = (qp.get("feature") or "").strip().lower() or None
+    required = (qp.get("required") or "false").strip().lower() in {"1", "true", "yes"}
+    supplied_sha = (qp.get("sha256") or "").strip().lower()
+    safe = lambda value: value and all(ch.isalnum() or ch in "-_." for ch in value)
+    if not safe(model_id) or not safe(version) or runtime not in {"PYTORCH", "ONNX", "OPENVINO", "INSIGHTFACE"}:
+        raise HTTPException(400, "Valid model_id, version and runtime are required")
+    if len(supplied_sha) != 64 or not all(ch in "0123456789abcdef" for ch in supplied_sha):
+        raise HTTPException(400, "Valid sha256 is required")
+    filename = Path(file.filename or "model.bin").name
+    rel = Path(model_id) / version / filename
+    target = (_model_root() / rel).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".part")
+    digest = hashlib.sha256(); size = 0
+    try:
+        with temporary.open("wb") as output:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk: break
+                size += len(chunk)
+                if size > 2 * 1024 * 1024 * 1024:
+                    raise HTTPException(413, "Model artifact is too large")
+                digest.update(chunk); output.write(chunk)
+        actual = digest.hexdigest()
+        if not hmac.compare_digest(actual, supplied_sha):
+            raise HTTPException(400, "Model SHA-256 does not match publisher metadata")
+        temporary.replace(target)
+        catalog = _model_catalog()
+        models = [entry for entry in (catalog.get("models") or []) if str(entry.get("id")) != model_id]
+        models.append({"id": model_id, "version": version, "runtime": runtime, "feature": feature,
+                       "required": required, "sha256": actual, "size_bytes": size, "filename": filename,
+                       "storage_path": rel.as_posix(), "published_at": datetime.now(timezone.utc).isoformat()})
+        catalog = {"schema_version": "camera-eye.models.v1", "models": sorted(models, key=lambda x: x["id"])}
+        tmp = _model_root() / "manifest.json.part"
+        tmp.write_text(json.dumps(catalog, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(_model_root() / "manifest.json")
+        return {"ok": True, **models[-1]}
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @app.post("/edge/v1/heartbeat")
 def edge_heartbeat(payload: dict[str, Any], background_tasks: BackgroundTasks,
                    principal: EdgePrincipal = Depends(require_edge_token)):
