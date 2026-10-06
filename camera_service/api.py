@@ -55,6 +55,31 @@ object_security_detector=ObjectSecurityDetector()
 object_security_alerter=ObjectSecurityAlerter()
 cloud_client=CloudSyncClient(config.cloud_sync)
 model_manager=EdgeModelManager(cloud_client)
+
+def _activate_cloud_person_model() -> Path | None:
+    """Make the verified cloud person model the runtime source of truth."""
+    global person_model_selection
+    path = model_manager.active_path("person-detection")
+    if not path:
+        return None
+    config.yolo_model = str(path)
+    person_model_selection = {
+        **person_model_selection,
+        "runtime": ((model_manager.state().get("models") or {}).get("person-detection") or {}).get("runtime") or "PYTORCH",
+        "path": str(path),
+        "reason": "cloud_verified",
+        "version": ((model_manager.state().get("models") or {}).get("person-detection") or {}).get("version"),
+    }
+    # Backends are cached by the camera manager. Clear them so the next frame
+    # recreates inference against the newly activated verified model.
+    try:
+        camera_manager._inference_backends.clear()
+    except Exception:
+        pass
+    return path
+
+# Prefer a previously verified cached cloud model on offline/restart startup.
+_activate_cloud_person_model()
 alert_dispatcher=AlertDispatcher(config.alerts)
 license_manager=LicenseManager(config.edge)
 sync_worker=None
@@ -161,6 +186,15 @@ sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,lice
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
+    # Activated machines refresh the manifest at startup; if the cloud is
+    # unavailable, keep using the last SHA-verified cached model.
+    if cloud_client.enabled():
+        try:
+            model_manager.provision()
+            _activate_cloud_person_model()
+        except Exception as exc:
+            model_manager.last_error = str(exc)
+            _activate_cloud_person_model()
     store.configure_event_scope(config.edge.tenant_id, config.edge.company_code, config.edge.shop_id, config.edge.edge_id)
     for camera in config.cameras:
         if camera.enabled and not camera_manager.get_camera(camera.camera_id):
@@ -563,6 +597,8 @@ def activate_edge(request: EdgeActivationRequest):
         sync_result = sync_worker.run_once()
         try:
             model_status = model_manager.provision()
+            _activate_cloud_person_model()
+            model_status = model_manager.status()
         except Exception as model_exc:
             model_manager.last_error = str(model_exc)
             model_status = model_manager.status()
