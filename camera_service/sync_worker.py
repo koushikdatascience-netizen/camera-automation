@@ -248,8 +248,10 @@ class EdgeSyncWorker:
             # Heartbeat must remain available even if an older local database is
             # temporarily unable to provide the optional personnel inventory.
             personnel = []
+        from camera_service.updater import current_build
         return {
             "service": "SnapKeyVisionAI",
+            "build": current_build(),
             "license": {
                 "active": bool(license_status.active),
                 "plan": license_status.plan,
