@@ -1809,6 +1809,77 @@ def _evaluate_absence_checkouts() -> None:
                                     require_camera_health=True)
 
 
+def _update_root() -> Path:
+    root=Path(os.getenv("SNAPKEY_UPDATE_ROOT","/app/data/updates")).resolve()
+    root.mkdir(parents=True,exist_ok=True)
+    return root
+
+
+def _update_manifest() -> dict[str, Any] | None:
+    path=_update_root()/"latest.json"
+    if not path.is_file(): return None
+    try: return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError,ValueError): return None
+
+
+@app.get("/edge/v1/updates/latest")
+def edge_latest_update(current_build_id: str = "", principal: EdgePrincipal = Depends(require_edge_token)):
+    manifest=_update_manifest()
+    if not manifest:
+        return {"available":False,"current_build_id":current_build_id}
+    return {**manifest,"available":str(manifest.get("build_id") or "") != str(current_build_id or "")}
+
+
+@app.get("/edge/v1/updates/{build_id}/download")
+def edge_download_update(build_id: str, principal: EdgePrincipal = Depends(require_edge_token)):
+    manifest=_update_manifest()
+    if not manifest or not hmac.compare_digest(str(manifest.get("build_id") or ""),str(build_id)):
+        raise HTTPException(404,"Camera Eye update not found")
+    path=(_update_root()/str(manifest["filename"])).resolve()
+    if not path.is_relative_to(_update_root()) or not path.is_file():
+        raise HTTPException(404,"Camera Eye update file not found")
+    return FileResponse(path,media_type="application/vnd.microsoft.portable-executable",filename="MadhushalaCameraAISetup.exe",
+                        headers={"Cache-Control":"private, no-store"})
+
+
+@app.post("/internal/v1/edge-updates/publish")
+async def publish_edge_update(request: Request, file: UploadFile = File(...),
+                              x_update_publish_key: str | None = Header(default=None)):
+    expected=os.getenv("SNAPKEY_UPDATE_PUBLISH_KEY","").strip()
+    if not expected or not x_update_publish_key or not hmac.compare_digest(expected,x_update_publish_key):
+        raise HTTPException(401,"Invalid update publishing credential")
+    version=(request.query_params.get("version") or "").strip()
+    build_id=(request.query_params.get("build_id") or "").strip()
+    supplied_sha=(request.query_params.get("sha256") or "").strip().lower()
+    if not version or not build_id or len(supplied_sha)!=64 or not all(ch in "0123456789abcdef" for ch in supplied_sha):
+        raise HTTPException(400,"version, build_id and valid sha256 are required")
+    safe_build="".join(ch for ch in build_id if ch.isalnum() or ch in "-_.")
+    if safe_build != build_id or not safe_build:
+        raise HTTPException(400,"Invalid build_id")
+    root=_update_root(); filename=f"MadhushalaCameraAISetup-{safe_build}.exe"
+    target=(root/filename).resolve(); temporary=target.with_suffix(".exe.part")
+    digest=hashlib.sha256(); size=0
+    try:
+        with temporary.open("wb") as output:
+            while True:
+                chunk=await file.read(1024*1024)
+                if not chunk: break
+                size += len(chunk)
+                if size > 1024*1024*1024: raise HTTPException(413,"Update installer is too large")
+                digest.update(chunk); output.write(chunk)
+        actual=digest.hexdigest()
+        if not hmac.compare_digest(actual,supplied_sha):
+            raise HTTPException(400,"Installer SHA-256 does not match publisher metadata")
+        temporary.replace(target)
+        manifest={"version":version,"build_id":build_id,"sha256":actual,"filename":filename,
+                  "size_bytes":size,"published_at":datetime.now(timezone.utc).isoformat()}
+        manifest_tmp=root/"latest.json.part"; manifest_tmp.write_text(json.dumps(manifest),encoding="utf-8")
+        manifest_tmp.replace(root/"latest.json")
+        return {"ok":True,**manifest}
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @app.post("/edge/v1/heartbeat")
 def edge_heartbeat(payload: dict[str, Any], background_tasks: BackgroundTasks,
                    principal: EdgePrincipal = Depends(require_edge_token)):
