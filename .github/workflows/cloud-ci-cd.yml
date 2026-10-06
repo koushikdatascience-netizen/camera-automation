@@ -99,6 +99,7 @@ jobs:
           (Get-FileHash $versioned -Algorithm SHA256).Hash.ToLower() |
             Set-Content "dist\installer\MadhushalaCameraAISetup-$short.sha256"
           "Installer: MadhushalaCameraAISetup-$short.exe" >> $env:GITHUB_STEP_SUMMARY
+          "Version: $env:CAMERA_EDGE_VERSION" >> $env:GITHUB_STEP_SUMMARY
           "Commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
           "SHA256: $((Get-FileHash $versioned -Algorithm SHA256).Hash.ToLower())" >> $env:GITHUB_STEP_SUMMARY
       - name: Upload Windows installer
@@ -186,3 +187,37 @@ jobs:
             -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
             "$DEPLOY_USER@$DEPLOY_HOST" "deploy $GITHUB_SHA" < "$RUNNER_TEMP/camera-eye-image.tar.gz"
           echo "Deployed tested commit $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  publish-edge-update:
+    needs: [windows-installer, deploy]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/feat/camera-eye-live-view-ux'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UPDATE_PUBLISH_KEY: ${{ secrets.CAMERA_UPDATE_PUBLISH_KEY }}
+    steps:
+      - name: Download tested Windows installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: camera-eye-windows-installer-${{ github.sha }}
+          path: dist/installer
+      - name: Publish installer to Camera Eye update registry
+        if: env.UPDATE_PUBLISH_KEY != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer=$(find dist/installer -maxdepth 1 -name 'MadhushalaCameraAISetup-*.exe' -print -quit)
+          [[ -n "$installer" ]]
+          sha=$(sha256sum "$installer" | awk '{print $1}')
+          version="1.0.${GITHUB_RUN_NUMBER}"
+          curl --fail-with-body --retry 3 --max-time 600 \
+            -H "X-Update-Publish-Key: $UPDATE_PUBLISH_KEY" \
+            -F "file=@$installer;type=application/octet-stream" \
+            "https://camera.snapkey.ai/internal/v1/edge-updates/publish?version=$version&build_id=$GITHUB_SHA&sha256=$sha"
+          echo "Published Camera Eye edge $version ($GITHUB_SHA)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Explain disabled publisher
+        if: env.UPDATE_PUBLISH_KEY == ''
+        run: |
+          echo "::warning::CAMERA_UPDATE_PUBLISH_KEY is not configured; installer artifact was built but not promoted to auto-update."
+          echo "Auto-update publishing is disabled until CAMERA_UPDATE_PUBLISH_KEY is configured in GitHub and on the portal server." >> "$GITHUB_STEP_SUMMARY"
+
