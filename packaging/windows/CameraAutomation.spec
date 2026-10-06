@@ -24,9 +24,8 @@ datas = [
     (str(INSIGHTFACE_OBJECTS / "meanshape_68.pkl"), "objects"),
     (certifi.where(), "certifi"),
 ]
-if not SCISSORS_MODEL.exists():
-    raise FileNotFoundError("Required retrained scissors model is missing")
-datas.append((str(SCISSORS_MODEL), "kaggle-model"))
+if SCISSORS_MODEL.exists():
+    datas.append((str(SCISSORS_MODEL), "kaggle-model"))
 FACE_MODELS = Path.home() / ".insightface/models/buffalo_l"
 for name in ("det_10g.onnx", "w600k_r50.onnx"):
     if not (FACE_MODELS / name).exists():
