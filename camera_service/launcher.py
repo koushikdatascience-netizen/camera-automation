@@ -140,7 +140,13 @@ def main() -> None:
     parser.add_argument("--background", action="store_true", help="Run without opening the setup browser.")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the setup browser.")
     parser.add_argument("--open-ui", action="store_true", help="Open the setup UI and exit.")
+    parser.add_argument("--version", action="store_true", help="Print immutable build metadata and exit.")
     args = parser.parse_args()
+
+    if args.version:
+        from camera_service.build_info import BUILD_ID, VERSION
+        print(f"{VERSION} {BUILD_ID}", flush=True)
+        return
 
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
