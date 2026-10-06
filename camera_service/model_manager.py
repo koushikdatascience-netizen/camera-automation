@@ -3,8 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger("camera_eye.models")
 
 
 class EdgeModelManager:
@@ -16,6 +21,9 @@ class EdgeModelManager:
         self.cloud = cloud_client
         self.state_path = self.root / "active.json"
         self.last_error: str | None = None
+        self.last_stage = "idle"
+        self.last_attempt_at: str | None = None
+        self.last_success_at: str | None = None
 
     def state(self) -> dict[str, Any]:
         if not self.state_path.exists():
@@ -29,12 +37,28 @@ class EdgeModelManager:
     def status(self) -> dict[str, Any]:
         state = self.state()
         items = state.get("models") or {}
-        return {"ready": all(not v.get("required") or v.get("ready") for v in items.values()), "models": items, "last_error": self.last_error}
+        return {
+            "ready": all(not v.get("required") or v.get("ready") for v in items.values()),
+            "models": items,
+            "root": str(self.root),
+            "state_path": str(self.state_path),
+            "last_stage": self.last_stage,
+            "last_attempt_at": self.last_attempt_at,
+            "last_success_at": self.last_success_at,
+            "last_error": self.last_error,
+        }
 
     def provision(self) -> dict[str, Any]:
+        self.last_attempt_at = datetime.now(timezone.utc).isoformat()
+        self.last_stage = "starting"
         if not self.cloud.enabled():
+            self.last_stage = "cloud_disabled"
+            logger.warning("Model provisioning skipped: cloud client is disabled")
             return self.status()
+        logger.info("Model provisioning started; root=%s", self.root)
+        self.last_stage = "fetch_manifest"
         manifest = self.cloud.model_manifest()
+        logger.info("Model manifest received; models=%d", len(manifest.get("models") or []))
         state = self.state()
         models = state.setdefault("models", {})
         for item in manifest.get("models") or []:
@@ -47,12 +71,19 @@ class EdgeModelManager:
             target_dir = self.root / model_id / version
             target = target_dir / filename
             current = models.get(model_id) or {}
+            self.last_stage = f"prepare:{model_id}"
             if target.is_file() and self._sha256(target) == expected:
+                logger.info("Using verified cached model %s version=%s path=%s", model_id, version, target)
                 models[model_id] = self._entry(item, target, True)
+                self._write_state(state)
                 continue
             target_dir.mkdir(parents=True, exist_ok=True)
             temporary = target.with_suffix(target.suffix + ".part")
+            temporary.unlink(missing_ok=True)
+            self.last_stage = f"download:{model_id}"
+            logger.info("Downloading model %s version=%s to %s", model_id, version, temporary)
             self.cloud.download_model(model_id, version, temporary)
+            self.last_stage = f"verify:{model_id}"
             actual = self._sha256(temporary)
             if actual != expected:
                 temporary.unlink(missing_ok=True)
@@ -60,8 +91,12 @@ class EdgeModelManager:
             temporary.replace(target)
             models[model_id] = self._entry(item, target, True, previous=current.get("path"))
             self._write_state(state)
+            logger.info("Model verified and activated %s version=%s sha256=%s path=%s", model_id, version, actual, target)
         self.last_error = None
+        self.last_stage = "ready"
+        self.last_success_at = datetime.now(timezone.utc).isoformat()
         self._write_state(state)
+        logger.info("Model provisioning completed successfully")
         return self.status()
 
     def active_path(self, model_id: str) -> Path | None:
