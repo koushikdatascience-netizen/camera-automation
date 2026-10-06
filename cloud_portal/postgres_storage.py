@@ -746,3 +746,26 @@ class PostgresPortalStore:
                 if str(camera.get("camera_role") or "").upper()=="ENTRANCE_EXIT" and bool(camera.get("enabled")) and bool(camera.get("online")):
                     return True
         return False
+
+
+    def claim_due_max_logoff_checkouts(self, now: datetime, limit: int = 50) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""WITH due AS (
+                    SELECT p.tenant_id,p.shop_id,p.local_person_id
+                    FROM attendance_presence p
+                    JOIN attendance_policies ap ON ap.tenant_id=p.tenant_id AND ap.shop_id=p.shop_id
+                    WHERE p.checked_in=TRUE
+                      AND ((:now AT TIME ZONE ap.timezone)::time >= ap.max_logoff_time::time)
+                      AND (p.checkout_claimed_at IS NULL OR p.checkout_claimed_at < :retry_before)
+                    ORDER BY p.updated_at
+                    FOR UPDATE OF p SKIP LOCKED
+                    LIMIT :limit
+                )
+                UPDATE attendance_presence p SET checkout_claimed_at=:now,updated_at=:now
+                FROM due
+                WHERE p.tenant_id=due.tenant_id AND p.shop_id=due.shop_id
+                  AND p.local_person_id=due.local_person_id
+                RETURNING p.*"""),{
+                    "now":now,"retry_before":now-timedelta(minutes=5),"limit":max(1,min(200,int(limit)))
+                }).mappings().all()
+        return [dict(row) for row in rows]
