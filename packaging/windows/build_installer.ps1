@@ -36,6 +36,15 @@ if (-not (Test-Path $ExpectedAppExe)) {
     throw "Expected application EXE not found: $ExpectedAppExe"
 }
 
+if ($env:GITHUB_SHA -and $env:GITHUB_RUN_NUMBER) {
+    $ExpectedIdentity = "1.0.$($env:GITHUB_RUN_NUMBER) $($env:GITHUB_SHA)"
+    $ActualIdentity = (& $ExpectedAppExe --version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $ActualIdentity -ne $ExpectedIdentity) {
+        throw "Packaged EXE identity mismatch. Expected '$ExpectedIdentity', got '$ActualIdentity'."
+    }
+    Write-Host "Verified packaged EXE identity: $ActualIdentity"
+}
+
 $IsccCommand = @(
     "ISCC.exe",
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
@@ -74,3 +83,36 @@ $InstallerInfo = Get-Item $ExpectedInstaller
 Write-Host "Installer created:"
 Write-Host $ExpectedInstaller
 Write-Host ("Size: {0:N2} MB" -f ($InstallerInfo.Length / 1MB))
+
+
+# CI must prove that the installer itself contains and installs the exact build.
+# This catches stale payloads and silent-upgrade regressions before publishing.
+if ($env:GITHUB_SHA -and $env:GITHUB_RUN_NUMBER) {
+    $SmokeDir = Join-Path $env:RUNNER_TEMP "camera-eye-installer-smoke"
+    if (Test-Path $SmokeDir) {
+        Remove-Item $SmokeDir -Recurse -Force
+    }
+    $InstallerArgs = @(
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        ("/DIR=" + $SmokeDir)
+    )
+    $Setup = Start-Process -FilePath $ExpectedInstaller -ArgumentList $InstallerArgs -Wait -PassThru
+    if ($Setup.ExitCode -ne 0) {
+        throw "Installer smoke test failed with exit code $($Setup.ExitCode)."
+    }
+
+    $InstalledExe = Join-Path $SmokeDir "SnapKeyVisionAI.exe"
+    if (-not (Test-Path $InstalledExe)) {
+        throw "Installer smoke test did not install SnapKeyVisionAI.exe."
+    }
+    $ExpectedIdentity = "1.0.$($env:GITHUB_RUN_NUMBER) $($env:GITHUB_SHA)"
+    $InstalledIdentity = (& $InstalledExe --version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $InstalledIdentity -ne $ExpectedIdentity) {
+        throw "Installed EXE identity mismatch. Expected '$ExpectedIdentity', got '$InstalledIdentity'."
+    }
+    Write-Host "Verified installer payload identity: $InstalledIdentity"
+
+    Get-Process SnapKeyVisionAI -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
