@@ -106,6 +106,28 @@ class PostgresPortalStore:
                 created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY(tenant_id,shop_id,local_person_id))""",
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_crm_person_user ON crm_person_mappings(tenant_id,shop_id,crm_user_id)""",
+            """CREATE TABLE IF NOT EXISTS attendance_policies(
+                tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
+                grace_period_minutes INTEGER NOT NULL DEFAULT 15,
+                allowed_break_minutes INTEGER NOT NULL DEFAULT 60,
+                total_working_minutes INTEGER NOT NULL DEFAULT 480,
+                max_logoff_time TEXT NOT NULL DEFAULT '21:30',
+                absence_auto_logout_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata',
+                email_recipients_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                whatsapp_recipients_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(tenant_id,shop_id))""",
+            """CREATE TABLE IF NOT EXISTS attendance_activity(
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
+                crm_user_id TEXT NOT NULL, local_person_id TEXT,
+                activity_type TEXT NOT NULL, occurred_at TIMESTAMPTZ NOT NULL,
+                reason_code TEXT, source TEXT NOT NULL, camera_id TEXT,
+                evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL)""",
+            """CREATE INDEX IF NOT EXISTS idx_attendance_activity_daily
+                ON attendance_activity(tenant_id,shop_id,crm_user_id,occurred_at DESC)""",
         ]
         with self._conn() as conn:
             for statement in statements:
@@ -544,3 +566,87 @@ class PostgresPortalStore:
                 {"tenant":tenant_id,"shop":shop_id}).mappings().all()
         return [dict(row) for row in rows]
 
+
+
+    def upsert_attendance_policy(self, tenant_id: str, shop_id: str, policy: dict[str, Any]) -> dict[str, Any]:
+        now=self.now()
+        params={
+            "tenant":tenant_id,"shop":shop_id,
+            "grace":int(policy["grace_period_minutes"]),
+            "breaks":int(policy["allowed_break_minutes"]),
+            "working":int(policy["total_working_minutes"]),
+            "max_logoff":str(policy["max_logoff_time"]),
+            "auto_logout":bool(policy["absence_auto_logout_enabled"]),
+            "timezone":str(policy["timezone"]),
+            "emails":json.dumps(policy.get("email_recipients") or []),
+            "whatsapp":json.dumps(policy.get("whatsapp_recipients") or []),
+            "updated_at":now,
+        }
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO attendance_policies(
+                tenant_id,shop_id,grace_period_minutes,allowed_break_minutes,total_working_minutes,
+                max_logoff_time,absence_auto_logout_enabled,timezone,email_recipients_json,
+                whatsapp_recipients_json,updated_at)
+                VALUES(:tenant,:shop,:grace,:breaks,:working,:max_logoff,:auto_logout,:timezone,
+                       CAST(:emails AS JSONB),CAST(:whatsapp AS JSONB),:updated_at)
+                ON CONFLICT(tenant_id,shop_id) DO UPDATE SET
+                grace_period_minutes=EXCLUDED.grace_period_minutes,
+                allowed_break_minutes=EXCLUDED.allowed_break_minutes,
+                total_working_minutes=EXCLUDED.total_working_minutes,
+                max_logoff_time=EXCLUDED.max_logoff_time,
+                absence_auto_logout_enabled=EXCLUDED.absence_auto_logout_enabled,
+                timezone=EXCLUDED.timezone,
+                email_recipients_json=EXCLUDED.email_recipients_json,
+                whatsapp_recipients_json=EXCLUDED.whatsapp_recipients_json,
+                updated_at=EXCLUDED.updated_at"""),params)
+        return self.attendance_policy(tenant_id,shop_id)
+
+    def attendance_policy(self, tenant_id: str, shop_id: str) -> dict[str, Any]:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT * FROM attendance_policies
+                WHERE tenant_id=:tenant AND shop_id=:shop"""),{"tenant":tenant_id,"shop":shop_id}).mappings().first()
+        if not row:
+            return {
+                "tenant_id":tenant_id,"shop_id":shop_id,"grace_period_minutes":15,
+                "allowed_break_minutes":60,"total_working_minutes":480,"max_logoff_time":"21:30",
+                "absence_auto_logout_enabled":True,"timezone":"Asia/Kolkata",
+                "email_recipients":[],"whatsapp_recipients":[],"updated_at":None,
+            }
+        item=dict(row)
+        item["email_recipients"]=list(item.pop("email_recipients_json") or [])
+        item["whatsapp_recipients"]=list(item.pop("whatsapp_recipients_json") or [])
+        return item
+
+    def record_attendance_activity(self, item: dict[str, Any]) -> None:
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO attendance_activity(
+                id,tenant_id,shop_id,crm_user_id,local_person_id,activity_type,occurred_at,
+                reason_code,source,camera_id,evidence_json,metadata_json,created_at)
+                VALUES(:id,:tenant,:shop,:crm_user,:local_person,:activity,:occurred,:reason,
+                       :source,:camera,CAST(:evidence AS JSONB),CAST(:metadata AS JSONB),:created)
+                ON CONFLICT(id) DO NOTHING"""),{
+                    "id":item["id"],"tenant":item["tenant_id"],"shop":item["shop_id"],
+                    "crm_user":item["crm_user_id"],"local_person":item.get("local_person_id"),
+                    "activity":item["activity_type"],"occurred":item["occurred_at"],
+                    "reason":item.get("reason_code"),"source":item.get("source") or "CAMERA_EYE",
+                    "camera":item.get("camera_id"),"evidence":json.dumps(item.get("evidence") or {}),
+                    "metadata":json.dumps(item.get("metadata") or {}),"created":self.now(),
+                })
+
+    def list_attendance_activity(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                                 start_at: datetime, end_at: datetime) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT * FROM attendance_activity
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                  AND occurred_at>=:start AND occurred_at<:end
+                ORDER BY occurred_at,id"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "start":start_at,"end":end_at,
+                }).mappings().all()
+        result=[]
+        for row in rows:
+            item=dict(row)
+            item["evidence"]=item.pop("evidence_json") or {}
+            item["metadata"]=item.pop("metadata_json") or {}
+            result.append(item)
+        return result
