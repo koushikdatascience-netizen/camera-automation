@@ -152,3 +152,30 @@ class CloudSyncClient:
             for chunk in response.iter_content(chunk_size=1024*1024):
                 if chunk: output.write(chunk)
         temporary.replace(destination)
+
+    def model_manifest(self) -> dict[str, Any]:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response = requests.get(
+            self.config.base_url.rstrip("/") + "/edge/v1/models/manifest",
+            headers={"Authorization": f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def download_model(self, model_id: str, version: str, destination: Path) -> None:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response = requests.get(
+            self.config.base_url.rstrip("/") + f"/edge/v1/models/{model_id}/{version}/download",
+            headers={"Authorization": f"Bearer {self.config.api_token}"},
+            timeout=max(300.0, float(self.config.timeout_seconds)),
+            stream=True,
+        )
+        response.raise_for_status()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    output.write(chunk)
