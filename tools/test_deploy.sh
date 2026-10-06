@@ -5,7 +5,9 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 mkdir -p "$work/bin" "$work/project" "$work/state"
-touch "$work/project/.env" "$work/project/docker-compose.cloud.yml"
+touch "$work/project/.env"
+printf 'services:\n  portal:\n    image: old\n' > "$work/project/docker-compose.cloud.yml"
+printf 'services:\n  portal:\n    image: new\n' > "$work/release-compose.yml"
 sed -e "s|project=/opt/camera-eye|project=$work/project|" \
     -e "s|state=/var/lib/camera-eye-ci|state=$work/state|" \
     -e 's/{1..60}/{1..2}/' \
@@ -50,18 +52,28 @@ chmod +x "$work/bin/"*
 if SSH_ORIGINAL_COMMAND='uname -a' bash "$work/deploy.sh" 2>/dev/null; then
   echo 'Unrestricted SSH command was accepted' >&2; exit 1
 fi
-if printf image | gzip | SCENARIO=mismatch SSH_ORIGINAL_COMMAND="deploy $REVISION" bash "$work/deploy.sh" 2>/dev/null; then
+make_bundle() {
+  local payload="$work/payload"
+  rm -rf "$payload"; mkdir -p "$payload"
+  cp "$work/release-compose.yml" "$payload/docker-compose.cloud.yml"
+  printf image | gzip > "$payload/image.tar.gz"
+  tar -C "$payload" -czf "$work/release.tar.gz" docker-compose.cloud.yml image.tar.gz
+}
+make_bundle
+if SCENARIO=mismatch SSH_ORIGINAL_COMMAND="deploy $REVISION" bash "$work/deploy.sh" < "$work/release.tar.gz" 2>/dev/null; then
   echo 'Mismatched image revision was accepted' >&2; exit 1
 fi
 test ! -f "$work/new"
-printf image | gzip | SSH_ORIGINAL_COMMAND="deploy $REVISION" bash "$work/deploy.sh"
+SSH_ORIGINAL_COMMAND="deploy $REVISION" bash "$work/deploy.sh" < "$work/release.tar.gz"
 test "$(cat "$work/state/current-revision")" = "$REVISION"
 test "$(cat "$work/state/previous-image")" = sha256:old
+grep -q 'image: new' "$work/project/docker-compose.cloud.yml"
 rm "$work/new"
-if printf image | gzip | SCENARIO=failure SSH_ORIGINAL_COMMAND="deploy $REVISION" bash "$work/deploy.sh"; then
+if SCENARIO=failure SSH_ORIGINAL_COMMAND="deploy $REVISION" bash "$work/deploy.sh" < "$work/release.tar.gz"; then
   echo 'Unhealthy deployment was accepted' >&2; exit 1
 fi
 test ! -f "$work/new"
+grep -q 'image: new' "$work/project/docker-compose.cloud.yml"
 if grep -E ' down|volume rm|system prune' "$work/docker.log"; then
   echo 'Deployment attempted a destructive Docker operation' >&2; exit 1
 fi
