@@ -79,6 +79,27 @@ jobs:
           foreach ($name in @("det_10g.onnx", "w600k_r50.onnx")) {
             if (-not (Test-Path (Join-Path $model $name))) { throw "Missing InsightFace model: $name" }
           }
+      - name: Restore proprietary object-security model
+        shell: pwsh
+        env:
+          SCISSORS_MODEL_B64: ${{ secrets.CAMERA_SCISSORS_MODEL_B64 }}
+          SCISSORS_MODEL_SHA256: ${{ secrets.CAMERA_SCISSORS_MODEL_SHA256 }}
+        run: |
+          if (-not $env:SCISSORS_MODEL_B64) {
+            throw "CAMERA_SCISSORS_MODEL_B64 is not configured. Store the base64-encoded scissors_yolo11m_960.pt as a GitHub Actions secret."
+          }
+          New-Item -ItemType Directory -Force "kaggle-model" | Out-Null
+          $bytes = [Convert]::FromBase64String(($env:SCISSORS_MODEL_B64 -replace '\s',''))
+          $path = "kaggle-model\scissors_yolo11m_960.pt"
+          [IO.File]::WriteAllBytes($path, $bytes)
+          if ($env:SCISSORS_MODEL_SHA256) {
+            $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $env:SCISSORS_MODEL_SHA256.Trim().ToLower()) {
+              Remove-Item $path -Force
+              throw "Restored scissors model failed SHA-256 verification."
+            }
+          }
+          "Restored protected object-security model: $([math]::Round((Get-Item $path).Length / 1MB, 2)) MB" >> $env:GITHUB_STEP_SUMMARY
       - name: Ensure Inno Setup 6 is available
         shell: pwsh
         run: |
