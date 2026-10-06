@@ -32,6 +32,7 @@ configure_frozen_ca_bundle()
 
 _LOG_STREAM = None
 _INSTANCE_HANDLE = None
+_UPDATER = None
 
 
 def _runtime_log_dir() -> Path:
@@ -92,9 +93,9 @@ def open_browser_when_ready(host: str, port: int) -> None:
         try:
             open_browser(setup_url)
         except Exception as exc:
-            print(f"Failed to open browser: {exc}")
+            print(f"Failed to open browser: {exc}", flush=True)
     else:
-        print(f"Server health check did not become ready: {health_url}")
+        print(f"Server health check did not become ready: {health_url}", flush=True)
 
 
 def existing_instance_healthy(host: str, port: int) -> bool:
@@ -131,6 +132,7 @@ def acquire_instance_lock(port: int) -> bool:
 
 
 def main() -> None:
+    global _UPDATER
     ensure_console_streams()
     parser = argparse.ArgumentParser(description="Madhushala Camera AI edge service")
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
@@ -157,28 +159,29 @@ def main() -> None:
             open_browser(setup_url)
         return
     if not acquire_instance_lock(port):
-        # The owner may still be importing models; do not race it with another server.
         if foreground:
             open_browser_when_ready(host, port)
         return
-    # An older service started outside this launcher can become ready during locking.
     if existing_instance_healthy(host, port):
         if foreground:
             open_browser(setup_url)
         return
 
     from camera_service.api import app
-    # The updater is deliberately started only for frozen Windows builds. It uses
-    # the same scoped edge credential as normal cloud synchronization.
     try:
         from camera_service.api import cloud_client
-        from camera_service.updater import EdgeUpdater
-        updater = EdgeUpdater(cloud_client, interval_seconds=float(os.environ.get("CAMERA_UPDATE_INTERVAL_SECONDS", "1800")))
-        updater.start()
+        from camera_service.updater import EdgeUpdater, current_build
+        print(f"Camera Eye build metadata: {current_build()}", flush=True)
+        _UPDATER = EdgeUpdater(
+            cloud_client,
+            interval_seconds=float(os.environ.get("CAMERA_UPDATE_INTERVAL_SECONDS", "1800")),
+        )
+        started = _UPDATER.start()
+        print(f"Camera Eye updater startup result: started={started}", flush=True)
     except Exception as exc:
-        print(f"Updater startup skipped: {exc}")
+        print(f"Camera Eye updater startup failed: {type(exc).__name__}: {exc}", flush=True)
 
-    print(f"Starting SnapKey Vision AI on http://{host}:{port}")
+    print(f"Starting SnapKey Vision AI on http://{host}:{port}", flush=True)
 
     auto_open_browser = env_bool("AUTO_OPEN_BROWSER", True) and not args.background and not args.no_browser
     if auto_open_browser:
@@ -190,12 +193,16 @@ def main() -> None:
         )
         browser_thread.start()
 
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level=log_level,
-    )
+    try:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level=log_level,
+        )
+    finally:
+        if _UPDATER is not None:
+            _UPDATER.stop()
 
 
 ensure_console_streams()
