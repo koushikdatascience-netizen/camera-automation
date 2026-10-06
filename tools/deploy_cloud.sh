@@ -39,7 +39,7 @@ previous_compose="$work/previous-compose.yml"
 cp "$project/docker-compose.cloud.yml" "$previous_compose"
 
 # Load the tested image and atomically install the tested compose definition.
-gzip -dc "$work/image.tar.gz" | docker load
+docker load -i "$work/image.tar.gz"
 install -m 0644 "$work/docker-compose.cloud.yml" "$project/docker-compose.cloud.yml"
 actual_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
 if [[ "$actual_revision" != "$revision" ]]; then
