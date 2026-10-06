@@ -12,7 +12,7 @@ permissions:
 # A newer push waits for the current deployment/rollback to finish.
 concurrency:
   group: camera-eye-${{ github.event_name == 'pull_request' && github.ref || 'production' }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   test:
