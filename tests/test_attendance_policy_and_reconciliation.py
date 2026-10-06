@@ -50,3 +50,12 @@ def test_attendance_policy_does_not_logout_during_break():
     assert not policy.should_auto_logout_for_absence(
         now=seen+timedelta(hours=1),last_seen_at=seen,checked_in=True,on_break=True,
         camera_coverage_healthy=True)
+
+
+def test_max_logoff_deadline_uses_policy_timezone():
+    policy=AttendancePolicy(max_logoff_time="21:30",timezone="Asia/Kolkata")
+    reference=datetime(2026,10,6,12,0,tzinfo=timezone.utc)
+    deadline=policy.max_logoff_deadline(reference)
+    assert deadline.hour == 21
+    assert deadline.minute == 30
+    assert deadline.utcoffset() == timedelta(hours=5,minutes=30)
