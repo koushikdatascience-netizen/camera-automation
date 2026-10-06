@@ -20,15 +20,27 @@ trap 'rm -rf -- "$work"' EXIT
 
 test -f "$project/.env"
 test -f "$project/docker-compose.cloud.yml"
+
+# Each deployment stream contains the image plus the compose definition from the
+# same tested commit. Server-owned .env is never transferred or replaced.
+tar -xzf - -C "$work"
+test -s "$work/docker-compose.cloud.yml"
+test -s "$work/image.tar.gz"
+docker compose --project-name camera-eye --project-directory "$project" \
+  --env-file "$project/.env" -f "$work/docker-compose.cloud.yml" config --quiet
+
 compose=(docker compose --project-name camera-eye --project-directory "$project"
   --env-file "$project/.env" -f "$project/docker-compose.cloud.yml")
 container=$("${compose[@]}" ps -q portal)
 test -n "$container"
 previous_image=$(docker inspect --format '{{.Image}}' "$container")
 previous_revision=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")
+previous_compose="$work/previous-compose.yml"
+cp "$project/docker-compose.cloud.yml" "$previous_compose"
 
-# Read the image directly from SSH; no repository token or server secrets leave the host.
-gzip -dc | docker load
+# Load the tested image and atomically install the tested compose definition.
+gzip -dc "$work/image.tar.gz" | docker load
+install -m 0644 "$work/docker-compose.cloud.yml" "$project/docker-compose.cloud.yml"
 actual_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
 if [[ "$actual_revision" != "$revision" ]]; then
   echo 'Image revision does not match the requested commit.' >&2
@@ -53,7 +65,8 @@ wait_healthy() {
   return 1
 }
 rollback() {
-  echo 'Deployment failed; restoring the previous portal image.' >&2
+  echo 'Deployment failed; restoring the previous compose definition and portal image.' >&2
+  install -m 0644 "$previous_compose" "$project/docker-compose.cloud.yml"
   write_override "$previous_image"
   if "${compose[@]}" -f "$override" up -d --no-deps --no-build --pull never portal \
     && wait_healthy "$previous_image"; then
