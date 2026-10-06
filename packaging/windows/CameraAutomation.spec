@@ -19,13 +19,15 @@ datas = [
     (str(ROOT / "camera_service/web/static"), "camera_service/web/static"),
     (str(ROOT / "assets/brand"), "assets/brand"),
     (str(ROOT / "config.example.yaml"), "."),
-    (str(ROOT / "yolo11m.pt"), "."),
-    (str(ROOT / "yolo26n.pt"), "."),
     (str(INSIGHTFACE_OBJECTS / "meanshape_68.pkl"), "objects"),
     (certifi.where(), "certifi"),
 ]
 if SCISSORS_MODEL.exists():
     datas.append((str(SCISSORS_MODEL), "kaggle-model"))
+for model_name in ("yolo11m.pt", "yolo26n.pt"):
+    model_path = ROOT / model_name
+    if model_path.exists():
+        datas.append((str(model_path), "."))
 FACE_MODELS = Path.home() / ".insightface/models/buffalo_l"
 for name in ("det_10g.onnx", "w600k_r50.onnx"):
     if not (FACE_MODELS / name).exists():
