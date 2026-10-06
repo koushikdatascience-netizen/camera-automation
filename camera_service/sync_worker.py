@@ -160,13 +160,15 @@ class EdgeSyncWorker:
                         self.camera_supervisor.reconcile()
                 except Exception as exc:
                     camera_sync["error"] = str(exc)
-            personnel_sync={"fetched":0,"applied":0,"failed":0}
+            personnel_sync={"fetched":0,"applied":0,"deactivated":0,"failed":0}
             try:
                 roster=self.cloud_client.personnel_config()
                 people=roster.get("items") or []
                 personnel_sync["fetched"]=len(people)
                 applied=self.store.apply_cloud_personnel(people)
                 personnel_sync["applied"]=int(applied.get("applied") or 0)
+                personnel_sync["deactivated"]=int(applied.get("deactivated") or 0)
+                personnel_sync["authoritative"]=bool(applied.get("authoritative",False))
             except Exception as exc:
                 personnel_sync["failed"]+=1
                 personnel_sync["error"]=str(exc)
