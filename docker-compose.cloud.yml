@@ -47,6 +47,8 @@ services:
       SNAPKEY_EVIDENCE_ROOT: /app/data/evidence
       SNAPKEY_UPDATE_ROOT: /app/data/updates
       SNAPKEY_UPDATE_PUBLISH_KEY: ${SNAPKEY_UPDATE_PUBLISH_KEY:-}
+      SNAPKEY_MODEL_ROOT: /app/data/models
+      SNAPKEY_MODEL_PUBLISH_KEY: ${SNAPKEY_MODEL_PUBLISH_KEY:-}
       # Cloud notifications. Keep provider secrets only in the server .env / secret store.
       SNAPKEY_SMTP_HOST: ${SNAPKEY_SMTP_HOST:-}
       SNAPKEY_SMTP_PORT: ${SNAPKEY_SMTP_PORT:-587}
@@ -63,6 +65,7 @@ services:
     volumes:
       - vision_evidence_data:/app/data/evidence
       - vision_update_data:/app/data/updates
+      - vision_model_data:/app/data/models
       - vision_face_models:/root/.insightface
     networks: [vision]
 
@@ -70,6 +73,7 @@ volumes:
   vision_postgres_data:
   vision_evidence_data:
   vision_update_data:
+  vision_model_data:
   vision_face_models:
 
 networks:
