@@ -96,7 +96,19 @@ class SQLiteStore:
                 for row in existing:
                     if row["id"] not in cloud_face_ids:
                         c.execute("DELETE FROM face_profiles WHERE id=?",(row["id"],))
-        return {"applied":len(seen)}
+
+            # The cloud roster is authoritative for CRM-managed Camera Eye sites.
+            # Historical local identities must never remain active in recognition:
+            # doing so can recognize a stale UUID that has no current CRM mapping.
+            # Keep the personnel row for immutable attendance/event history, but
+            # deactivate it and remove its biometric templates. This is deliberately
+            # identity-based (UUID), never name-based.
+            stale_rows=c.execute("SELECT id FROM personnel WHERE active=1").fetchall()
+            stale_ids=[str(row["id"]) for row in stale_rows if str(row["id"]) not in seen]
+            for stale_id in stale_ids:
+                c.execute("UPDATE personnel SET active=0,updated_at=? WHERE id=?",(now,stale_id))
+                c.execute("DELETE FROM face_profiles WHERE person_id=?",(stale_id,))
+        return {"applied":len(seen),"deactivated":len(stale_ids),"authoritative":True}
 
     def create_person(self, d):
         pid=str(uuid.uuid4()); now=self.now()
