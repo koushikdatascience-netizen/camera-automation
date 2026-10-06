@@ -46,6 +46,10 @@ class SQLiteStore:
                 self._ensure_column(c,'attendance_sessions',column,'TEXT')
             self._ensure_column(c,'edge_event_queue','next_attempt_at','TEXT')
             self._ensure_column(c,'edge_event_queue','claimed_at','TEXT')
+            # Provenance is required for safe authoritative CRM reconciliation. Existing
+            # databases predate this column, so those rows are quarantinable legacy
+            # identities rather than being misclassified as intentional local-only users.
+            self._ensure_column(c,'personnel','managed_source',"TEXT NOT NULL DEFAULT 'legacy'")
     def _ensure_column(self,conn,table,column,definition):
         existing={row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in existing:
@@ -66,24 +70,35 @@ class SQLiteStore:
         return {**payload,'scope':{**scope,'camera_id':str(camera_id or 'system')}}
 
     def apply_cloud_personnel(self, items):
-        """Idempotently mirror the shop-scoped cloud roster into local recognition tables."""
+        """Mirror the authoritative CRM roster without deleting intentional local-only identities.
+
+        managed_source values:
+          crm    - created/confirmed by an authoritative cloud personnel snapshot
+          local  - intentionally created on this edge
+          legacy - row created before provenance tracking existed
+
+        Legacy rows absent from CRM are deactivated (and therefore excluded from
+        recognition) but their biometric/history data is retained for safe migration.
+        Confirmed CRM rows absent from a later snapshot are deactivated and their face
+        templates are removed so stale CRM identities can never win recognition.
+        """
         now=self.now(); seen=set()
         with self._lock,self._conn() as c:
             for item in items:
                 pid=str(item["person_id"]); seen.add(pid)
-                legacy=c.execute("SELECT id FROM personnel WHERE employee_code=? AND id<>?",(str(item["employee_code"]),pid)).fetchone()
+                legacy=c.execute("SELECT id,managed_source FROM personnel WHERE employee_code=? AND id<>?",(str(item["employee_code"]),pid)).fetchone()
                 if legacy:
                     old_id=str(legacy["id"])
                     c.execute("UPDATE face_profiles SET person_id=? WHERE person_id=?",(pid,old_id))
                     c.execute("UPDATE attendance_sessions SET person_id=? WHERE person_id=?",(pid,old_id))
                     c.execute("UPDATE person_events SET person_id=? WHERE person_id=?",(pid,old_id))
                     c.execute("DELETE FROM personnel WHERE id=?",(old_id,))
-                c.execute("""INSERT INTO personnel(id,employee_code,full_name,role,phone,email,active,created_at,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee_code=excluded.employee_code,
+                c.execute("""INSERT INTO personnel(id,employee_code,full_name,role,phone,email,active,created_at,updated_at,managed_source)
+                    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee_code=excluded.employee_code,
                     full_name=excluded.full_name,role=excluded.role,phone=excluded.phone,email=excluded.email,
-                    active=excluded.active,updated_at=excluded.updated_at""",
+                    active=excluded.active,updated_at=excluded.updated_at,managed_source='crm'""",
                     (pid,str(item["employee_code"]),str(item["full_name"]),str(item["role"]),item.get("phone"),item.get("email"),
-                     1 if item.get("active",True) else 0,now,now))
+                     1 if item.get("active",True) else 0,now,now,'crm'))
                 cloud_face_ids=set()
                 for face in item.get("faces") or []:
                     fid=str(face["face_id"]); cloud_face_ids.add(fid)
@@ -91,28 +106,28 @@ class SQLiteStore:
                         VALUES(?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET person_id=excluded.person_id,
                         embedding_json=excluded.embedding_json,quality=excluded.quality""",
                         (fid,pid,json.dumps(face["embedding"]),float(face.get("quality") or 0),now))
-                # Once a person is cloud-managed, the cloud face set is authoritative.
                 existing=c.execute("SELECT id FROM face_profiles WHERE person_id=?",(pid,)).fetchall()
                 for row in existing:
                     if row["id"] not in cloud_face_ids:
                         c.execute("DELETE FROM face_profiles WHERE id=?",(row["id"],))
 
-            # The cloud roster is authoritative for CRM-managed Camera Eye sites.
-            # Historical local identities must never remain active in recognition:
-            # doing so can recognize a stale UUID that has no current CRM mapping.
-            # Keep the personnel row for immutable attendance/event history, but
-            # deactivate it and remove its biometric templates. This is deliberately
-            # identity-based (UUID), never name-based.
-            stale_rows=c.execute("SELECT id FROM personnel WHERE active=1").fetchall()
+            # Only CRM-owned or pre-provenance legacy identities are reconciled.
+            # Explicit local-only identities remain untouched.
+            stale_rows=c.execute("SELECT id,managed_source FROM personnel WHERE active=1 AND managed_source IN ('crm','legacy')").fetchall()
             stale_ids=[str(row["id"]) for row in stale_rows if str(row["id"]) not in seen]
-            for stale_id in stale_ids:
+            removed_faces=0
+            for row in stale_rows:
+                stale_id=str(row["id"])
+                if stale_id in seen:
+                    continue
                 c.execute("UPDATE personnel SET active=0,updated_at=? WHERE id=?",(now,stale_id))
-                c.execute("DELETE FROM face_profiles WHERE person_id=?",(stale_id,))
-        return {"applied":len(seen),"deactivated":len(stale_ids),"authoritative":True}
+                if str(row["managed_source"]) == 'crm':
+                    removed_faces += c.execute("DELETE FROM face_profiles WHERE person_id=?",(stale_id,)).rowcount
+        return {"applied":len(seen),"deactivated":len(stale_ids),"removed_faces":removed_faces,"authoritative":True}
 
     def create_person(self, d):
         pid=str(uuid.uuid4()); now=self.now()
-        with self._lock,self._conn() as c: c.execute("INSERT INTO personnel VALUES(?,?,?,?,?,?,?,?,?)",(pid,d.employee_code,d.full_name,d.role.value,d.phone,d.email,1,now,now))
+        with self._lock,self._conn() as c: c.execute("INSERT INTO personnel(id,employee_code,full_name,role,phone,email,active,created_at,updated_at,managed_source) VALUES(?,?,?,?,?,?,?,?,?,?)",(pid,d.employee_code,d.full_name,d.role.value,d.phone,d.email,1,now,now,'local'))
         return self.get_person(pid)
     def list_people(self):
         with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM personnel ORDER BY full_name")]
