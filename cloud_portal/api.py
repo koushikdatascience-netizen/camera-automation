@@ -1446,13 +1446,13 @@ def attendance_station_candidate(tenant_id: str, camera_id: str, edge_id: str, p
 
 @app.post("/portal/v1/tenants/{tenant_id}/attendance-station/action")
 def attendance_station_action(tenant_id: str, request: AttendanceStationActionRequest, principal: PortalPrincipal = Depends(require_portal_session)):
-    """Execute a CRM-backed manual attendance action for the current recognized person.
+    """Execute a CRM-backed manual action for the current recognized person.
 
-    CHECK_IN mirrors the automatic face flow: authenticate the current camera face
-    first, then use CRM's returned token/user id for LoginLogout. CHECK_OUT also
-    authenticates the current face before LoginLogout. Break actions use the
-    server-side CRM integration because the supplied break endpoints do not return
-    or consume the face-login token in the provided contract.
+    Every manual action first authenticates the current camera face using
+    loginUsingFaceTenant (base64Image + tenantId, no static CRM JWT). The short-lived
+    token returned by CRM is then used for LoginLogout or the break mutation. This
+    keeps CHECK_IN, CHECK_OUT, BREAK_START and BREAK_END scoped to the person who is
+    physically present at the attendance camera.
     """
     _portal_scope(tenant_id,principal)
     action=request.action.strip().upper()
@@ -1471,56 +1471,64 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
     envelope=event.get("payload") or {}; payload=envelope.get("payload") if isinstance(envelope.get("payload"),dict) else envelope
     person_id=str(payload.get("person_id") or "").strip(); mapping=store.crm_person_mapping(tenant_id,principal.shop_id,person_id) if person_id else None
     if not mapping: raise HTTPException(409,"Recognized person is not mapped to a CRM user")
-    if not crm_client.configured: raise HTTPException(503,"SnapKey CRM API token is not configured")
+    if not crm_client.face_attendance_configured:
+        raise HTTPException(503,"SnapKey CRM face attendance is not configured")
+
     now=datetime.now(timezone.utc); crm_timestamp=now.isoformat(timespec="milliseconds").replace("+00:00","Z")
     crm_date=crm_timestamp; crm_time=now.strftime("%H:%M:%S")
-    location="Camera Eye - "+str(camera.get("name") or request.camera_id)
     authenticated_user_id=str(mapping["crm_user_id"])
     try:
-        if action in {"CHECK_IN","CHECK_OUT"}:
-            crm_tenant_id=_crm_tenant_uuid_for_user(tenant_id,mapping["crm_user_id"])
-            image_base64=_recognition_image_base64(payload)
-            face_result=crm_client.login_using_face_tenant(image_base64,crm_tenant_id)
-            if not _crm_face_login_succeeded(face_result) or not isinstance(face_result,dict):
-                raise HTTPException(409,"CRM face authentication was rejected")
-            face_token=str(face_result.get("token") or "").strip()
-            crm_user=face_result.get("user") if isinstance(face_result.get("user"),dict) else {}
-            authenticated_user_id=str(crm_user.get("id") or "").strip()
-            if not face_token or not authenticated_user_id:
-                raise HTTPException(502,"CRM face authentication did not return token and user identity")
-            if authenticated_user_id!=str(mapping["crm_user_id"]):
-                raise HTTPException(409,"CRM face identity does not match the recognized Camera Eye person")
-            if action=="CHECK_IN":
-                crm_payload={"userId":authenticated_user_id,"date":crm_date,"actualStartTime":crm_time}
-            else:
-                crm_payload={"userId":authenticated_user_id,"date":crm_date,"actualOffTime":crm_time}
-            result=crm_client.login_logout_with_face_token(crm_payload,face_token)
-            if not _crm_mutation_succeeded(result):
-                logger.warning(
-                    "CRM_MANUAL_ATTENDANCE_REJECTED action=%s person_id=%s crm_user_id=%s camera_id=%s message=%s",
-                    action,person_id,authenticated_user_id,request.camera_id,
-                    str(result.get("message") or "")[:240] if isinstance(result,dict) else "",
-                )
-                raise HTTPException(409,"CRM rejected the attendance action")
+        # Authenticate the live recognized face for all four manual actions. CRM's
+        # face-login endpoint is public by contract and returns the short-lived token
+        # required by the subsequent attendance/break mutation.
+        crm_tenant_id=_crm_tenant_uuid_for_user(tenant_id,mapping["crm_user_id"])
+        image_base64=_recognition_image_base64(payload)
+        face_result=crm_client.login_using_face_tenant(image_base64,crm_tenant_id)
+        if not _crm_face_login_succeeded(face_result) or not isinstance(face_result,dict):
+            raise HTTPException(409,"CRM face authentication was rejected")
+        face_token=str(face_result.get("token") or "").strip()
+        crm_user=face_result.get("user") if isinstance(face_result.get("user"),dict) else {}
+        authenticated_user_id=str(crm_user.get("id") or "").strip()
+        if not face_token or not authenticated_user_id:
+            raise HTTPException(502,"CRM face authentication did not return token and user identity")
+        if authenticated_user_id!=str(mapping["crm_user_id"]):
+            raise HTTPException(409,"CRM face identity does not match the recognized Camera Eye person")
+
+        if action=="CHECK_IN":
+            result=crm_client.login_logout_with_face_token({
+                "userId":authenticated_user_id,"date":crm_date,"actualStartTime":crm_time,
+            },face_token)
+        elif action=="CHECK_OUT":
+            result=crm_client.login_logout_with_face_token({
+                "userId":authenticated_user_id,"date":crm_date,"actualOffTime":crm_time,
+            },face_token)
         elif action=="BREAK_START":
             if not mapping.get("break_master_id"):
                 raise HTTPException(409,"No CRM break type is mapped for this person")
-            _assert_crm_service_token_scope(tenant_id)
-            result=crm_client.start_break(authenticated_user_id,mapping["break_master_id"])
+            result=crm_client.start_break(
+                authenticated_user_id,mapping["break_master_id"],auth_token=face_token,
+            )
         else:
-            _assert_crm_service_token_scope(tenant_id)
-            result=crm_client.end_break(authenticated_user_id)
+            result=crm_client.end_break(authenticated_user_id,auth_token=face_token)
+
+        if not _crm_mutation_succeeded(result):
+            logger.warning(
+                "CRM_MANUAL_ATTENDANCE_REJECTED action=%s person_id=%s crm_user_id=%s camera_id=%s message=%s",
+                action,person_id,authenticated_user_id,request.camera_id,
+                str(result.get("message") or "")[:240] if isinstance(result,dict) else "",
+            )
+            raise HTTPException(409,"CRM rejected the attendance action")
     except HTTPException:
         raise
     except httpx.HTTPStatusError as exc:
         status=exc.response.status_code if exc.response is not None else 502
-        # Do not leak CRM response bodies/tokens/biometric data to the frontend.
         raise HTTPException(502,f"CRM attendance action failed (upstream HTTP {status})") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502,"CRM attendance action failed") from exc
     except Exception as exc:
         logger.exception("CRM_MANUAL_ATTENDANCE_FAILED action=%s person_id=%s camera_id=%s",action,person_id,request.camera_id)
         raise HTTPException(502,"CRM attendance action failed") from exc
+
     audit_id="manual-"+secrets.token_urlsafe(12)
     canonical_type={"CHECK_IN":"ATTENDANCE_ENTRY","CHECK_OUT":"ATTENDANCE_EXIT",
         "BREAK_START":"BREAK_START","BREAK_END":"BREAK_END"}[action]
