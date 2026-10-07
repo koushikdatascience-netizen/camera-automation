@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import secrets
+import threading
+import time as monotonic_time
 import httpx
 import cv2
 import numpy as np
@@ -176,11 +178,26 @@ class CloudPersonPatch(BaseModel):
     active: bool | None = None
 
 _cloud_face_service: FaceService | None = None
+_crm_personnel_refresh_guard = threading.Lock()
+_crm_personnel_refresh_locks: dict[tuple[str, str], threading.Lock] = {}
+_crm_personnel_last_refresh: dict[tuple[str, str], float] = {}
+_crm_face_image_fingerprints: set[tuple[str, str, str, str]] = set()
+
 def _cloud_face_enroller() -> FaceService:
     global _cloud_face_service
     if _cloud_face_service is None:
         _cloud_face_service=FaceService(None)
     return _cloud_face_service
+
+def _crm_personnel_refresh_lock(tenant_id: str, shop_id: str) -> threading.Lock:
+    key=(tenant_id,shop_id)
+    with _crm_personnel_refresh_guard:
+        return _crm_personnel_refresh_locks.setdefault(key,threading.Lock())
+
+def _crm_personnel_refresh_due(tenant_id: str, shop_id: str) -> bool:
+    ttl=max(15,int(os.getenv("SNAPKEY_CRM_PERSONNEL_REFRESH_SECONDS","60")))
+    last=_crm_personnel_last_refresh.get((tenant_id,shop_id),0.0)
+    return monotonic_time.monotonic()-last >= ttl
 
 class CrmPersonMappingRequest(BaseModel):
     local_person_id: str
@@ -750,9 +767,8 @@ def edge_camera_config(principal: EdgePrincipal = Depends(require_edge_token)):
 @app.get("/edge/v1/config/personnel")
 def edge_personnel_config(principal: EdgePrincipal = Depends(require_edge_token)):
     if principal.legacy_global: raise HTTPException(403,"Scoped edge credential is required for personnel configuration")
-    # CRM is the personnel source of truth. Refresh before every edge roster response
-    # so a newly registered/updated CRM face reaches the Windows recognizer without
-    # requiring an operator to open the cloud Personnel page first.
+    # Edge polling must remain cheap. CRM synchronization is TTL-cached and
+    # single-flight; normal polls serve the already mirrored personnel immediately.
     _refresh_crm_personnel(str(principal.tenant_id), str(principal.shop_id))
     items=[]
     for person in store.list_cloud_people(principal.tenant_id,principal.shop_id):
@@ -1206,10 +1222,24 @@ def _decode_crm_face_image(source: str) -> bytes | None:
         return None
 
 
-def _refresh_crm_personnel(tenant_id: str, shop_id: str) -> None:
-    """CRM is authoritative for people; Camera Eye mirrors current identity + compatible AI faces."""
-    if not crm_client.configured:
-        raise HTTPException(503,"SnapKey CRM API token is not configured")
+def _refresh_crm_personnel(tenant_id: str, shop_id: str, *, force: bool = False) -> None:
+    """Refresh CRM personnel at most once per tenant/shop TTL.
+
+    Edge polling reads the local mirror. A per-tenant/shop single-flight lock prevents
+    concurrent edge requests from repeating CRM fetches or CPU-heavy face enrollment.
+    """
+    if not crm_client.face_attendance_configured:
+        raise HTTPException(503,"SnapKey CRM face directory is not configured")
+    if not force and not _crm_personnel_refresh_due(tenant_id,shop_id):
+        return
+    refresh_lock=_crm_personnel_refresh_lock(tenant_id,shop_id)
+    with refresh_lock:
+        if not force and not _crm_personnel_refresh_due(tenant_id,shop_id):
+            return
+        _refresh_crm_personnel_locked(tenant_id,shop_id)
+        _crm_personnel_last_refresh[(tenant_id,shop_id)]=monotonic_time.monotonic()
+
+def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
     try:
         raw=crm_client.face_embeddings(tenant_id)
     except httpx.HTTPError as exc:
@@ -1273,22 +1303,31 @@ def _refresh_crm_personnel(tenant_id: str, shop_id: str) -> None:
             raw_image=_decode_crm_face_image(source)
             if not raw_image:
                 continue
+            # Never run InsightFace repeatedly for an unchanged CRM image. The
+            # fingerprint intentionally contains no biometric bytes and is scoped
+            # by tenant/shop/person.
+            source_sha=hashlib.sha256(raw_image).hexdigest()
+            fingerprint=(tenant_id,shop_id,local_person_id,source_sha)
+            if fingerprint in _crm_face_image_fingerprints:
+                continue
             try:
                 image=cv2.imdecode(np.frombuffer(raw_image,np.uint8),cv2.IMREAD_COLOR)
                 if image is None:
+                    _crm_face_image_fingerprints.add(fingerprint)
                     continue
                 embedding,quality=_cloud_face_enroller().enroll(image)
                 if len(embedding)!=512:
                     continue
                 key=json.dumps(embedding,separators=(",",":"))
-                if key in existing_vectors:
-                    continue
-                store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":local_person_id,
-                    "tenant_id":tenant_id,"shop_id":shop_id,"embedding":embedding,
-                    "quality":quality,"image_path":None})
-                existing_vectors.add(key)
+                if key not in existing_vectors:
+                    store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":local_person_id,
+                        "tenant_id":tenant_id,"shop_id":shop_id,"embedding":embedding,
+                        "quality":quality,"image_path":None})
+                    existing_vectors.add(key)
+                _crm_face_image_fingerprints.add(fingerprint)
             except Exception:
-                continue
+                logger.exception("CRM_FACE_ENROLL_FAILED tenant_id=%s shop_id=%s person_id=%s",
+                                 tenant_id,shop_id,local_person_id)
 
     # CRM is authoritative for lifecycle as well. People that disappear from the
     # current CRM face directory must not remain active recognition candidates.
