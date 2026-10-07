@@ -61,6 +61,26 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--background"; WorkingDir: "{app
 Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SnapKeyVisionAI"; ValueData: """{app}\{#MyAppExeName}"" --background"; Flags: uninsdeletevalue
 
 [Code]
+function HasCommandLineSwitch(const SwitchName: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), SwitchName) = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
+
+function ShouldLaunchSilentBackground: Boolean;
+begin
+  { Production silent upgrades restart the edge app. CI smoke installs pass
+    /NOAUTOSTART so PowerShell -Wait does not wait on the background child. }
+  Result := WizardSilent and (not HasCommandLineSwitch('/NOAUTOSTART'));
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
