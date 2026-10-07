@@ -96,6 +96,7 @@ if ($env:GITHUB_SHA -and $env:GITHUB_RUN_NUMBER) {
         "/VERYSILENT",
         "/SUPPRESSMSGBOXES",
         "/NORESTART",
+        "/NOAUTOSTART",
         ("/DIR=" + $SmokeDir)
     )
     $Setup = Start-Process -FilePath $ExpectedInstaller -ArgumentList $InstallerArgs -Wait -PassThru
