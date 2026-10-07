@@ -60,6 +60,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+      - name: Install and verify supported CPU TorchVision build
+        shell: pwsh
+        run: |
+          # requirements.txt installs whichever torch/torchvision satisfy the
+          # broad Ultralytics constraints. Pin the tested Windows CPU pair so
+          # the frozen edge app always contains the native torchvision ops.
+          python -m pip install --force-reinstall --no-deps `
+            --index-url https://download.pytorch.org/whl/cpu `
+            "torch==2.13.0+cpu" "torchvision==0.28.0+cpu"
+          if ($LASTEXITCODE -ne 0) { throw "Unable to install the supported CPU Torch/TorchVision wheels." }
+          python -c "import torch, torchvision; from torchvision.extension import _has_ops; assert _has_ops(), 'TorchVision native operators failed to load'; boxes=torch.tensor([[0.,0.,10.,10.],[1.,1.,9.,9.]]); scores=torch.tensor([0.9,0.8]); assert torchvision.ops.nms(boxes,scores,0.5).tolist()==[0]; print(f'Verified torch={torch.__version__}, torchvision={torchvision.__version__}, native NMS=available')"
+          if ($LASTEXITCODE -ne 0) { throw "TorchVision native NMS verification failed." }
       - name: Prepare offline InsightFace model bundle
         shell: pwsh
         run: |
