@@ -714,7 +714,13 @@ def portal_edge_command(tenant_id: str, command_id: str, principal: PortalPrinci
 def edge_commands(principal: EdgePrincipal = Depends(require_edge_token)):
     if principal.legacy_global:
         raise HTTPException(403, "Scoped edge credential is required for commands")
-    return {"items":store.claim_edge_commands(principal.tenant_id,principal.shop_id,principal.edge_id)}
+    commands=store.claim_edge_commands(principal.tenant_id,principal.shop_id,principal.edge_id)
+    for command in commands:
+        if command.get("command_type") in {"LIVE_VIEW_START","LIVE_VIEW_STOP"}:
+            request=command.get("request") or {}
+            logger.info("[LIVE_VIEW] command pickup %s", json.dumps({"command_id":command["id"],
+                "edge_id":principal.edge_id,"camera_id":request.get("camera_id"),"session_id":request.get("session_id")}))
+    return {"items":commands}
 
 
 @app.post("/edge/v1/commands/{command_id}/result")
@@ -1351,24 +1357,37 @@ def _livekit_token(room: str, identity: str, *, publish: bool, subscribe: bool, 
         .to_jwt())
 
 
-@app.post("/portal/v1/tenants/{tenant_id}/attendance-station/live/start")
-def attendance_station_live_start(tenant_id: str, request: AttendanceLiveStartRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+def _create_live_view_session(tenant_id: str, request: AttendanceLiveStartRequest, principal: PortalPrincipal, *, attendance_only: bool) -> dict[str, Any]:
+    """Create both grants and the edge command for the same scoped room."""
     _portal_scope(tenant_id,principal)
     camera=_portal_camera_lookup(tenant_id,principal.shop_id,request.edge_id,request.camera_id)
-    if not camera or str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
+    if not camera:
+        raise HTTPException(404,"Camera not found")
+    if attendance_only and str(camera.get("camera_role") or "").upper()!="ENTRANCE_EXIT":
         raise HTTPException(400,"Remote live view is available only for attendance/entrance cameras")
     livekit_url=os.getenv("SNAPKEY_LIVEKIT_URL","").strip()
     if not livekit_url:
         raise HTTPException(503,"Attendance live view is not configured")
+    logger.info("[LIVE_VIEW] start requested %s", json.dumps({"tenant_id":tenant_id,"shop_id":principal.shop_id,
+        "camera_id":request.camera_id,"edge_id":request.edge_id}))
     session_id=secrets.token_urlsafe(18)
     room="camera-eye-"+secrets.token_urlsafe(18)
     publisher_token=_livekit_token(room,"edge-"+secrets.token_urlsafe(12),publish=True,subscribe=False,ttl_seconds=request.ttl_seconds)
     viewer_token=_livekit_token(room,"viewer-"+secrets.token_urlsafe(12),publish=False,subscribe=True,ttl_seconds=request.ttl_seconds)
     command=store.create_edge_command({"tenant_id":tenant_id,"shop_id":principal.shop_id,"edge_id":request.edge_id,
         "command_type":"LIVE_VIEW_START","request":{"session_id":session_id,"camera_id":request.camera_id,"url":livekit_url,
-        "publisher_token":publisher_token,"ttl_seconds":request.ttl_seconds}})
-    return {"session_id":session_id,"camera_id":request.camera_id,"edge_id":request.edge_id,"url":livekit_url,
+        "room":room,"publisher_token":publisher_token,"ttl_seconds":request.ttl_seconds}})
+    logger.info("[LIVE_VIEW] session created %s", json.dumps({"session_id":session_id,"room":room,
+        "edge_id":request.edge_id,"camera_id":request.camera_id,"command_id":command.get("id")}))
+    return {"session_id":session_id,"room":room,
+        "expires_at":(datetime.now(timezone.utc)+timedelta(seconds=request.ttl_seconds+60)).isoformat(),
+        "camera_id":request.camera_id,"edge_id":request.edge_id,"url":livekit_url,
         "viewer_token":viewer_token,"ttl_seconds":request.ttl_seconds,"command_id":command.get("id"),"transport":"webrtc"}
+
+
+@app.post("/portal/v1/tenants/{tenant_id}/attendance-station/live/start")
+def attendance_station_live_start(tenant_id: str, request: AttendanceLiveStartRequest, principal: PortalPrincipal = Depends(require_portal_session)):
+    return _create_live_view_session(tenant_id,request,principal,attendance_only=True)
 
 
 @app.post("/portal/v1/tenants/{tenant_id}/attendance-station/live/stop")
@@ -1379,27 +1398,14 @@ def attendance_station_live_stop(tenant_id: str, request: AttendanceLiveStopRequ
         raise HTTPException(404,"Camera not found")
     command=store.create_edge_command({"tenant_id":tenant_id,"shop_id":principal.shop_id,"edge_id":request.edge_id,
         "command_type":"LIVE_VIEW_STOP","request":{"session_id":request.session_id,"camera_id":request.camera_id}})
+    logger.info("[LIVE_VIEW] stop requested %s", json.dumps({"session_id":request.session_id,
+        "edge_id":request.edge_id,"camera_id":request.camera_id,"command_id":command.get("id")}))
     return {"ok":True,"session_id":request.session_id,"command_id":command.get("id")}
 
 @app.post("/portal/v1/tenants/{tenant_id}/live/start")
 def portal_live_start(tenant_id: str, request: AttendanceLiveStartRequest, principal: PortalPrincipal = Depends(require_portal_session)):
     """Start an on-demand AI-annotated stream for any online Camera Eye camera."""
-    _portal_scope(tenant_id,principal)
-    camera=_portal_camera_lookup(tenant_id,principal.shop_id,request.edge_id,request.camera_id)
-    if not camera:
-        raise HTTPException(404,"Camera not found")
-    livekit_url=os.getenv("SNAPKEY_LIVEKIT_URL","").strip()
-    if not livekit_url:
-        raise HTTPException(503,"Camera Eye live view is not configured")
-    session_id=secrets.token_urlsafe(18)
-    room="camera-eye-"+secrets.token_urlsafe(18)
-    publisher_token=_livekit_token(room,"edge-"+secrets.token_urlsafe(12),publish=True,subscribe=False,ttl_seconds=request.ttl_seconds)
-    viewer_token=_livekit_token(room,"viewer-"+secrets.token_urlsafe(12),publish=False,subscribe=True,ttl_seconds=request.ttl_seconds)
-    command=store.create_edge_command({"tenant_id":tenant_id,"shop_id":principal.shop_id,"edge_id":request.edge_id,
-        "command_type":"LIVE_VIEW_START","request":{"session_id":session_id,"camera_id":request.camera_id,"url":livekit_url,
-        "publisher_token":publisher_token,"ttl_seconds":request.ttl_seconds}})
-    return {"session_id":session_id,"camera_id":request.camera_id,"edge_id":request.edge_id,"url":livekit_url,
-        "viewer_token":viewer_token,"ttl_seconds":request.ttl_seconds,"command_id":command.get("id"),"transport":"webrtc"}
+    return _create_live_view_session(tenant_id,request,principal,attendance_only=False)
 
 @app.post("/portal/v1/tenants/{tenant_id}/live/stop")
 def portal_live_stop(tenant_id: str, request: AttendanceLiveStopRequest, principal: PortalPrincipal = Depends(require_portal_session)):
@@ -1409,6 +1415,8 @@ def portal_live_stop(tenant_id: str, request: AttendanceLiveStopRequest, princip
         raise HTTPException(404,"Camera not found")
     command=store.create_edge_command({"tenant_id":tenant_id,"shop_id":principal.shop_id,"edge_id":request.edge_id,
         "command_type":"LIVE_VIEW_STOP","request":{"session_id":request.session_id,"camera_id":request.camera_id}})
+    logger.info("[LIVE_VIEW] stop requested %s", json.dumps({"session_id":request.session_id,
+        "edge_id":request.edge_id,"camera_id":request.camera_id,"command_id":command.get("id")}))
     return {"ok":True,"session_id":request.session_id,"command_id":command.get("id")}
 
 

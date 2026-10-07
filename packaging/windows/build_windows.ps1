@@ -86,7 +86,8 @@ try {
         $AppDistDir = Split-Path $ExpectedExePath -Parent
         $InternalDir = Join-Path $AppDistDir "_internal"
         $RequiredFiles = @(
-            (Join-Path $InternalDir "config.example.yaml")
+            (Join-Path $InternalDir "config.example.yaml"),
+            (Join-Path $InternalDir "torchvision\_C.pyd")
         )
         $OptionalFiles = @(
             (Join-Path $InternalDir "yolo11m.pt"),
@@ -105,7 +106,7 @@ try {
                 Write-Warning "Optional packaged file missing: $OptionalFile"
             }
         }
-        Write-Host "Verified required default config; optional model assets are reported when absent."
+        Write-Host "Verified default config and TorchVision native operators; optional model assets are reported when absent."
 
         # Create start/stop/open scripts inside the installable app folder
         $StartScriptContent = @"

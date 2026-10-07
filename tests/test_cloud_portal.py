@@ -228,3 +228,31 @@ def test_attendance_live_start_queues_scoped_webrtc_command(tmp_path, monkeypatc
  assert len(claimed)==1 and claimed[0]['command_type']=='LIVE_VIEW_START'
  assert claimed[0]['request']['camera_id']=='attendance-1'
  assert claimed[0]['request']['publisher_token']=='signed-pub'
+ assert claimed[0]['request']['room']==body['room']
+ assert body['expires_at'] and body['command_id']==claimed[0]['id']
+
+
+def test_general_live_start_queues_scoped_webrtc_command_with_same_room(tmp_path, monkeypatch):
+ monkeypatch.setenv('SNAPKEY_PORTAL_DB',str(tmp_path/'general-live.db'))
+ monkeypatch.delenv('SNAPKEY_DATABASE_URL',raising=False)
+ monkeypatch.setenv('SNAPKEY_ENV','development')
+ monkeypatch.setenv('SNAPKEY_LIVEKIT_URL','wss://livekit.example.test')
+ import importlib
+ import cloud_portal.api as api
+ importlib.reload(api)
+ api.store.record_heartbeat({'tenant_id':'tenant-a','shop_id':'shop1','site_id':'site-1','edge_id':'edge-1',
+  'status':{'cameras':[{'camera_id':'general-1','name':'General','camera_role':'GENERAL','enabled':True,'online':True}]}})
+ monkeypatch.setattr(api,'_livekit_token',lambda room,identity,**kwargs:'signed-'+('pub' if kwargs['publish'] else 'viewer')+'-'+room)
+ client=TestClient(api.app);auth=portal_auth(client,monkeypatch)
+ response=client.post('/portal/v1/tenants/tenant-a/live/start',
+  json={'camera_id':'general-1','edge_id':'edge-1','ttl_seconds':300},headers=auth)
+ assert response.status_code==200
+ body=response.json();claimed=api.store.claim_edge_commands('tenant-a','shop1','edge-1')
+ assert len(claimed)==1
+ request=claimed[0]['request']
+ assert body['room']==request['room']
+ assert request['publisher_token']=='signed-pub-'+body['room']
+ assert body['viewer_token']=='signed-viewer-'+body['room']
+ assert body['camera_id']==request['camera_id'] and body['edge_id']=='edge-1'
+ assert body['session_id']==request['session_id'] and body['command_id']==claimed[0]['id']
+ assert body['expires_at'] and response.status_code==200

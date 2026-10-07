@@ -277,6 +277,11 @@ class EdgeSyncWorker:
                 self.camera_supervisor.reconcile()
             return {"deleted": True, "camera_id": camera_id}
         if command_type=="LIVE_VIEW_START":
+            import json
+            import logging
+            logging.getLogger(__name__).info("[LIVE_VIEW] edge command received %s", json.dumps({
+                "command_id":command.get("id"),"session_id":request.get("session_id"),
+                "camera_id":request.get("camera_id"),"room":request.get("room")}))
             if self.camera_manager is None:
                 raise RuntimeError("Camera manager is unavailable")
             from camera_service.livekit_publisher import LiveKitCameraPublisher

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import cv2
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -60,15 +65,23 @@ class LiveKitCameraPublisher:
         if session.thread.is_alive() and session.thread is not threading.current_thread():
             session.thread.join(timeout=3)
         with self._lock:
-            self._sessions.pop(session_id, None)
+            if self._sessions.get(session_id) is session:
+                self._sessions.pop(session_id, None)
         return {"stopped": True, "session_id": session_id, "camera_id": session.camera_id}
 
     def _thread_main(self, session_id: str, camera_id: str, url: str, token: str, ttl: int, stop_event: threading.Event) -> None:
         try:
+            logger.info("[LIVE_VIEW] publisher started %s", json.dumps({"session_id":session_id,"camera_id":camera_id}))
             asyncio.run(self._publish(camera_id, url, token, ttl, stop_event))
+        except Exception as exc:
+            logger.error("[LIVE_VIEW] publisher error %s", json.dumps({"session_id":session_id,
+                "camera_id":camera_id,"error_type":type(exc).__name__}))
         finally:
+            logger.info("[LIVE_VIEW] publisher stopped %s", json.dumps({"session_id":session_id,"camera_id":camera_id}))
             with self._lock:
-                self._sessions.pop(session_id, None)
+                current=self._sessions.get(session_id)
+                if current is not None and current.stop_event is stop_event:
+                    self._sessions.pop(session_id, None)
 
     async def _publish(self, camera_id: str, url: str, token: str, ttl: int, stop_event: threading.Event) -> None:
         try:
@@ -93,12 +106,16 @@ class LiveKitCameraPublisher:
         height, width = first_frame.shape[:2]
         source = rtc.VideoSource(width, height)
         try:
+            logger.info("[LIVE_VIEW] edge connecting %s", json.dumps({"camera_id":camera_id}))
             await room.connect(url, token, rtc.RoomOptions(auto_subscribe=False, dynacast=True))
+            logger.info("[LIVE_VIEW] edge connected %s", json.dumps({"camera_id":camera_id,"room":room.name}))
             track = rtc.LocalVideoTrack.create_video_track("attendance-ai-camera", source)
-            await room.local_participant.publish_track(
+            publication = await room.local_participant.publish_track(
                 track,
                 rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA),
             )
+            logger.info("[LIVE_VIEW] edge track published %s", json.dumps({"camera_id":camera_id,
+                "room":room.name,"track_sid":publication.sid,"source":"CAMERA"}))
             frame_interval = 1.0 / 10.0
             last_frame = first_frame
             while not stop_event.is_set() and time.monotonic() < deadline:

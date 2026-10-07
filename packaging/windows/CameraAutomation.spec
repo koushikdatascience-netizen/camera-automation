@@ -58,6 +58,23 @@ for package_name in ("insightface", "onnxruntime", "openvino", "ultralytics", "t
     binaries += package_binaries
     hiddenimports += package_hiddenimports
 
+# torchvision's native ops (NMS / ROI align) are loaded dynamically by
+# ultralytics and are not a dependency imported by camera_service itself.
+# collect_all("torchvision") includes the package data but may omit these .pyd
+# extension modules, leaving tracking streams alive with inference failing.
+torchvision_datas, torchvision_binaries, torchvision_hiddenimports = collect_all("torchvision")
+datas += torchvision_datas
+binaries += torchvision_binaries
+import importlib.util
+torchvision_spec = importlib.util.find_spec("torchvision")
+if torchvision_spec is None or not torchvision_spec.submodule_search_locations:
+    raise RuntimeError("TorchVision package is required for person tracking")
+torchvision_extension = Path(next(iter(torchvision_spec.submodule_search_locations))) / "_C.pyd"
+if not torchvision_extension.is_file():
+    raise FileNotFoundError(f"TorchVision native operators are missing: {torchvision_extension}")
+binaries.append((str(torchvision_extension), "torchvision"))
+hiddenimports += torchvision_hiddenimports
+
 hiddenimports += collect_submodules("camera_service")
 
 
