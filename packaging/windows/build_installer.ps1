@@ -36,6 +36,34 @@ if (-not (Test-Path $ExpectedAppExe)) {
     throw "Expected application EXE not found: $ExpectedAppExe"
 }
 
+# PyInstaller pulls PyTorch's C/C++ development SDK into the onedir bundle.
+# Camera Eye needs the PyTorch runtime DLLs/Python package, not headers/CMake
+# metadata. Remove those trees physically before Inno Setup scans the bundle.
+$RuntimeRoot = Join-Path $ProjectRoot "dist\SnapKeyVisionAI\_internal"
+$DevelopmentOnlyPaths = @(
+    (Join-Path $RuntimeRoot "torch\include"),
+    (Join-Path $RuntimeRoot "torch\share\cmake")
+)
+foreach ($DevelopmentPath in $DevelopmentOnlyPaths) {
+    if (Test-Path $DevelopmentPath) {
+        Write-Host "Removing development-only payload: $DevelopmentPath"
+        Remove-Item -LiteralPath $DevelopmentPath -Recurse -Force
+    }
+}
+
+# Fail closed: a future packaging change must never silently reintroduce the
+# huge PyTorch SDK into the production installer.
+$ForbiddenDevelopmentFiles = Get-ChildItem -Path $RuntimeRoot -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.FullName -like "*\torch\include\*" -or
+        $_.FullName -like "*\torch\share\cmake\*"
+    } |
+    Select-Object -First 1
+if ($ForbiddenDevelopmentFiles) {
+    throw "Development-only PyTorch payload still present: $($ForbiddenDevelopmentFiles.FullName)"
+}
+Write-Host "Verified production bundle excludes PyTorch headers/CMake metadata."
+
 if ($env:GITHUB_SHA -and $env:GITHUB_RUN_NUMBER) {
     $ExpectedIdentity = "1.0.$($env:GITHUB_RUN_NUMBER) $($env:GITHUB_SHA)"
     $ActualIdentity = (& $ExpectedAppExe --version | Out-String).Trim()
