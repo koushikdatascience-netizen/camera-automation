@@ -75,7 +75,7 @@ jobs:
               -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
             choco install innosetup --no-progress -y
           }
-      - name: Build and smoke-test production Windows installer
+      - name: Build and verify production Windows installer
         shell: pwsh
         run: .\packaging\windows\build_installer.ps1
       - name: Version installer and generate SHA256
