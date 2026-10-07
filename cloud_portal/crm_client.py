@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import threading
 from typing import Any
 
 import httpx
@@ -27,10 +28,21 @@ class SnapKeyCrmClient:
             self.base_url + "/api/Auth/loginUsingFaceTenant",
         ).strip()
         self.timeout=timeout
+        self.face_directory_ttl_seconds=max(
+            1.0,float(os.getenv("SNAPKEY_CRM_FACE_DIRECTORY_TTL_SECONDS","60"))
+        )
+        self._face_directory_cache: dict[str, tuple[float, Any]]={}
+        self._face_directory_lock=threading.RLock()
 
     @property
     def configured(self) -> bool:
+        """Whether legacy CRM operations that require a service token are configured."""
         return bool(self.token)
+
+    @property
+    def face_attendance_configured(self) -> bool:
+        """Face attendance uses CRM's public face-directory/login contract, not a static JWT."""
+        return bool(self.base_url and self.face_login_url)
 
     def _headers(self) -> dict[str,str]:
         if not self.token:
@@ -62,9 +74,10 @@ class SnapKeyCrmClient:
 
     def _request(self, method: str, path: str, *, operation: str,
                  auth_token: str | None = None, tenant_code: str | None = None,
-                 user_id: str | None = None, **kwargs) -> Any:
-        auth_context="face_token" if auth_token else "service_token"
-        headers=self._token_headers(auth_token) if auth_token else self._headers()
+                 user_id: str | None = None, require_auth: bool = True, **kwargs) -> Any:
+        auth_context="face_token" if auth_token else ("service_token" if require_auth else "public")
+        headers=(self._token_headers(auth_token) if auth_token else
+                 (self._headers() if require_auth else {"Accept":"application/json"}))
         headers={**headers,**kwargs.pop("headers",{})}
         started=time.monotonic()
         logger.info(
@@ -119,10 +132,42 @@ class SnapKeyCrmClient:
         return self._request("POST","/api/UserBreak/end-break",operation="end_break",
             auth_token=auth_token,user_id=user_id,params={"userId":user_id})
 
-    def face_embeddings(self, tenant_code: str) -> Any:
+    def face_embeddings(self, tenant_code: str, *, force_refresh: bool = False) -> Any:
+        """Return the tenant face directory, refreshing the in-process cache every 60s by default.
+
+        The CRM contract for this endpoint does not require the legacy static JWT.
+        A previously successful value is retained as stale-on-error protection so a
+        transient CRM outage does not erase tenant/user identity resolution.
+        """
         code=(tenant_code or "").strip()
-        return self._request("GET","/api/User/face-embeddings/"+code,
-                             operation="face_embeddings",tenant_code=code)
+        if not code:
+            raise ValueError("tenant_code is required")
+        now=time.monotonic()
+        with self._face_directory_lock:
+            cached=self._face_directory_cache.get(code)
+            if cached and not force_refresh and now-cached[0] < self.face_directory_ttl_seconds:
+                logger.info("CRM_FACE_DIRECTORY_CACHE_HIT tenant_code=%s age_seconds=%s",
+                            code,int(now-cached[0]))
+                return cached[1]
+        try:
+            result=self._request(
+                "GET","/api/User/face-embeddings/"+code,
+                operation="face_embeddings",tenant_code=code,require_auth=False,
+            )
+        except Exception:
+            with self._face_directory_lock:
+                stale=self._face_directory_cache.get(code)
+            if stale:
+                logger.warning(
+                    "CRM_FACE_DIRECTORY_STALE_FALLBACK tenant_code=%s age_seconds=%s",
+                    code,int(now-stale[0]),
+                )
+                return stale[1]
+            raise
+        with self._face_directory_lock:
+            self._face_directory_cache[code]=(time.monotonic(),result)
+        logger.info("CRM_FACE_DIRECTORY_REFRESHED tenant_code=%s",code)
+        return result
 
     def login_using_face_tenant(self, base64_image: str, tenant_id: str) -> Any:
         image=(base64_image or "").strip()
@@ -139,7 +184,7 @@ class SnapKeyCrmClient:
             with httpx.Client(timeout=self.timeout,follow_redirects=True) as client:
                 response=client.post(
                     self.face_login_url,
-                    headers={**self._headers(),"Content-Type":"application/json"},
+                    headers={"Accept":"application/json","Content-Type":"application/json"},
                     json={"base64Image":image,"tenantId":crm_tenant_id},
                 )
             elapsed_ms=int((time.monotonic()-started)*1000)
