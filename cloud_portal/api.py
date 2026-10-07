@@ -973,8 +973,8 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     if event_type!="PERSON_RECOGNIZED":
         logger.info("AUTO_ATTENDANCE_SKIPPED event_id=%s reason=event_type event_type=%s",event_id,event_type)
         return
-    if not crm_client.configured:
-        logger.error("AUTO_ATTENDANCE_SKIPPED event_id=%s tenant_code=%s camera_id=%s reason=crm_not_configured",
+    if not crm_client.face_attendance_configured:
+        logger.error("AUTO_ATTENDANCE_SKIPPED event_id=%s tenant_code=%s camera_id=%s reason=crm_face_attendance_not_configured",
                      event_id,tenant_id,camera_id)
         return
 
