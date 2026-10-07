@@ -899,12 +899,50 @@ def _has_attendance_entry_today(tenant_id: str, shop_id: str, person_id: str, wh
             return True
     return False
 
-def _crm_tenant_uuid_for_user(tenant_code: str, crm_user_id: str) -> str:
-    """Resolve CRM's tenant UUID from the authoritative face directory.
+def _crm_face_login_identity(tenant_code: str, crm_user_id: str) -> tuple[str, str]:
+    """Return CRM tenant UUID and the user's enrolled face image from the cached directory.
 
-    Camera Eye tenant_id is the CRM tenant code (for example ABM-46-775), while
-    loginUsingFaceTenant requires the CRM tenant UUID returned on each CRM user.
+    loginUsingFaceTenant must receive the enrolled Base64 image returned by CRM's
+    face-embeddings directory, not Camera Eye recognition evidence. Preserve the CRM
+    image bytes exactly: only remove an optional data-URL prefix.
     """
+    raw=crm_client.face_embeddings(tenant_code)
+    users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
+    target=str(crm_user_id or "").strip()
+    for user in users:
+        if not isinstance(user,dict) or str(user.get("id") or "").strip()!=target:
+            continue
+        crm_tenant_id=str(user.get("tenantId") or "").strip()
+        if not crm_tenant_id:
+            raise RuntimeError("CRM face directory user is missing tenantId")
+
+        sources=_crm_image_sources(user)
+        for source in sources:
+            image=source.strip()
+            if image.startswith(("http://","https://","/")):
+                continue
+            if image.startswith("data:") and "," in image:
+                image=image.split(",",1)[1].strip()
+            if image:
+                logger.info(
+                    "CRM_FACE_LOGIN_IDENTITY_RESOLVED tenant_code=%s crm_user_id=%s crm_tenant_id=%s enrolled_image_present=true",
+                    tenant_code,target,crm_tenant_id,
+                )
+                return crm_tenant_id,image
+
+        logger.error(
+            "CRM_FACE_LOGIN_IMAGE_MISSING tenant_code=%s crm_user_id=%s image_source_count=%s",
+            tenant_code,target,len(sources),
+        )
+        raise RuntimeError("CRM face directory did not return an enrolled Base64 face image for the requested CRM user")
+
+    logger.error("CRM_TENANT_RESOLUTION_FAILED tenant_code=%s crm_user_id=%s directory_users=%s",
+                 tenant_code,target,len(users))
+    raise RuntimeError("CRM face directory did not return the requested CRM user")
+
+
+def _crm_tenant_uuid_for_user(tenant_code: str, crm_user_id: str) -> str:
+    """Resolve CRM's tenant UUID from the authoritative face directory."""
     raw=crm_client.face_embeddings(tenant_code)
     users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
     target=str(crm_user_id or "").strip()
@@ -1039,11 +1077,12 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         logger.warning("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s camera_id=%s reason=attendance_already_exists", event_id,person_id,camera_id)
         return
     try:
-        crm_tenant_id=_crm_tenant_uuid_for_user(tenant_id,mapping["crm_user_id"])
-        image_base64=_recognition_image_base64(payload)
-        logger.info("CRM_FACE_LOGIN_ATTEMPT person_id=%s crm_user_id=%s camera_id=%s tenant_id=%s",
+        crm_tenant_id,enrolled_face_base64=_crm_face_login_identity(
+            tenant_id,mapping["crm_user_id"]
+        )
+        logger.info("CRM_FACE_LOGIN_ATTEMPT person_id=%s crm_user_id=%s camera_id=%s tenant_id=%s image_source=crm_enrolled_face",
             person_id,mapping["crm_user_id"],camera_id,crm_tenant_id)
-        crm_result=crm_client.login_using_face_tenant(image_base64,crm_tenant_id)
+        crm_result=crm_client.login_using_face_tenant(enrolled_face_base64,crm_tenant_id)
         if not _crm_face_login_succeeded(crm_result):
             logger.warning("CRM_FACE_LOGIN_REJECTED person_id=%s crm_user_id=%s",
                 person_id,mapping["crm_user_id"])
