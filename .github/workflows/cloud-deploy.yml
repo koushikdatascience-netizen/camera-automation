@@ -1,6 +1,9 @@
 name: Camera Eye Cloud Deploy
 
 on:
+  push:
+    branches:
+      - feat/camera-eye-live-view-ux
   workflow_dispatch:
 
 permissions:
