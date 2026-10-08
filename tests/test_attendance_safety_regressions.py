@@ -93,9 +93,12 @@ def test_auto_logout_requires_full_sixty_minutes_and_uses_camera_scope(monkeypat
 
     now = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
     row = {"tenant_id": "tenant", "shop_id": "shop", "crm_user_id": "user",
-           "last_seen_at": now - timedelta(minutes=59), "last_camera_id": "cam"}
+           "checked_in": True, "on_break": False,
+           "last_seen_at": now - timedelta(minutes=59), "last_camera_id": "cam",
+           "last_camera_zone": "inside"}
     monkeypatch.setenv("CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED", "true")
-    row["policy_json"] = {"attendanceMode": "MANUAL"}
+    row["policy_json"] = {"attendanceMode": "MANUAL", "absenceMonitoringEnabled": True,
+                           "markAbsentAfterMinutes": 60}
     calls = []
     monkeypatch.setattr(api, "store", type("Store", (), {
         "attendance_camera_coverage_healthy": lambda self, *args, **kwargs: calls.append((args, kwargs)) or True,
@@ -111,29 +114,32 @@ def test_auto_logout_requires_full_sixty_minutes_and_uses_camera_scope(monkeypat
     })())
     monkeypatch.setattr(api, "_v2_face_token", lambda *_args: "mock-token")
     monkeypatch.setattr(api.crm_client, "auto_logout_with_face_token", lambda *_args: {"success": True})
+    monkeypatch.setattr(api, "_crm_mutation_succeeded", lambda _result: True)
 
-    api._v2_auto_logout(row, now)
-
-    assert calls == []
-
-    row["last_seen_at"] = now - timedelta(hours=1)
     api._v2_auto_logout(row, now)
     assert calls == []
 
-    row["policy_json"] = {"attendanceMode": "AUTO"}
-    row["last_seen_at"] = now - timedelta(minutes=59)
-    api._v2_auto_logout(row, now)
-    assert calls == []
-
-    row["last_seen_at"] = now - timedelta(hours=1)
-    row["last_camera_id"] = None
-    api._v2_auto_logout(row, now)
-    assert calls == []
-
-    row["last_camera_id"] = "cam"
+    row["last_seen_at"] = now - timedelta(minutes=61)
     api._v2_auto_logout(row, now)
     assert calls[0][1]["camera_id"] == "cam"
     assert calls[1] == "claim"
+    assert calls[2:] == ["crm-confirmed", "local-finalized"]
+
+    call_count = len(calls)
+    row["policy_json"]["absenceMonitoringEnabled"] = False
+    api._v2_auto_logout(row, now)
+    row["policy_json"]["absenceMonitoringEnabled"] = True
+    row["on_break"] = True
+    api._v2_auto_logout(row, now)
+    row["on_break"] = False
+    row["checked_in"] = False
+    api._v2_auto_logout(row, now)
+    assert len(calls) == call_count
+
+    row["checked_in"] = True
+    row["last_camera_id"] = None
+    api._v2_auto_logout(row, now)
+    assert len(calls) == call_count
 
 
 def test_manual_policy_updates_presence_without_crm_check_in(monkeypatch):

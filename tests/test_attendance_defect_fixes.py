@@ -51,7 +51,7 @@ def test_manual_successful_checkin_updates_presence_for_absence_monitoring(monke
 def test_manual_mode_keeps_absence_monitoring_active(monkeypatch):
     now=datetime.now(timezone.utc)
     row={"tenant_id":"tenant","shop_id":"shop","crm_user_id":"user","local_person_id":"person",
-         "checked_in":True,"on_break":False,"last_seen_at":now-timedelta(minutes=20),
+         "checked_in":True,"on_break":False,"last_seen_at":now-timedelta(minutes=91),
          "last_camera_id":"cam","last_camera_zone":"inside",
          "policy_json":{"attendanceMode":"MANUAL","absenceMonitoringEnabled":True,
                         "outOfCameraGraceMinutes":5,"adminNotificationAfterMinutes":15,
@@ -73,7 +73,7 @@ def test_manual_mode_keeps_absence_monitoring_active(monkeypatch):
     assert "ADMIN_ABSENCE_WARNING" in transitions
     assert coverage
     assert notifications
-    assert logout==[]
+    assert logout==[True]
 
 
 def test_absence_monitoring_can_be_explicitly_disabled_per_person(monkeypatch):

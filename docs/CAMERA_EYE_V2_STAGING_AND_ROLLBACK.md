@@ -2,6 +2,8 @@
 
 Status: **staging preparation only**. This branch has not been deployed or verified against a staging PostgreSQL instance or the live CRM contract. Keep `CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED=false`. The separate legacy CRM flags are independent.
 
+The production deploy workflow is manual-dispatch only and targets the GitHub `production` environment. Before any dispatch, a repository administrator must configure required reviewers under **Settings → Environments → production**. The GitHub environment currently has no protection rules, so the workflow file alone cannot require reviewer approval.
+
 ## Configuration
 
 Copy `.env.cloud.example` to `.env` on the staging host and provision every secret using the host's secret manager. Never commit `.env`, CRM face crops, access tokens, or employee JWTs. Production CRM integration requires `SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES`, a JSON list of tenant/shop grants, e.g. `[{"tenant_id":"tenant-a","shop_ids":["shop-1"]}]`. Each V1/V2 integration route checks its URL tenant and shop against that list. The allow-list scopes the configured shared key; it is not a per-tenant credential. Requests and policy writes are logged with tenant/shop/user IDs, never the key.
@@ -30,7 +32,7 @@ Replace database/user names in the backup command if `.env` overrides defaults. 
 
 `PostgresPortalStore._init()` applies idempotent `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, and index statements on portal startup. These are inline schema bootstraps, not a versioned migration system. This hardening adds `attendance_presence.last_camera_zone`, CRM action-recovery metadata, `notification_outbox`, and `attendance_camera_coverage`. Review DDL in `cloud_portal/postgres_storage.py` and take a tested PostgreSQL backup before upgrading. Verify a fresh database and one previous-release upgrade in staging; a SQLite test is not a substitute. `tests/test_postgres_attendance_integration.py` is enabled with `SNAPKEY_TEST_DATABASE_URL` pointed at a disposable database whose name contains `test`.
 
-For a local database integration run, start Docker Desktop and run `tools/run_postgres_integration.ps1` from the repository root. It starts the opt-in `postgres-test` Compose service on loopback port 55432, runs the test against its isolated disposable database, and removes the test container afterward. It does not connect to or modify the portal's persistent `postgres` service. The cloud deploy workflow also creates a disposable `camera_eye_test` database in its ephemeral PostgreSQL service and treats a skipped database test as a failure.
+For a local database integration run, start Docker Desktop and run `tools/run_postgres_integration.ps1` from the repository root. It starts the opt-in `postgres-test` Compose service on loopback port 55432, runs the test against its isolated disposable database, and removes the test container afterward. It does not connect to or modify the portal's persistent `postgres` service. CI creates a disposable `camera_eye_test` database in its PostgreSQL service and treats a skipped database test as a failure.
 
 Back up before each upgrade:
 

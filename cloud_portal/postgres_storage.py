@@ -795,6 +795,7 @@ class PostgresPortalStore:
             activity_metadata=dict(activity.get("metadata") or {})
             if recognition_advanced:
                 activity_metadata["recognitionAdvancedDuringCrmLogout"]=True
+                activity_metadata["crmLocalAttendanceMismatch"]="RECONCILIATION_REQUIRED"
             conn.execute(text("""INSERT INTO attendance_activity(
                 id,tenant_id,shop_id,crm_user_id,local_person_id,activity_type,occurred_at,
                 reason_code,source,camera_id,evidence_json,metadata_json,created_at)
@@ -805,6 +806,15 @@ class PostgresPortalStore:
                     "person":presence["local_person_id"],"occurred":activity["occurred_at"],
                     "camera":activity.get("camera_id"),"evidence":json.dumps(activity.get("evidence") or {}),
                     "metadata":json.dumps(activity_metadata),"created":self.now()})
+            if recognition_advanced:
+                conn.execute(text("""UPDATE crm_auto_logout_actions
+                    SET status='RECONCILIATION_REQUIRED',completed_at=:now,
+                        last_error='recognition_advanced_during_crm_logout'
+                    WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                      AND absence_started_at=:started AND status='CRM_CONFIRMED_LOCAL_PENDING'"""),{
+                        "now":self.now(),"tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                        "started":absence_started_at})
+                return "RECONCILIATION_REQUIRED"
             conn.execute(text("""UPDATE attendance_presence SET checked_in=FALSE,on_break=FALSE,
                 checkout_claimed_at=NULL,updated_at=:now WHERE tenant_id=:tenant AND shop_id=:shop
                 AND local_person_id=:person AND checked_in=TRUE"""),{

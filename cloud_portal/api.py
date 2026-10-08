@@ -2310,13 +2310,17 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
     if os.getenv("CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED","false").lower()!="true":
         return
     policy=row.get("policy_json") or {}
-    if str(policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
+    if not policy.get("absenceMonitoringEnabled",True):
+        return
+    if not row.get("checked_in") or row.get("on_break"):
         return
     tenant=str(row["tenant_id"]);shop=str(row["shop_id"]);user=str(row["crm_user_id"])
     started=row["last_seen_at"]
     # Policy thresholds drive absence alerts; this one fixed limit is reserved
     # solely for the CRM endpoint's confirmed 60-minute absence contract.
-    if (now-started).total_seconds() < CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES*60:
+    policy_absence_minutes=int(policy.get("markAbsentAfterMinutes",CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES))
+    required_absence_minutes=max(policy_absence_minutes,CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES)
+    if (now-started).total_seconds() < required_absence_minutes*60:
         return
     attendance_camera_id=row.get("last_camera_id")
     coverage_zone=row.get("last_camera_zone") or policy.get("attendanceCameraZone")
@@ -2485,7 +2489,8 @@ def _evaluate_v2_person_absences() -> None:
             # Do not bind the fixed CRM endpoint threshold to markAbsentAfterMinutes:
             # custom policy thresholds may be shorter or longer. Both thresholds
             # must be met before mutation; the CRM contract floor cannot be lowered.
-            if (policy.attendance_mode=="AUTO" and row.get("checked_in") and not row.get("on_break")
+            if (row.get("checked_in") and not row.get("on_break")
+                    and policy_data.get("absenceMonitoringEnabled",True)
                     and evaluation.elapsed_minutes>=max(policy.mark_absent_after_minutes,
                                                         CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES)):
                 _v2_auto_logout(row,now)

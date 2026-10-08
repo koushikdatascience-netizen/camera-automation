@@ -90,10 +90,15 @@ def test_postgres_fresh_schema_outbox_and_auto_logout_recovery():
         assert store.reconcile_crm_auto_logout_action(tenant,shop,user,ambiguous_started,"CRM_CONFIRMED") is True
         assert store.finalize_crm_auto_logout_local(tenant,shop,user,ambiguous_started,{
             "id":"reconciled-auto-logout","occurred_at":now,"camera_id":"cam-test",
-            "evidence":{"status":"UNAVAILABLE"},"metadata":{}})=="SUCCEEDED"
-        assert store.get_person_attendance_presence(tenant,shop,user)["checked_in"] is False
+            "evidence":{"status":"UNAVAILABLE"},"metadata":{}})=="RECONCILIATION_REQUIRED"
+        newer_presence=store.get_person_attendance_presence(tenant,shop,user)
+        assert newer_presence["checked_in"] is True
+        assert newer_presence["last_seen_at"]==reentry+timedelta(minutes=1)
         reconciled=store.get_person_attendance_activity(tenant,shop,user,"reconciled-auto-logout")
         assert reconciled["metadata"]["recognitionAdvancedDuringCrmLogout"] is True
+        assert reconciled["metadata"]["crmLocalAttendanceMismatch"]=="RECONCILIATION_REQUIRED"
+        action=store.list_v2_crm_auto_logout_actions(tenant,shop,user)[0]
+        assert action["status"]=="RECONCILIATION_REQUIRED"
     finally:
         if store is not None:
             store.engine.dispose()
