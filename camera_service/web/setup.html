@@ -1760,11 +1760,14 @@
             const security = camera?.camera_role === 'SECURITY';
             document.getElementById('focus-purpose').textContent = entrance ? 'Attendance Station' : security ? 'Security Monitor' : 'Camera workspace';
             document.getElementById('station-panel').hidden = !entrance;
-            document.getElementById('security-panel').hidden = !security;
-            document.getElementById('security-zone-layer').hidden = !security || !livePreviewOpen;
+            const unknownDetectionEnabled = !!camera?.features?.unknown_detection || !!camera?.features?.unknown_person_detection;
+            const unknownZoneRole = security || entrance;
+            document.getElementById('security-panel').hidden = !security && !(entrance && unknownDetectionEnabled);
+            document.getElementById('security-zone-layer').hidden = !unknownZoneRole || !unknownDetectionEnabled || !livePreviewOpen;
             for (const id of ['focus-camera-start','focus-camera-stop']) document.getElementById(id).hidden = entrance;
             if (entrance && livePreviewOpen) loadAttendanceStation();
-            if (security && livePreviewOpen) { loadSecurityZones(); fetch(`${API_BASE}/safety/capabilities`).then(r=>r.json()).then(s=>{document.getElementById('safety-capability').textContent=`Fire: ${s.fire.available?'Available':s.fire.reason}; Smoke: ${s.smoke.available?'Available':s.smoke.reason}`;}).catch(()=>{}); }
+            if (unknownZoneRole && unknownDetectionEnabled && livePreviewOpen) loadSecurityZones();
+            if (security && livePreviewOpen) fetch(`${API_BASE}/safety/capabilities`).then(r=>r.json()).then(s=>{document.getElementById('safety-capability').textContent=`Fire: ${s.fire.available?'Available':s.fire.reason}; Smoke: ${s.smoke.available?'Available':s.smoke.reason}`;}).catch(()=>{});
             if (!entrance || !livePreviewOpen) clearStationCandidate();
             const image = document.getElementById('focus-camera-image');
             const placeholder = document.getElementById('focus-camera-placeholder');
@@ -2188,12 +2191,11 @@
             if(role==='ENTRANCE_EXIT'){
                 set('feature-attendance',true);
                 set('feature-face-recognition',true);
-                set('feature-unknown-detection',false);
                 set('feature-shoplifting',false);
                 set('feature-object-security',false);
                 show('feature-row-attendance',true);
                 show('feature-row-face-recognition',true);
-                show('feature-row-unknown-detection',false);
+                show('feature-row-unknown-detection',true);
                 show('feature-row-shoplifting',false);
                 show('feature-row-object-security',false);
             } else if(role==='SECURITY'){
@@ -2249,8 +2251,8 @@
                 features: {
                     attendance: document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
                     face_recognition: document.getElementById('feature-face-recognition').checked || document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
-                    unknown_detection: document.getElementById('camera-role').value === 'SECURITY' && document.getElementById('feature-unknown-detection').checked,
-                    unknown_person_detection: document.getElementById('camera-role').value === 'SECURITY' && document.getElementById('feature-unknown-detection').checked,
+                    unknown_detection: ['SECURITY','ENTRANCE_EXIT'].includes(document.getElementById('camera-role').value) && document.getElementById('feature-unknown-detection').checked,
+                    unknown_person_detection: ['SECURITY','ENTRANCE_EXIT'].includes(document.getElementById('camera-role').value) && document.getElementById('feature-unknown-detection').checked,
                     shoplifting: document.getElementById('camera-role').value === 'SHOPLIFTING' && document.getElementById('feature-shoplifting').checked,
                     shoplifting_detection: document.getElementById('camera-role').value === 'SHOPLIFTING' && document.getElementById('feature-shoplifting').checked,
                     object_security: ['SECURITY','SHOPLIFTING'].includes(document.getElementById('camera-role').value) && document.getElementById('feature-object-security').checked

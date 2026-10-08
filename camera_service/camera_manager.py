@@ -276,6 +276,10 @@ class CameraManager:
             return None
         key = key_prefix + str(zone["id"])
         state = self._unknown_zone_state.setdefault(key, {"first_seen": now, "last_seen": now})
+        # A long recognition/camera gap breaks temporal confirmation. Do not let
+        # one observation followed much later by another confirm an unknown.
+        if now - float(state.get("last_seen", now)) > max(1.5, min(float(seconds), 3.0)):
+            state["first_seen"] = now
         state["last_seen"] = now
         if now - state["first_seen"] >= max(0.5, float(seconds)):
             return zone
@@ -1156,16 +1160,24 @@ class CameraManager:
 
                     roi = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
                     if should_check_face and roi.size:
+                        face_detection_failed = False
                         try:
                             faces = face_service.detect(roi)
                         except Exception:
                             faces = []
+                            face_detection_failed = True
                             if stream_state is not None:
                                 stream_state["face_error"] = "Face recognition is unavailable"
                         if faces:
                             best = max(faces, key=lambda face: face_service.quality(face, roi.shape))
                             if best.get("embedding") is not None and face_service.quality(best, roi.shape) >= recognition_config.minimum_face_quality:
-                                match, score = face_service.recognize(best.get("embedding"), recognition_config.known_threshold)
+                                try:
+                                    match, score = face_service.recognize(best.get("embedding"), recognition_config.known_threshold)
+                                except Exception:
+                                    match, score = None, 0.0
+                                    face_detection_failed = True
+                                    if stream_state is not None:
+                                        stream_state["face_error"] = "Face recognition is unavailable"
                                 if match:
                                     active_known_tracks.add(str(track_id))
                                     snapshot_path = self._save_event_snapshot(frame, camera_id, "recognized")
@@ -1211,7 +1223,10 @@ class CameraManager:
                                         "name": recognized_name,
                                         "score": score,
                                     }
-                                elif camera_config.camera_role == CameraRole.SECURITY and (camera_config.features.unknown_detection or camera_config.features.unknown_person_detection) and camera_zone == "inside" and store:
+                                elif (not face_detection_failed
+                                      and runtime_camera_config.camera_role in {CameraRole.SECURITY, CameraRole.ENTRANCE_EXIT}
+                                      and runtime_camera_config.features.unknown_enabled
+                                      and camera_zone == "inside" and store):
                                     confirmed_zone = self._confirmed_unknown_zone(camera_id, str(track_id), (x1, y1, x2, y2), frame.shape)
                                     should_create = bool(
                                         confirmed_zone
@@ -1238,12 +1253,13 @@ class CameraManager:
                                             except Exception:
                                                 pass
                                             self._begin_unknown_clip(stream_state, incident_id, camera_id)
-                                    self._track_identity_cache[cache_key] = {
-                                        "checked_at": now,
-                                        "person_id": None,
-                                        "text": f"Unknown person {score:.2f}",
-                                        "score": score,
-                                    }
+                                    if not face_detection_failed:
+                                        self._track_identity_cache[cache_key] = {
+                                            "checked_at": now,
+                                            "person_id": None,
+                                            "text": f"Unknown person {score:.2f}",
+                                            "score": score,
+                                        }
                             else:
                                 self._track_identity_cache[cache_key] = {
                                     "checked_at": now,
@@ -1251,7 +1267,7 @@ class CameraManager:
                                     "text": "Face too small/blurred",
                                     "score": 0.0,
                                 }
-                        else:
+                        elif not face_detection_failed:
                             self._track_identity_cache[cache_key] = {
                                 "checked_at": now,
                                 "person_id": None,
@@ -1262,8 +1278,8 @@ class CameraManager:
                     cached_identity = self._track_identity_cache.get(cache_key) or {}
                     recognized_text = cached_identity.get('text')
                     if (recognized_text and recognized_text.lower().startswith('unknown')
-                        and camera_zone == 'inside' and camera_config.features.unknown_enabled
-                        and camera_config.camera_role == CameraRole.SECURITY
+                        and camera_zone == 'inside' and runtime_camera_config.features.unknown_enabled
+                        and runtime_camera_config.camera_role in {CameraRole.SECURITY, CameraRole.ENTRANCE_EXIT}
                         and self._confirmed_unknown_zone(camera_id, str(track_id), (x1, y1, x2, y2), frame.shape)):
                         self._security_alerter.alarm_beep(f'unknown:{camera_id}', True, 1250, 650, 8.0)
 

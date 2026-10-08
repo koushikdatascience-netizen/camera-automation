@@ -21,16 +21,16 @@ def _camera(manager, camera_id="sec-1", role="SECURITY", attendance_active=True)
     })
 
 
-def test_attendance_camera_disables_unknown_security_and_persists_active(tmp_path):
+def test_attendance_camera_preserves_unknown_detection_choice_and_persists(tmp_path):
     manager = CameraManager(str(tmp_path / "camera.db"))
     camera = _camera(manager, camera_id="attendance-1", role="ENTRANCE_EXIT", attendance_active=False)
     assert camera.attendance_active is False
     assert camera.features.attendance is True
     assert camera.features.face_recognition is True
-    assert camera.features.unknown_enabled is False
+    assert camera.features.unknown_enabled is True
     loaded = manager.get_camera("attendance-1")
     assert loaded.attendance_active is False
-    assert loaded.features.unknown_enabled is False
+    assert loaded.features.unknown_enabled is True
 
 
 def test_security_zone_is_normalized_and_persists(tmp_path):
@@ -84,4 +84,4 @@ def test_role_normalization_removes_attendance_security_mix(tmp_path):
     })
     assert attendance.features.attendance is True
     assert attendance.features.face_recognition is True
-    assert attendance.features.unknown_enabled is False
+    assert attendance.features.unknown_enabled is True
