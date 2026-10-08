@@ -15,9 +15,9 @@ def snapshot(store, tenant_id: str, shop_id: str, limit: int = 100):
             LEFT JOIN person_attendance_policies pp ON pp.tenant_id=p.tenant_id
               AND pp.shop_id=p.shop_id AND pp.crm_user_id=p.crm_user_id
             LEFT JOIN LATERAL (
-              SELECT coverage_state AS state, reason FROM attendance_camera_coverage
+              SELECT state, reason FROM attendance_camera_coverage
               WHERE tenant_id=p.tenant_id AND shop_id=p.shop_id AND crm_user_id=p.crm_user_id
-              ORDER BY updated_at DESC LIMIT 1
+              ORDER BY checked_at DESC LIMIT 1
             ) c ON TRUE
             WHERE p.tenant_id=:tenant AND p.shop_id=:shop
             ORDER BY p.updated_at DESC LIMIT :limit
