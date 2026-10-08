@@ -838,7 +838,7 @@ def portal_login():
 
 @app.get("/portal/{page_name}", include_in_schema=False)
 def portal_page(page_name: str):
-    allowed = {"index.html", "system-status.html", "cameras.html", "personnel.html", "attendance.html", "live.html", "alerts.html"}
+    allowed = {"index.html", "system-status.html", "cameras.html", "personnel.html", "attendance.html", "live.html", "alerts.html", "verification.html"}
     if page_name not in allowed:
         raise HTTPException(404, "Portal page not found")
     return FileResponse(PORTAL_STATIC_DIR / page_name)
@@ -2132,6 +2132,19 @@ def crm_test_break_end(tenant_id: str, local_person_id: str, principal: PortalPr
 def tenant_summary(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
     return store.tenant_summary(tenant_id, shop_id=principal.shop_id)
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/verification")
+def portal_verification(tenant_id: str, limit: int = 100,
+                        principal: PortalPrincipal = Depends(require_portal_session)):
+    """Read-only diagnostics; never return cross-shop records."""
+    _portal_scope(tenant_id, principal)
+    from cloud_portal.verification import snapshot
+    try:
+        return snapshot(store, tenant_id, principal.shop_id, limit)
+    except Exception:
+        logger.exception("VERIFICATION_SNAPSHOT_FAILED tenant_id=%s shop_id=%s", tenant_id, principal.shop_id)
+        raise HTTPException(503, "Verification data unavailable") from None
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/events")
