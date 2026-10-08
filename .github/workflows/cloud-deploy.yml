@@ -1,6 +1,9 @@
 name: Camera Eye Cloud Deploy
 
 on:
+  push:
+    branches:
+      - feat/camera-eye-live-view-ux
   workflow_dispatch:
 
 permissions:
@@ -14,9 +17,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    environment:
-      name: production
-      url: https://camera.snapkey.ai
     services:
       postgres:
         image: postgres:17
