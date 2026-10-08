@@ -539,7 +539,11 @@ class CameraManager:
             "source_type": camera_data.get("source_type") or "rtsp",
             "rtsp_url": source,
             "enabled": bool(camera_data.get("enabled", True)),
-            "camera_role": camera_data.get("camera_role") or CameraRole.GENERAL.value,
+            "camera_role": (CameraRole.SECURITY.value if (
+                str(camera_data.get("camera_role") or "").upper() == CameraRole.GENERAL.value
+                and bool(local_features.get("unknown_detection") or local_features.get("unknown_person_detection"))
+                and not bool(local_features.get("attendance"))
+            ) else (camera_data.get("camera_role") or CameraRole.GENERAL.value)),
             "camera_zone": self._normalize_cloud_zone(camera_data.get("camera_zone")),
             "crowd_threshold": camera_data.get("crowd_threshold", 10),
             "tracking_fps": settings.get("tracking_fps", os.environ.get("SNAPKEY_PROFILE_TRACKING_FPS", 3.0)),
