@@ -51,6 +51,7 @@ class SQLiteStore:
             # identities rather than being misclassified as intentional local-only users.
             self._ensure_column(c,'personnel','managed_source',"TEXT NOT NULL DEFAULT 'legacy'")
             self._recover_interrupted_attendance_evidence(c)
+            self._release_stalled_unknown_incidents(c)
     def _ensure_column(self,conn,table,column,definition):
         existing={row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in existing:
@@ -76,6 +77,38 @@ class SQLiteStore:
                 conn.execute("UPDATE person_events SET metadata_json=? WHERE id=?",(json.dumps(metadata),row['id']))
             except (ValueError,TypeError,json.JSONDecodeError):
                 continue
+    def _release_stalled_unknown_incidents(self, conn):
+        """Unblock legacy unknown alerts queued without any clip producer.
+
+        Unknown incidents must reach the cloud even when only a snapshot exists.
+        Preserve existing media references and allow a later clip upload if present.
+        """
+        rows = conn.execute(
+            "SELECT id,payload_json FROM edge_event_queue "
+            "WHERE status='PENDING' AND event_type='UNKNOWN_INCIDENT'"
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+                metadata = payload.get("metadata") or {}
+                if not metadata.get("evidence_pending"):
+                    continue
+                metadata["evidence_pending"] = False
+                metadata["evidence_status"] = (
+                    "PARTIAL" if metadata.get("person_path") or metadata.get("face_path")
+                    else "UNAVAILABLE"
+                )
+                metadata.setdefault("evidence_missing", {}).setdefault(
+                    "clip", "not_captured"
+                )
+                payload["metadata"] = metadata
+                conn.execute(
+                    "UPDATE edge_event_queue SET payload_json=? WHERE id=?",
+                    (json.dumps(payload), row["id"]),
+                )
+            except (ValueError, TypeError, AttributeError):
+                continue
+
     @staticmethod
     def now(): return datetime.now(timezone.utc).isoformat()
     def _enqueue_edge_event(self,conn,event_id,event_type,payload):
@@ -272,7 +305,7 @@ class SQLiteStore:
                     c.execute("UPDATE unknown_incidents SET last_seen=?,recognition_attempts=?,best_similarity=COALESCE(?,best_similarity),best_face_snapshot=COALESCE(?,best_face_snapshot),best_person_snapshot=COALESCE(?,best_person_snapshot),clip_path=COALESCE(?,clip_path) WHERE id=?",(last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path,row['id']))
                     return row['id'],False
                 iid=str(uuid.uuid4()); c.execute("INSERT INTO unknown_incidents(id,store_id,camera_id,track_id,first_seen,confirmed_unknown_at,last_seen,recognition_attempts,best_similarity,best_face_snapshot,best_person_snapshot,clip_path,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')",(iid,store_id,camera_id,track_id,first_seen.isoformat(),confirmed.isoformat(),last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path))
-                payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path,'evidence_pending':clip_path is None}}
+                payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path,'evidence_pending':False,'evidence_status':'PARTIAL' if person_path or face_path else 'UNAVAILABLE'}}
                 self._enqueue_edge_event(c,iid,'UNKNOWN_INCIDENT',payload)
                 return iid,True
     def update_unknown_clip(self,iid,clip_path):
