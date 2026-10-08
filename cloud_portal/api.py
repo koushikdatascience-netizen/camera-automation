@@ -603,6 +603,19 @@ def integration_person_attendance_evidence(tenant_id: str, shop_id: str, crm_use
             "mediaAccess":"NOT_IMPLEMENTED","note":"Signed media access pending"}
 
 
+
+@app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/alerts")
+def integration_person_attendance_alerts(tenant_id: str, shop_id: str, crm_user_id: str,
+                                         request: Request, day: date, limit: int = 100):
+    _require_crm_integration(request)
+    if not 1 <= limit <= 200:
+        raise HTTPException(422,"Invalid limit")
+    if not hasattr(store,"list_v2_absence_alerts"):
+        raise HTTPException(503,"V2 alerts require PostgreSQL")
+    return {"items":store.list_v2_absence_alerts(tenant_id,shop_id,crm_user_id,
+                                                  day.isoformat(),limit),
+            "date":day.isoformat(),"notificationDelivery":"NOT_IMPLEMENTED"}
+
 @app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/daily-activity")
 def integration_daily_activity(tenant_id: str, shop_id: str, crm_user_id: str, day: date, request: Request):
     _require_crm_integration(request)
@@ -2005,10 +2018,69 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
                          tenant_id,shop_id,person_id,reason_code)
 
 
+
+def _evaluate_v2_person_absences() -> None:
+    """Record durable person-wise absence thresholds without unsafe CRM mutations.
+
+    CRM logout remains pending until encrypted per-user face tokens and retry
+    semantics are implemented. Camera health failure must never imply absence.
+    """
+    if not hasattr(store,"list_v2_attendance_presence"):
+        return
+    from cloud_portal.person_attendance_rules import PersonAttendancePolicy, evaluate_absence
+    now=datetime.now(timezone.utc)
+    for row in store.list_v2_attendance_presence(limit=200):
+        try:
+            policy_data=row["policy_json"]
+            if not policy_data.get("absenceMonitoringEnabled",True):
+                continue
+            policy=PersonAttendancePolicy(
+                attendance_mode=policy_data.get("attendanceMode","AUTO"),
+                presence_update_interval_minutes=policy_data.get("presenceUpdateIntervalMinutes",2),
+                out_of_camera_grace_minutes=policy_data.get("outOfCameraGraceMinutes",5),
+                max_out_of_camera_occurrences_per_day=policy_data.get("maxOutOfCameraOccurrencesPerDay",5),
+                admin_notification_after_minutes=policy_data.get("adminNotificationAfterMinutes",15),
+                mark_absent_after_minutes=policy_data.get("markAbsentAfterMinutes",60),
+                required_working_minutes=policy_data.get("requiredWorkingMinutes",540),
+                timezone=policy_data.get("timezone","Asia/Kolkata"),
+            )
+            tenant=str(row["tenant_id"]); shop=str(row["shop_id"])
+            user=str(row["crm_user_id"]); seen=row["last_seen_at"]
+            if not store.attendance_camera_coverage_healthy(tenant,shop,now):
+                continue
+            from zoneinfo import ZoneInfo as _ZoneInfo
+            business_day=now.astimezone(_ZoneInfo(policy.timezone)).date().isoformat()
+            episodes=store.count_v2_absence_episodes(tenant,shop,user,business_day)
+            # An episode is keyed by its last-seen timestamp, not by each worker tick.
+            evaluation=evaluate_absence(
+                policy,now=now,last_seen_at=seen,
+                checked_in=bool(row["checked_in"]),on_break=bool(row["on_break"]),
+                camera_coverage_healthy=True,completed_episodes_today=episodes,
+                active_episode_counted=True,
+            )
+            for transition in evaluation.transitions:
+                # The limit is checked against persisted distinct grace events.
+                if transition=="DAILY_ABSENCE_LIMIT_EXCEEDED" and episodes<=policy.max_out_of_camera_occurrences_per_day:
+                    continue
+                created=store.record_v2_absence_transition(
+                    tenant_id=tenant,shop_id=shop,crm_user_id=user,
+                    business_date=business_day,absence_started_at=seen,
+                    transition=transition,occurred_at=now,
+                    details={"elapsedMinutes":round(evaluation.elapsed_minutes,2),
+                             "cameraId":row.get("last_camera_id"),"state":evaluation.state},
+                )
+                if created:
+                    logger.info("V2_ATTENDANCE_TRANSITION tenant_id=%s shop_id=%s crm_user_id=%s transition=%s",
+                                tenant,shop,user,transition)
+        except Exception:
+            logger.exception("V2_ATTENDANCE_EVALUATION_FAILED user_id=%s",row.get("crm_user_id"))
+
+
 def _evaluate_absence_checkouts() -> None:
     """Evaluate absence and maximum-logoff rules after heartbeats."""
     if not hasattr(store,"claim_due_absence_checkouts"):
         return
+    _evaluate_v2_person_absences()
     now=datetime.now(timezone.utc)
     for presence in store.claim_due_max_logoff_checkouts(now,limit=50):
         _process_automatic_checkout(presence,now=now,reason_code="MAX_LOGOFF_REACHED",
