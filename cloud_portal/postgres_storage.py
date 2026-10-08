@@ -118,6 +118,11 @@ class PostgresPortalStore:
                 whatsapp_recipients_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                 updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY(tenant_id,shop_id))""",
+            """CREATE TABLE IF NOT EXISTS person_attendance_policies(
+                tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, crm_user_id TEXT NOT NULL,
+                policy_json JSONB NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+                updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(tenant_id,shop_id,crm_user_id))""",
             """CREATE TABLE IF NOT EXISTS attendance_activity(
                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
                 crm_user_id TEXT NOT NULL, local_person_id TEXT,
@@ -576,6 +581,38 @@ class PostgresPortalStore:
         return [dict(row) for row in rows]
 
 
+
+
+    def upsert_person_attendance_policy(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                                        policy: dict[str, Any]) -> dict[str, Any]:
+        now=self.now()
+        with self._conn() as conn:
+            row=conn.execute(text("""INSERT INTO person_attendance_policies(
+                tenant_id,shop_id,crm_user_id,policy_json,version,updated_at)
+                VALUES(:tenant,:shop,:user,CAST(:policy AS JSONB),1,:now)
+                ON CONFLICT(tenant_id,shop_id,crm_user_id) DO UPDATE SET
+                policy_json=EXCLUDED.policy_json,
+                version=person_attendance_policies.version+1,
+                updated_at=EXCLUDED.updated_at
+                RETURNING policy_json,version,updated_at"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "policy":json.dumps(policy),"now":now,
+                }).mappings().one()
+        return {"tenantCode":tenant_id,"shopCode":shop_id,"userId":crm_user_id,
+                **dict(row["policy_json"]),"version":row["version"],"updatedAt":row["updated_at"].isoformat()}
+
+    def person_attendance_policy(self, tenant_id: str, shop_id: str,
+                                 crm_user_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT policy_json,version,updated_at
+                FROM person_attendance_policies
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                }).mappings().first()
+        if row is None:
+            return None
+        return {"tenantCode":tenant_id,"shopCode":shop_id,"userId":crm_user_id,
+                **dict(row["policy_json"]),"version":row["version"],"updatedAt":row["updated_at"].isoformat()}
 
     def upsert_attendance_policy(self, tenant_id: str, shop_id: str, policy: dict[str, Any]) -> dict[str, Any]:
         now=self.now()
