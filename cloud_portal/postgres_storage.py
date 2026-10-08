@@ -663,6 +663,44 @@ class PostgresPortalStore:
         item["whatsapp_recipients"]=list(item.pop("whatsapp_recipients_json") or [])
         return item
 
+
+    def list_person_attendance_activities(self, tenant_id: str, shop_id: str,
+                                          crm_user_id: str, start_at: datetime,
+                                          end_at: datetime, limit: int = 100,
+                                          offset: int = 0) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT * FROM attendance_activity
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                AND occurred_at>=:start AND occurred_at<:end
+                ORDER BY occurred_at DESC,id DESC LIMIT :limit OFFSET :offset"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "start":start_at,"end":end_at,"limit":max(1,min(200,limit)),
+                    "offset":max(0,offset),
+                }).mappings().all()
+        return [{**dict(row),"evidence":row["evidence_json"] or {},
+                 "metadata":row["metadata_json"] or {}} for row in rows]
+
+    def get_person_attendance_activity(self, tenant_id: str, shop_id: str,
+                                       crm_user_id: str, activity_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT * FROM attendance_activity WHERE
+                tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user AND id=:id"""),{
+                "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,"id":activity_id,
+            }).mappings().first()
+        if row is None:
+            return None
+        return {**dict(row),"evidence":row["evidence_json"] or {},
+                "metadata":row["metadata_json"] or {}}
+
+    def get_person_attendance_presence(self, tenant_id: str, shop_id: str,
+                                       crm_user_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT * FROM attendance_presence
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user"""),{
+                "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+            }).mappings().first()
+        return dict(row) if row else None
+
     def record_attendance_activity(self, item: dict[str, Any]) -> None:
         with self._conn() as conn:
             conn.execute(text("""INSERT INTO attendance_activity(
