@@ -154,8 +154,9 @@ class EdgeSyncWorker:
                         try:
                             self.camera_manager.apply_cloud_camera(camera)
                             camera_sync["applied"] += 1
-                        except Exception:
+                        except Exception as exc:
                             camera_sync["failed"] += 1
+                            camera_sync.setdefault("errors", []).append({"camera_id": str(camera.get("camera_id") or ""), "error": str(exc)[:300]})
                     if self.camera_supervisor is not None:
                         self.camera_supervisor.reconcile()
                 except Exception as exc:
