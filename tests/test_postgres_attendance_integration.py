@@ -74,7 +74,7 @@ def test_postgres_fresh_schema_outbox_and_auto_logout_recovery():
         assert store.list_v2_crm_auto_logout_recovery()==[]
         assert store.get_person_attendance_activity(tenant,shop,user,"auto-logout-test-activity") is not None
 
-        reentry=now-timedelta(hours=1)
+        reentry=now-timedelta(minutes=59)
         store.touch_attendance_presence(tenant_id=tenant,shop_id=shop,local_person_id=person,
             crm_user_id=user,seen_at=reentry,camera_id="cam-test",camera_zone="inside",
             recognition_event_id="recognition-reentry",checked_in=True)
