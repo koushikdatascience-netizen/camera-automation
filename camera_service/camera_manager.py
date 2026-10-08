@@ -81,9 +81,8 @@ class CameraConfig(BaseModel):
         if self.camera_role == CameraRole.ENTRANCE_EXIT:
             self.features.attendance = True
             self.features.face_recognition = True
-            # Attendance cameras never create unknown-person security incidents.
-            self.features.unknown_detection = False
-            self.features.unknown_person_detection = False
+            # Entrance/exit attendance and unknown-person security are independent
+            # capabilities. Preserve the explicit feature choices from CRM/edge.
             self.tracking_mode = 'track'
         return self
 
