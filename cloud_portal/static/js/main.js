@@ -848,12 +848,50 @@
     }catch(error){showMessage(error.message,true);}
   }
 
+  let alertBaseline=null,alertSoundEnabled=false,alertAudioContext=null;
+  function notifyNewSecurityAlerts(items){
+    const ids=new Set(items.map(event=>String(event.id||"")).filter(Boolean));
+    if(alertBaseline===null){alertBaseline=ids;return;}
+    const fresh=items.filter(event=>event.id&&!alertBaseline.has(String(event.id)));
+    alertBaseline=ids;
+    if(!alertSoundEnabled||!fresh.length)return;
+    const event=fresh[0];
+    try{
+      if(alertAudioContext){
+        const oscillator=alertAudioContext.createOscillator(),gain=alertAudioContext.createGain();
+        oscillator.type="sine";oscillator.frequency.value=760;
+        gain.gain.setValueAtTime(0.0001,alertAudioContext.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.12,alertAudioContext.currentTime+0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001,alertAudioContext.currentTime+0.35);
+        oscillator.connect(gain).connect(alertAudioContext.destination);
+        oscillator.start();oscillator.stop(alertAudioContext.currentTime+0.36);
+      }
+      if("Notification" in window&&Notification.permission==="granted"){
+        const note=new Notification("Camera Eye · Security alert",{
+          body:(event.camera_id||"Camera")+" · "+String(event.event_type||"Unknown person detected").replaceAll("_"," "),
+          tag:"camera-eye-security-"+String(event.id)
+        });
+        note.onclick=()=>{window.focus();note.close();};
+      }
+    }catch(_){/* Browser permission or autoplay restrictions must not block alert history. */}
+  }
+  async function enableBrowserSecurityAlerts(){
+    const button=document.getElementById("enable-alert-sound");
+    try{
+      const Context=window.AudioContext||window.webkitAudioContext;
+      if(Context){alertAudioContext=alertAudioContext||new Context();await alertAudioContext.resume();}
+      if("Notification" in window&&Notification.permission==="default")await Notification.requestPermission();
+      alertSoundEnabled=true;
+      if(button)button.textContent="Sound enabled"+(("Notification" in window&&Notification.permission==="granted")?" · Notifications enabled":"");
+    }catch(_){if(button)button.textContent="Browser sound unavailable";}
+  }
   async function loadAlerts(){
     const body=document.getElementById('alerts-body'); if(!body)return;
     const scope=requireScope(['tenant_id']);
     const response=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/events?limit=500');
     const data=await response.json(); if(!response.ok)throw new Error(data.detail||'Unable to load alerts.');
     const items=(data.items||[]).filter(e=>/ALERT|UNKNOWN|INCIDENT|SHOPLIFTING/.test(e.event_type||''));
+    notifyNewSecurityAlerts(items);
     body.replaceChildren();
     for(const event of items){
       const payload=event.payload?.payload||event.payload||{}, metadata=payload.metadata||{};
@@ -873,7 +911,9 @@
   function wireAlertsPage(){
     if(!document.getElementById('alerts-body'))return;
     const refresh=()=>loadAlerts().catch(error=>showMessage(error.message,true));
-    document.getElementById('refresh-alerts').addEventListener('click',refresh);refresh();setInterval(refresh,15000);
+    document.getElementById('refresh-alerts').addEventListener('click',refresh);
+    document.getElementById('enable-alert-sound')?.addEventListener('click',enableBrowserSecurityAlerts);
+    refresh();setInterval(refresh,15000);
   }
   document.querySelectorAll('.nav-menu').forEach(nav=>{
     if(!nav.querySelector('a[href="/portal/system-status.html"]')){
