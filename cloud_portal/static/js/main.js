@@ -449,7 +449,7 @@
     document.getElementById("source-type").value=camera.source_type||"rtsp";
     document.getElementById("camera-zone").value=camera.camera_zone||"";
     document.getElementById("crowd-threshold").value=camera.crowd_threshold||10;
-    const role=document.getElementById("camera-role"); role.value=camera.camera_role==="GENERAL"?"GENERAL":"ENTRANCE_EXIT";
+    const role=document.getElementById("camera-role"); role.value=(camera.camera_role==="SECURITY"||camera.camera_role==="GENERAL"&&!!camera.features?.unknown_detection)?"SECURITY":"ENTRANCE_EXIT";
     updateCameraPurposeDescription();
     window.scrollTo({top:0,behavior:"smooth"});
   }
@@ -467,7 +467,7 @@
     document.getElementById("camera-zone").value=camera.camera_zone||"";
     document.getElementById("crowd-threshold").value=camera.crowd_threshold||10;
     const role=document.getElementById("camera-role");
-    role.value=(camera.camera_role==="ENTRANCE_EXIT")?"ENTRANCE_EXIT":"GENERAL";
+    role.value=(camera.camera_role==="ENTRANCE_EXIT")?"ENTRANCE_EXIT":"SECURITY";
     updateCameraPurposeDescription();
     showMessage("Camera loaded from edge. Choose role/features and save; source stays hidden on the local PC.");
     window.scrollTo({top:0,behavior:"smooth"});
@@ -485,7 +485,7 @@
   }
 
   function updateCameraPurposeDescription(){
-    const security=document.getElementById("camera-role")?.value==="GENERAL";
+    const security=document.getElementById("camera-role")?.value==="SECURITY";
     const message=document.getElementById("camera-purpose-description");
     if(message)message.textContent=security
       ?"Unknown-person monitoring. Detection defaults to the entire frame; configure a bounded area using Detection Zones on the saved camera."
@@ -505,7 +505,7 @@
         || (cloudExistingCamera === cameraId ? "__KEEP_EXISTING__" : "");
       const roleValue = document.getElementById("camera-role").value;
       if (!cameraId || !name || !source || !roleValue) throw new Error("Camera Name, Camera ID, Camera Source and Camera Role are required.");
-      const securityCamera=roleValue==="GENERAL";
+      const securityCamera=roleValue==="SECURITY";
       const payload = {
         ...scope,
         company_code: scope.company_code || null,
@@ -513,7 +513,7 @@
         name,
         source_type: document.getElementById("source-type").value||sourceType(source),
         source,
-        camera_role: securityCamera ? "GENERAL" : "ENTRANCE_EXIT",
+        camera_role: securityCamera ? "SECURITY" : "ENTRANCE_EXIT",
         camera_zone: document.getElementById("camera-zone").value.trim() || null,
         crowd_threshold: Number(document.getElementById("crowd-threshold").value || 10),
         enabled: document.getElementById("camera-id").dataset.enabled !== 'false',
