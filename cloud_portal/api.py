@@ -2058,10 +2058,10 @@ def _evaluate_v2_person_absences() -> None:
                 camera_coverage_healthy=True,completed_episodes_today=episodes,
                 active_episode_counted=True,
             )
-            for transition in evaluation.transitions:
-                # The limit is checked against persisted distinct grace events.
-                if transition=="DAILY_ABSENCE_LIMIT_EXCEEDED" and episodes<=policy.max_out_of_camera_occurrences_per_day:
-                    continue
+            transitions=list(evaluation.transitions)
+            if "GRACE_EXCEEDED" in transitions and episodes >= policy.max_out_of_camera_occurrences_per_day:
+                transitions.append("DAILY_ABSENCE_LIMIT_EXCEEDED")
+            for transition in dict.fromkeys(transitions):
                 created=store.record_v2_absence_transition(
                     tenant_id=tenant,shop_id=shop,crm_user_id=user,
                     business_date=business_day,absence_started_at=seen,
