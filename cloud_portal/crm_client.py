@@ -242,4 +242,18 @@ class SnapKeyCrmClient:
         return result
 
 
+    def auto_logout_with_face_token(self, user_id: str, remarks: str, face_token: str) -> Any:
+        """CRM's confirmed auto-logout endpoint. Do not log or persist the token here."""
+        uid=(user_id or "").strip()
+        reason=(remarks or "").strip()
+        if not uid or not reason:
+            raise ValueError("user_id and remarks are required")
+        result=self._request("POST","/api/UserActivity/auto-logout",
+                             operation="auto_logout",auth_token=face_token,
+                             user_id=uid,json={"userId":uid,"remarks":reason})
+        logger.info("CRM_AUTO_LOGOUT_RESULT user_id=%s success=%s message=%s",
+                    uid,self.business_success(result),self._safe_message(result))
+        return result
+
+
 crm_client=SnapKeyCrmClient()
