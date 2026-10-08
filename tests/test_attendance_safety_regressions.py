@@ -187,7 +187,7 @@ def test_manual_policy_blocks_legacy_automatic_entry_and_exit(monkeypatch):
     assert calls == []
 
 
-def test_production_crm_integration_key_requires_explicit_scope(monkeypatch):
+def test_production_crm_integration_accepts_dynamic_scopes_only_from_trusted_backend(monkeypatch):
     from cloud_portal import api
 
     class _Request:
@@ -198,19 +198,18 @@ def test_production_crm_integration_key_requires_explicit_scope(monkeypatch):
     monkeypatch.setenv("SNAPKEY_ENV", "production")
     monkeypatch.setenv("SNAPKEY_CRM_INTEGRATION_KEY", "secret")
     monkeypatch.delenv("SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES", raising=False)
-    try:
-        api._require_crm_integration(_Request(), "tenant-a", "shop-1")
-    except HTTPException as exc:
-        assert exc.status_code == 503
-    else:
-        raise AssertionError("production must reject unscoped CRM integration configuration")
-
-    monkeypatch.setenv("SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES",
-                       '[{"tenant_id":"tenant-a","shop_ids":["shop-1"]}]')
+    # CRM dynamically supplies tenant/shop identity; no static env IDs.
     api._require_crm_integration(_Request(), "tenant-a", "shop-1")
+    api._require_crm_integration(_Request(), "tenant-b", "shop-2")
+
+    class _UntrustedRequest:
+        headers = {"X-CRM-Integration-Key": "invalid"}
+        method = "GET"
+        url = type("_Url", (), {"path": "/integration/v2"})()
+
     try:
-        api._require_crm_integration(_Request(), "tenant-a", "shop-2")
+        api._require_crm_integration(_UntrustedRequest(), "tenant-a", "shop-1")
     except HTTPException as exc:
-        assert exc.status_code == 403
+        assert exc.status_code == 401
     else:
-        raise AssertionError("scope must reject a shop outside the allow-list")
+        raise AssertionError("untrusted callers must never select CRM tenant/shop scope")
