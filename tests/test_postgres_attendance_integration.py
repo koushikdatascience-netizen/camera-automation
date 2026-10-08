@@ -24,15 +24,19 @@ def test_postgres_fresh_schema_outbox_and_auto_logout_recovery():
         if os.getenv("SNAPKEY_REQUIRE_POSTGRES_TESTS")=="1":
             pytest.fail(message)
         pytest.skip(message)
-    test_database="camera_eye_test_"+uuid.uuid4().hex[:12]
+    schema="camera_eye_test_"+uuid.uuid4().hex[:12]
+    database=str(root_url.database).replace('"','""')
+    quoted_schema='"'+schema+'"'
+    quoted_database='"'+database+'"'
     admin_engine=create_engine(dsn,pool_pre_ping=True)
     store=None
-    test_database_created=False
+    schema_created=False
     try:
-        with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            conn.execute(text(f'CREATE DATABASE "{test_database}"'))
-        test_database_created=True
-        store=PostgresPortalStore(str(root_url.set(database=test_database)))
+        with admin_engine.begin() as conn:
+            conn.execute(text(f'CREATE SCHEMA {quoted_schema}'))
+            conn.execute(text(f'ALTER DATABASE {quoted_database} SET search_path TO {quoted_schema}, public'))
+        schema_created=True
+        store=PostgresPortalStore(dsn)
         now=datetime.now(timezone.utc)
         tenant,shop,user,person="tenant-test","shop-test","user-test","person-test"
         store.upsert_person_attendance_policy(tenant,shop,user,{
@@ -93,9 +97,8 @@ def test_postgres_fresh_schema_outbox_and_auto_logout_recovery():
     finally:
         if store is not None:
             store.engine.dispose()
-        if test_database_created:
-            with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-                conn.execute(text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=:database AND pid<>pg_backend_pid()"),
-                             {"database":test_database})
-                conn.execute(text(f'DROP DATABASE IF EXISTS "{test_database}"'))
+        if schema_created:
+            with admin_engine.begin() as conn:
+                conn.execute(text(f'ALTER DATABASE {quoted_database} RESET search_path'))
+                conn.execute(text(f'DROP SCHEMA IF EXISTS {quoted_schema} CASCADE'))
         admin_engine.dispose()
