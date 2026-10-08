@@ -1,6 +1,6 @@
 # CRM person-wise policy API — implementation handoff
 
-**Status:** Implemented on the feature branch; not deployed or verified against live CRM/PostgreSQL. The worker evaluates person-wise 5/15/60-minute absence transitions. The separate CRM auto-logout remains disabled by default and requires staging contract validation. Daily report and evidence/notification limitations are documented in `CAMERA_EYE_V2_STAGING_AND_ROLLBACK.md`.
+**Status:** Implemented on the feature branch; not deployed or verified against staging/live CRM. Person-specific thresholds drive absence transitions; the separate CRM auto-logout has a fixed 60-minute contract and remains disabled by default pending staging validation.
 
 Base URL (after deployment): `https://camera.snapkey.ai`
 
@@ -45,12 +45,18 @@ Success: HTTP 200 `{"policy":{...}}`; HTTP 404 if no person-specific policy exis
 
 This pre-existing route lists attendance activity for a single CRM user on a business date. Its event completeness and evidence links still require integration verification.
 
+## Action evidence and CRM reconciliation
+
+`GET /integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/activities/{activity_id}/evidence` returns an explicit evidence status, up to three snapshot references, a short-video reference, missing reasons, and authenticated proxy paths when media is available. Fetch media through the snapshot and video subroutes using the same server-side `X-CRM-Integration-Key`; do not expose the key in browser code.
+
+`GET .../auto-logout-actions` lists unresolved action status without exposing credentials. If the CRM mutation times out or local finalization is interrupted, check the employee's state in CRM before resolving with `POST .../auto-logout-actions/{action_id}/reconcile` and `{"outcome":"CRM_CONFIRMED"}` or `{"outcome":"CRM_NOT_APPLIED"}`. `CRM_CONFIRMED` completes local attendance and action state transactionally; `CRM_NOT_APPLIED` requeues only a safe retry. No ambiguous request is automatically replayed.
+
 ## Outstanding before CRM frontend rollout
 
 - End-to-end worker checks under PostgreSQL for delayed heartbeats, camera-specific coverage, concurrency, and full-day policy boundaries.
-- Signed/authenticated media delivery and evidence capture completeness; V2 currently returns only a scoped manifest.
-- Per-person notification preferences, durable outbox/retry/dedup/rate limits, and delivery status; current sends are shop-wide and synchronous.
+- Staging verification of three-snapshot/short-clip capture, missing-evidence reporting, and authenticated media proxy access. A delayed absence checkout can link last-seen evidence but cannot capture a frame from the past.
+- Notifications use a durable PostgreSQL outbox with retry and delivery counts. Recipient lists still come from shop policy; per-person recipient routing and rate limiting are outstanding.
 - Approved payroll policy for absence deduction and paid/unpaid break treatment.
 - Staging verification of the CRM response contract and reconciliation path. Ambiguous auto-logout results are not blindly retried.
 - Backup/restore and previous-schema upgrade verification on PostgreSQL; SQLite tests do not establish migration readiness.
-- PostgreSQL migration, automated tests and staging rollout.
+- The startup DDL adds the outbox, zone-coverage status, and CRM action-recovery fields idempotently. Run `tests/test_postgres_attendance_integration.py` against a disposable test PostgreSQL database and verify backup/restore and an upgrade from the previous schema in staging.

@@ -28,7 +28,7 @@ Replace database/user names in the backup command if `.env` overrides defaults. 
 
 ## Database behavior and backup
 
-`PostgresPortalStore._init()` applies idempotent `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, and index statements on portal startup. These are inline schema bootstraps, not a versioned migration system. Review DDL in `cloud_portal/postgres_storage.py` and take a tested PostgreSQL backup before upgrading. The changes in this hardening work add no database tables or columns. Verify a fresh database and one previous-release upgrade in staging; a SQLite test is not a substitute.
+`PostgresPortalStore._init()` applies idempotent `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, and index statements on portal startup. These are inline schema bootstraps, not a versioned migration system. This hardening adds `attendance_presence.last_camera_zone`, CRM action-recovery metadata, `notification_outbox`, and `attendance_camera_coverage`. Review DDL in `cloud_portal/postgres_storage.py` and take a tested PostgreSQL backup before upgrading. Verify a fresh database and one previous-release upgrade in staging; a SQLite test is not a substitute. `tests/test_postgres_attendance_integration.py` is enabled with `SNAPKEY_TEST_DATABASE_URL` pointed at a disposable database whose name contains `test`.
 
 Back up before each upgrade:
 
@@ -63,7 +63,8 @@ These bodies come from the supplied integration contract. Exact live CRM HTTP st
 
 ## Known release gaps
 
-- V2 evidence endpoint returns a scoped manifest only. Signed media access, three-snapshot/short-clip capture for every attendance action, and explicit missing-evidence causes are not implemented end to end. Portal event images use authenticated portal routes; no filesystem paths should be exposed.
-- Alert notifications still use shop-wide recipients synchronously. V2 per-person preferences, durable outbox, retry, deduplication, rate limiting, and delivery-status API are not implemented. No real email or WhatsApp delivery was tested.
+- Attendance recognition evidence now captures/uploads up to three snapshots and a short clip, links those assets to attendance activities, and reports missing/interrupted reasons. Delayed absence checkout links last-seen evidence but cannot create footage for the past. Authenticated integration and portal media proxies are implemented; validate retention and edge uploads in staging.
+- Notifications now use a PostgreSQL outbox with deduplicated per-recipient enqueue, retry/backoff, terminal failure state, and delivery counts. Recipient resolution still uses shop policy lists; per-person recipient routing and rate limiting remain outstanding. No real email or WhatsApp delivery was tested.
+- Ambiguous CRM auto-logout outcomes require an operator to compare CRM state and use the scoped reconciliation endpoint. A verified automatic CRM status-query contract is not available, so automatic remote reconciliation is not claimed.
 - Daily totals now clip work/break intervals to a local day and provisionally count open sessions. Payroll absence deduction and paid/unpaid break classification have no approved policy and are deliberately not inferred.
 - No real staging PostgreSQL, CRM, SMTP, WhatsApp, Windows installer, or client-site test was run here. Do not mark production-ready on unit tests alone.

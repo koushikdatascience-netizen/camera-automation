@@ -50,32 +50,42 @@ def test_crm_auto_logout_claim_never_reclaims_in_flight_action(monkeypatch):
     claimed = store.claim_crm_auto_logout("tenant", "shop", "user", now - timedelta(hours=1))
 
     assert claimed is False
-    update_sql, params = connection.statements[1]
-    assert "status='PENDING' AND attempts=0" in update_sql
+    update_sql, params = connection.statements[2]
+    assert "status='PENDING' AND attempts<5" in update_sql
+    assert "FROM attendance_presence p" in update_sql
+    assert "p.last_seen_at=:started" in update_sql
     assert "claimed_at<" not in update_sql
     assert "stale" not in params
 
 
-def test_attendance_coverage_can_require_the_persons_camera(monkeypatch):
+def test_attendance_coverage_uses_only_enabled_cameras_in_the_same_zone(monkeypatch):
     now = datetime(2026, 10, 8, tzinfo=timezone.utc)
     received = now - timedelta(seconds=5)
     status = {"cameras": [
-        {"camera_id": "other", "camera_role": "ENTRANCE_EXIT", "enabled": True, "online": True},
-        {"camera_id": "person-camera", "camera_role": "GENERAL", "enabled": True, "online": True},
+        {"camera_id": "other", "camera_role": "ENTRANCE_EXIT", "camera_zone": "inside", "enabled": True, "online": True},
+        {"camera_id": "person-camera", "camera_role": "ENTRANCE_EXIT", "camera_zone": "inside", "enabled": True, "online": False},
+        {"camera_id": "outside", "camera_role": "ENTRANCE_EXIT", "camera_zone": "outside", "enabled": True, "online": True},
     ]}
     result = _Result()
-    result.rows = [{"received_at": received, "status_json": status}]
+    result.rows = [
+        {"camera_id":"other","camera_zone":"inside","enabled":True,"edge_id":"edge","received_at":received,"status_json":status},
+        {"camera_id":"person-camera","camera_zone":"inside","enabled":True,"edge_id":"edge","received_at":received,"status_json":status},
+    ]
     connection = _Connection([result])
     store = object.__new__(PostgresPortalStore)
     store._conn = lambda: _ConnectionContext(connection)
 
-    assert store.attendance_camera_coverage_healthy("tenant", "shop", now) is True
-    assert store.attendance_camera_coverage_healthy("tenant", "shop", now, camera_id="person-camera") is False
+    inside=store.attendance_camera_coverage_status("tenant","shop",now,camera_id="person-camera",camera_zone="inside")
+    assert inside["state"]=="HEALTHY"
+    assert inside["healthyCameraIds"]==["other"]
+    outside=store.attendance_camera_coverage_status("tenant","shop",now,camera_id="person-camera",camera_zone="outside")
+    assert outside["state"]=="UNKNOWN"
 
     stale = _Result()
-    stale.rows = [{"received_at": now - timedelta(seconds=90), "status_json": status}]
+    stale.rows = [{"camera_id":"other","camera_zone":"inside","enabled":True,"edge_id":"edge",
+                   "received_at":now-timedelta(seconds=90),"status_json":status}]
     store._conn = lambda: _ConnectionContext(_Connection([stale]))
-    assert store.attendance_camera_coverage_healthy("tenant", "shop", now, camera_id="other") is False
+    assert store.attendance_camera_coverage_status("tenant","shop",now,camera_id="other",camera_zone="inside")["state"]=="UNKNOWN"
 
 
 def test_auto_logout_requires_full_sixty_minutes_and_uses_camera_scope(monkeypatch):
@@ -94,6 +104,10 @@ def test_auto_logout_requires_full_sixty_minutes_and_uses_camera_scope(monkeypat
         "complete_crm_auto_logout": lambda self, *_args: None,
         "complete_presence_checkout": lambda self, *_args: None,
         "record_attendance_activity": lambda self, *_args: None,
+        "mark_crm_auto_logout_confirmed": lambda self, *_args: calls.append("crm-confirmed") or True,
+        "finalize_crm_auto_logout_local": lambda self, *_args: calls.append("local-finalized") or "SUCCEEDED",
+        "mark_crm_auto_logout_reconciliation_required": lambda self, *_args: calls.append("reconcile"),
+        "release_crm_auto_logout_for_retry": lambda self, *_args: calls.append("retry"),
     })())
     monkeypatch.setattr(api, "_v2_face_token", lambda *_args: "mock-token")
     monkeypatch.setattr(api.crm_client, "auto_logout_with_face_token", lambda *_args: {"success": True})

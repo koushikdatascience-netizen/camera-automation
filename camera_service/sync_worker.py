@@ -188,16 +188,44 @@ class EdgeSyncWorker:
                         snapshot_path = metadata.get("snapshot_path") or metadata.get("person_path") or metadata.get("face_path")
                     clip_path = metadata.get("clip_path")
                     cloud_metadata = dict(metadata)
+                    event_id=str(event.get("event_id") or row["id"])
+                    is_attendance_evidence=(str(event.get("event_type") or "")=="PERSON_RECOGNIZED"
+                                            or bool(metadata.get("attendance_action_evidence")))
                     if snapshot_path and Path(snapshot_path).is_file():
-                        cloud_metadata["cloud_evidence"] = self.cloud_client.upload_event_evidence(str(event.get("event_id") or row["id"]), snapshot_path)
+                        cloud_metadata["cloud_evidence"] = self.cloud_client.upload_event_evidence(event_id, snapshot_path)
                     elif snapshot_path:
                         cloud_metadata["evidence_unavailable"] = True
-                    if clip_path and Path(clip_path).is_file():
-                        cloud_metadata["cloud_clip"] = self.cloud_client.upload_event_evidence(str(event.get("event_id") or row["id"]), clip_path)
+                        cloud_metadata.setdefault("evidence_missing",{})["primary_snapshot"]="local_file_missing"
+                    if clip_path and Path(clip_path).is_file() and not is_attendance_evidence:
+                        cloud_metadata["cloud_clip"] = self.cloud_client.upload_event_evidence(event_id, clip_path)
                     elif clip_path:
                         cloud_metadata["clip_unavailable"] = True
+                        cloud_metadata.setdefault("evidence_missing",{})["clip"]="local_file_missing"
+
+                    if is_attendance_evidence:
+                        uploaded=[];missing=dict(cloud_metadata.get("evidence_missing") or {})
+                        paths=metadata.get("snapshot_paths") or ([snapshot_path] if snapshot_path else [])
+                        for index,path_value in enumerate(paths[:3]):
+                            if path_value and Path(path_value).is_file():
+                                ref=self.cloud_client.upload_event_evidence(
+                                    f"{event_id}:attendance-snapshot-{index+1}",str(path_value))
+                                uploaded.append({"index":index,"evidence":ref})
+                            else:
+                                missing[f"snapshot_{index+1}"]="not_captured" if not path_value else "local_file_missing"
+                        if len(uploaded)<3:
+                            missing["snapshots"]=f"expected_3_received_{len(uploaded)}"
+                        if clip_path and Path(clip_path).is_file():
+                            cloud_metadata["cloud_clip"]=self.cloud_client.upload_event_evidence(
+                                f"{event_id}:attendance-video",str(clip_path))
+                        elif not cloud_metadata.get("cloud_clip"):
+                            missing["clip"]=(metadata.get("evidence_missing") or {}).get("clip") or "not_captured"
+                        cloud_metadata["cloud_evidence_snapshots"]=uploaded
+                        cloud_metadata["evidence_missing"]=missing
+                        cloud_metadata["evidence_status"]=("COMPLETE" if len(uploaded)==3 and cloud_metadata.get("cloud_clip")
+                                                           else "PARTIAL" if uploaded or cloud_metadata.get("cloud_clip")
+                                                           else "UNAVAILABLE")
                     event["metadata"] = {key:value for key,value in cloud_metadata.items()
-                        if key not in {'snapshot_path','person_path','face_path','clip_path','evidence_pending'}}
+                        if key not in {'snapshot_path','person_path','face_path','clip_path','snapshot_paths','evidence_pending'}}
                     self.cloud_client.post_event(self.edge_config, event)
                     self.store.mark_event_synced(row["id"])
                     synced += 1

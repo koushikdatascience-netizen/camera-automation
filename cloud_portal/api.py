@@ -53,6 +53,7 @@ if os.getenv("SNAPKEY_ENABLE_CLOUD_INFERENCE", "0").strip() == "1":
     app.include_router(inference_router)
 
 DEFAULT_LICENSE_FEATURES = ["tracking", "attendance", "face_recognition", "unknown_detection", "shoplifting", "object_security", "cloud_sync", "alerts", "evidence_clips"]
+CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES = 60  # fixed by /api/UserActivity/auto-logout contract
 
 class LicenseIssueRequest(BaseModel):
     tenant_id: str
@@ -237,6 +238,9 @@ class PersonAttendancePolicyRequest(BaseModel):
     timezone: str = "Asia/Kolkata"
     emailNotificationsEnabled: bool = True
     whatsappNotificationsEnabled: bool = True
+
+class AttendanceLogoutReconciliationRequest(BaseModel):
+    outcome: str = Field(pattern="^(CRM_CONFIRMED|CRM_NOT_APPLIED)$")
 
 class AttendanceLiveStartRequest(BaseModel):
     camera_id: str
@@ -596,7 +600,10 @@ def integration_person_attendance_presence(tenant_id: str, shop_id: str, crm_use
     presence=store.get_person_attendance_presence(tenant_id,shop_id,crm_user_id)
     if presence is None:
         raise HTTPException(404,"No presence record")
-    return {"presence":presence,"cameraCoverageHealth":"NOT_EVALUATED",
+    coverage=(store.get_v2_camera_coverage(tenant_id,shop_id,crm_user_id)
+              if hasattr(store,"get_v2_camera_coverage") else None)
+    return {"presence":presence,"cameraCoverageHealth":coverage or {
+                "state":"UNKNOWN","reason":"not_evaluated","healthyCameraIds":[]},
             "note":"Last seen is not proof of current presence; use camera health before absence decisions"}
 
 
@@ -627,10 +634,96 @@ def integration_person_attendance_evidence(tenant_id: str, shop_id: str, crm_use
     if activity is None:
         raise HTTPException(404,"Attendance activity not found")
     evidence=activity.get("evidence") or {}
-    # Never return unvalidated filesystem paths or storage keys as public URLs.
-    return {"activityId":activity_id,"status":"MANIFEST_ONLY",
-            "evidenceAvailable":bool(evidence),"manifest":evidence,
-            "mediaAccess":"NOT_IMPLEMENTED","note":"Signed media access pending"}
+    metadata=activity.get("metadata") or {}
+    recognition_event_id=str(evidence.get("recognitionEventId") or metadata.get("recognition_event_id") or "")
+    prefix=(f"/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}"
+            f"/activities/{activity_id}/evidence")
+    snapshots=evidence.get("snapshots") if isinstance(evidence.get("snapshots"),list) else []
+    urls=[]
+    if recognition_event_id:
+        urls=[f"{prefix}/snapshots/{int(item.get('index',position))}"
+              for position,item in enumerate(snapshots[:3])
+              if isinstance(item,dict) and isinstance(item.get("evidence"),dict)
+              and item["evidence"].get("evidence_id")]
+    video_url=f"{prefix}/video" if recognition_event_id and evidence.get("video") else None
+    return {"activityId":activity_id,"status":evidence.get("status","UNAVAILABLE"),
+            "evidenceAvailable":bool(snapshots or evidence.get("video")),"manifest":evidence,
+            "snapshotUrls":urls,"videoUrl":video_url,
+            "mediaAccess":"SCOPED_AUTHENTICATED_PROXY" if recognition_event_id else "UNAVAILABLE"}
+
+
+def _integration_attendance_media(tenant_id: str,shop_id: str,crm_user_id: str,
+                                  activity_id: str,index: int | None=None,kind: str="snapshot") -> Path:
+    activity=store.get_person_attendance_activity(tenant_id,shop_id,crm_user_id,activity_id)
+    if not activity:
+        raise HTTPException(404,"Attendance activity not found")
+    evidence=activity.get("evidence") or {}
+    metadata=activity.get("metadata") or {}
+    event_id=str(evidence.get("recognitionEventId") or metadata.get("recognition_event_id") or "")
+    if not event_id:
+        raise HTTPException(404,"Action-linked evidence not available")
+    return _resolve_attendance_event_media(tenant_id,shop_id,event_id,kind,index or 0)
+
+
+@app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/activities/{activity_id}/evidence/snapshots/{index}")
+def integration_person_attendance_evidence_snapshot(tenant_id: str,shop_id: str,crm_user_id: str,
+        activity_id: str,index: int,request: Request):
+    _require_crm_integration(request,tenant_id,shop_id)
+    if index<0 or index>2:
+        raise HTTPException(404,"Snapshot not available")
+    path=_integration_attendance_media(tenant_id,shop_id,crm_user_id,activity_id,index,"snapshot")
+    return FileResponse(path,headers={"Cache-Control":"private, no-store"})
+
+
+@app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/activities/{activity_id}/evidence/video")
+def integration_person_attendance_evidence_video(tenant_id: str,shop_id: str,crm_user_id: str,
+        activity_id: str,request: Request):
+    _require_crm_integration(request,tenant_id,shop_id)
+    path=_integration_attendance_media(tenant_id,shop_id,crm_user_id,activity_id,kind="video")
+    return FileResponse(path,media_type="video/mp4",headers={"Cache-Control":"private, no-store"})
+
+
+@app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/auto-logout-actions")
+def integration_person_auto_logout_actions(tenant_id: str,shop_id: str,crm_user_id: str,
+                                           request: Request,limit: int=100):
+    _require_crm_integration(request,tenant_id,shop_id)
+    if not 1<=limit<=200:
+        raise HTTPException(422,"Invalid limit")
+    if not hasattr(store,"list_v2_crm_auto_logout_actions"):
+        raise HTTPException(503,"Auto-logout reconciliation requires PostgreSQL")
+    rows=store.list_v2_crm_auto_logout_actions(tenant_id,shop_id,crm_user_id,limit)
+    for row in rows:
+        row["actionId"]=_v2_auto_logout_action_id(tenant_id,shop_id,crm_user_id,row["absence_started_at"])
+    return {"items":rows,"note":"CRM-reconciliation-required actions must be checked against CRM before resolution"}
+
+
+@app.post("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/auto-logout-actions/{action_id}/reconcile")
+def integration_reconcile_person_auto_logout(tenant_id: str,shop_id: str,crm_user_id: str,
+        action_id: str,payload: AttendanceLogoutReconciliationRequest,request: Request):
+    _require_crm_integration(request,tenant_id,shop_id)
+    if not hasattr(store,"list_v2_crm_auto_logout_actions"):
+        raise HTTPException(503,"Auto-logout reconciliation requires PostgreSQL")
+    rows=store.list_v2_crm_auto_logout_actions(tenant_id,shop_id,crm_user_id,200)
+    action=next((item for item in rows if _v2_auto_logout_action_id(
+        tenant_id,shop_id,crm_user_id,item["absence_started_at"])==action_id),None)
+    if not action or action.get("status")!="RECONCILIATION_REQUIRED":
+        raise HTTPException(404,"Reconciliation-required CRM action not found")
+    started=action["absence_started_at"]
+    if not store.reconcile_crm_auto_logout_action(tenant_id,shop_id,crm_user_id,started,payload.outcome):
+        raise HTTPException(409,"CRM action changed; reload reconciliation status")
+    if payload.outcome=="CRM_NOT_APPLIED":
+        return {"actionId":action_id,"status":"PENDING",
+                "note":"A safe retry is queued and remains behind the feature flag"}
+    activity_id="v2-"+action_id
+    state=store.finalize_crm_auto_logout_local(tenant_id,shop_id,crm_user_id,started,{
+        "id":activity_id,"occurred_at":datetime.now(timezone.utc),"camera_id":action.get("camera_id"),
+        "evidence":_evidence_manifest_for_last_recognition(tenant_id,shop_id,
+            action.get("last_recognition_event_id"),"reconciled_absence_action_snapshot"),
+        "metadata":{"absence_started_at":started.isoformat(),"crm_operation":"auto-logout",
+                    "recognition_event_id":action.get("last_recognition_event_id"),
+                    "reconciled_by":"CRM_INTEGRATION"},
+    })
+    return {"actionId":action_id,"status":state}
 
 
 
@@ -642,9 +735,15 @@ def integration_person_attendance_alerts(tenant_id: str, shop_id: str, crm_user_
         raise HTTPException(422,"Invalid limit")
     if not hasattr(store,"list_v2_absence_alerts"):
         raise HTTPException(503,"V2 alerts require PostgreSQL")
-    return {"items":store.list_v2_absence_alerts(tenant_id,shop_id,crm_user_id,
-                                                  day.isoformat(),limit),
-            "date":day.isoformat(),"notificationDelivery":"NOT_IMPLEMENTED"}
+    items=store.list_v2_absence_alerts(tenant_id,shop_id,crm_user_id,day.isoformat(),limit)
+    if hasattr(store,"notification_delivery_status"):
+        for item in items:
+            transition=str(item.get("transition") or "")
+            started=item.get("absence_started_at")
+            if transition in {"ADMIN_ABSENCE_WARNING","DAILY_ABSENCE_LIMIT_EXCEEDED","PROLONGED_ABSENCE"} and started:
+                event_id=f"v2-{transition}-{crm_user_id}-{int(started.timestamp())}"
+                item["notificationDelivery"]=store.notification_delivery_status(tenant_id,shop_id,event_id)
+    return {"items":items,"date":day.isoformat(),"notificationDelivery":"DURABLE_OUTBOX"}
 
 @app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/daily-activity")
 def integration_daily_activity(tenant_id: str, shop_id: str, crm_user_id: str, day: date, request: Request):
@@ -678,13 +777,61 @@ def _notify_cloud_event(envelope: dict[str, Any]) -> None:
     camera=str(envelope.get("camera_id") or payload.get("camera_id") or "-")
     body=(f"Camera Eye alert: {event_type}\nTenant: {tenant_id}\nShop: {shop_id}\n"
           f"Camera: {camera}\nTime: {when}\nReason: {reason}")
-    email_result=notification_service.send_email(
-        policy.get("email_recipients") or [],f"Camera Eye - {event_type}",body)
-    whatsapp_results=notification_service.send_whatsapp_text(
-        policy.get("whatsapp_recipients") or [],body)
-    logger.info("ALERT_DELIVERY event_id=%s event_type=%s email=%s whatsapp_sent=%s whatsapp_total=%s",
-        str(envelope.get("event_id") or ""),event_type,email_result.delivered,
-        sum(1 for item in whatsapp_results if item.delivered),len(whatsapp_results))
+    if not hasattr(store,"enqueue_notification_delivery"):
+        logger.error("NOTIFICATION_OUTBOX_UNAVAILABLE event_type=%s",event_type)
+        return
+    person_policy={}
+    crm_user_id=str(metadata.get("crm_user_id") or "")
+    if crm_user_id and hasattr(store,"person_attendance_policy"):
+        person_policy=store.person_attendance_policy(tenant_id,shop_id,crm_user_id) or {}
+    event_id=str(envelope.get("event_id") or hashlib.sha256(
+        json.dumps(envelope,sort_keys=True,default=str).encode()).hexdigest())
+    if person_policy.get("emailNotificationsEnabled",True):
+        for recipient in policy.get("email_recipients") or []:
+            store.enqueue_notification_delivery(tenant_id,shop_id,event_id,"email",str(recipient),
+                {"subject":f"Camera Eye - {event_type}","body":body})
+    if person_policy.get("whatsappNotificationsEnabled",True):
+        for recipient in policy.get("whatsapp_recipients") or []:
+            store.enqueue_notification_delivery(tenant_id,shop_id,event_id,"whatsapp",str(recipient),
+                {"body":body})
+    logger.info("NOTIFICATION_ENQUEUED event_id=%s event_type=%s",event_id,event_type)
+
+
+def _dispatch_notification_outbox(limit: int = 50) -> None:
+    if not hasattr(store,"claim_due_notification_deliveries"):
+        return
+    now=datetime.now(timezone.utc)
+    for item in store.claim_due_notification_deliveries(now,limit=limit):
+        delivery_id=str(item["id"]);attempts=int(item.get("attempts") or 1)
+        channel=str(item.get("channel") or "");recipient=str(item.get("recipient") or "")
+        payload=item.get("payload") or {}
+        try:
+            if channel=="email":
+                result=notification_service.send_email([recipient],str(payload.get("subject") or "Camera Eye alert"),
+                                                       str(payload.get("body") or ""))
+                delivered=bool(result.delivered);detail=result.detail
+            elif channel=="whatsapp":
+                results=notification_service.send_whatsapp_text([recipient],str(payload.get("body") or ""))
+                delivered=bool(results and results[0].delivered)
+                detail=results[0].detail if results else "no_result"
+            else:
+                delivered=False;detail="unsupported_channel"
+            retry_after=min(3600,2**min(attempts,10))
+            store.complete_notification_delivery(delivery_id,success=delivered,error="" if delivered else detail,
+                retry_after_seconds=retry_after,attempts=attempts,
+                max_attempts=int(os.getenv("SNAPKEY_NOTIFICATION_MAX_ATTEMPTS","8")))
+            logger.info("NOTIFICATION_DELIVERY id=%s channel=%s delivered=%s attempt=%s",
+                        delivery_id,channel,delivered,attempts)
+        except Exception as exc:
+            retry_after=min(3600,2**min(attempts,10))
+            try:
+                store.complete_notification_delivery(delivery_id,success=False,error=type(exc).__name__,
+                    retry_after_seconds=retry_after,attempts=attempts,
+                    max_attempts=int(os.getenv("SNAPKEY_NOTIFICATION_MAX_ATTEMPTS","8")))
+            except Exception:
+                logger.exception("NOTIFICATION_OUTBOX_COMPLETE_FAILED id=%s",delivery_id)
+            logger.warning("NOTIFICATION_DELIVERY_FAILED id=%s channel=%s error_type=%s",
+                           delivery_id,channel,type(exc).__name__)
 
 
 @app.get("/health")
@@ -1037,31 +1184,16 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
             crm_client.end_break(crm_user_id)
 
 
-def _attendance_session_id(person_id: str, when: datetime) -> str:
-    return f"attendance-{person_id}-{when.astimezone(timezone.utc).date().isoformat()}"
+def _attendance_session_id(person_id: str, when: datetime, action_id: str | None = None) -> str:
+    # Sessions can be reopened on the same business day after a real checkout.
+    # Never derive the identifier from the date alone.
+    suffix=action_id or secrets.token_urlsafe(8)
+    return f"attendance-{person_id}-{when.astimezone(timezone.utc).date().isoformat()}-{suffix}"
 
-def _has_attendance_entry_today(tenant_id: str, shop_id: str, person_id: str, when: datetime) -> bool:
-    day=when.astimezone(timezone.utc).date()
-    for event in store.list_events(tenant_id,event_type="ATTENDANCE_ENTRY",limit=500,shop_id=shop_id):
-        payload=event.get("payload") or {}
-        inner=payload.get("payload") if isinstance(payload.get("payload"),dict) else payload
-        if str(inner.get("person_id") or "")!=person_id:
-            continue
-        # Only a CRM-confirmed attendance mutation may suppress another automatic
-        # attempt. Older builds recorded ATTENDANCE_ENTRY immediately after face
-        # authentication even when UserRoster/LoginLogout had never succeeded;
-        # those legacy audit rows must not block the repaired flow.
-        metadata=inner.get("metadata") or {}
-        crm_operation=str(metadata.get("crm_operation") or "")
-        crm_confirmed=crm_operation=="loginUsingFaceTenant+LoginLogout" or metadata.get("manual") is True
-        if not crm_confirmed:
-            continue
-        stamp=event.get("event_time")
-        dt=stamp if isinstance(stamp,datetime) else datetime.fromisoformat(str(stamp).replace("Z","+00:00"))
-        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
-        if dt.astimezone(timezone.utc).date()==day:
-            return True
-    return False
+
+def _v2_auto_logout_action_id(tenant: str,shop: str,user: str,started: datetime) -> str:
+    identity=f"{tenant}|{shop}|{user}|{started.isoformat()}"
+    return "auto-logout-"+hashlib.sha256(identity.encode()).hexdigest()[:32]
 
 def _crm_face_login_identity(tenant_code: str, crm_user_id: str) -> tuple[str, str]:
     """Return CRM tenant UUID and the user's enrolled face image from the cached directory.
@@ -1180,6 +1312,48 @@ def _crm_face_login_succeeded(result: Any) -> bool:
 def _crm_mutation_succeeded(result: Any) -> bool:
     return crm_client.business_success(result)
 
+
+def _action_evidence_manifest(metadata: dict[str, Any] | None, recognition_event_id: str | None = None) -> dict[str, Any]:
+    """Build an explicit, filesystem-free evidence manifest for an attendance action."""
+    metadata=metadata if isinstance(metadata,dict) else {}
+    snapshots=metadata.get("cloud_evidence_snapshots")
+    if not isinstance(snapshots,list):
+        one=metadata.get("cloud_evidence")
+        snapshots=[one] if isinstance(one,dict) and one.get("evidence_id") else []
+    clip=metadata.get("cloud_clip") if isinstance(metadata.get("cloud_clip"),dict) else None
+    missing=metadata.get("evidence_missing") if isinstance(metadata.get("evidence_missing"),dict) else {}
+    snap_count=len(snapshots)
+    complete=snap_count>=3 and bool(clip and clip.get("evidence_id"))
+    status="COMPLETE" if complete else ("PARTIAL" if snap_count or clip else "UNAVAILABLE")
+    if snap_count<3:
+        missing.setdefault("snapshots",f"expected_3_received_{snap_count}")
+    if not clip:
+        missing.setdefault("clip",str(metadata.get("clip_unavailable_reason") or "not_uploaded_or_not_captured"))
+    return {"status":status,"snapshots":snapshots[:3],"video":clip,
+            "missing":missing,"recognitionEventId":recognition_event_id}
+
+
+def _evidence_manifest_for_last_recognition(tenant_id: str,shop_id: str,
+                                           recognition_event_id: str | None,
+                                           action_reason: str) -> dict[str, Any]:
+    if not recognition_event_id or not hasattr(store,"get_event"):
+        return {"status":"UNAVAILABLE","snapshots":[],"video":None,
+                "missing":{"recognition":"last recognition event unavailable",
+                           action_reason:"no frame captured at delayed action time"},
+                "recognitionEventId":recognition_event_id}
+    event=store.get_event(tenant_id,shop_id,recognition_event_id)
+    if not event:
+        return {"status":"UNAVAILABLE","snapshots":[],"video":None,
+                "missing":{"recognition":"last recognition event not found",
+                           action_reason:"no frame captured at delayed action time"},
+                "recognitionEventId":recognition_event_id}
+    envelope=event.get("payload") or {}
+    local_event=envelope.get("payload") if isinstance(envelope.get("payload"),dict) else envelope
+    metadata=local_event.get("metadata") if isinstance(local_event.get("metadata"),dict) else {}
+    manifest=_action_evidence_manifest(metadata,recognition_event_id)
+    manifest["missing"].setdefault(action_reason,"last-seen evidence; no frame at delayed action time")
+    return manifest
+
 def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     """Immediately face-login a recognized person from an entrance camera."""
     event_id=str(envelope.get("event_id") or "")
@@ -1228,23 +1402,25 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     if when.tzinfo is None:
         when=when.replace(tzinfo=timezone.utc)
     when=when.astimezone(timezone.utc)
+    presence=None
     if hasattr(store,"touch_attendance_presence"):
-        store.touch_attendance_presence(
+        presence=store.touch_attendance_presence(
             tenant_id=tenant_id,shop_id=shop_id,local_person_id=person_id,
             crm_user_id=str(mapping["crm_user_id"]),seen_at=when,camera_id=camera_id,
-            recognition_event_id=event_id,checked_in=None,
+            recognition_event_id=event_id,camera_zone=camera.get("camera_zone"),checked_in=None,
         )
+    # Only an actually open session suppresses a new login. A same-day check-in
+    # followed by checkout must allow a legitimate later re-entry.
+    if presence and bool(presence.get("checked_in")):
+        logger.info("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s reason=session_already_open",event_id,person_id)
+        return
     if hasattr(store,"person_attendance_policy"):
         person_policy=store.person_attendance_policy(tenant_id,shop_id,str(mapping["crm_user_id"]))
         if person_policy and str(person_policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
             logger.info("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s reason=manual_mode",event_id,person_id)
             return
-    # This is duplicate protection, not a recognition debounce: the first valid
-    # recognition is sent to CRM immediately, then further successful logins for
-    # the same person/day are suppressed.
-    if _has_attendance_entry_today(tenant_id,shop_id,person_id,when):
-        logger.warning("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s camera_id=%s reason=attendance_already_exists", event_id,person_id,camera_id)
-        return
+    # Repeat deliveries of a single edge event are rejected at ingestion. Distinct
+    # recognition events are suppressed above only while local presence is checked in.
     try:
         crm_tenant_id,enrolled_face_base64=_crm_face_login_identity(
             tenant_id,mapping["crm_user_id"]
@@ -1300,14 +1476,18 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         store.touch_attendance_presence(
             tenant_id=tenant_id,shop_id=shop_id,local_person_id=person_id,
             crm_user_id=authenticated_user_id,seen_at=when,camera_id=camera_id,
-            recognition_event_id=str(envelope.get("event_id") or ""),checked_in=True,
+            recognition_event_id=str(envelope.get("event_id") or ""),
+            camera_zone=camera.get("camera_zone"),checked_in=True,
         )
+        event_metadata=payload.get("metadata") if isinstance(payload.get("metadata"),dict) else {}
         store.record_attendance_activity({
             "id":"activity-"+secrets.token_urlsafe(12),"tenant_id":tenant_id,"shop_id":shop_id,
             "crm_user_id":authenticated_user_id,"local_person_id":person_id,
             "activity_type":"CHECK_IN","occurred_at":when,"source":"CAMERA_EYE",
             "camera_id":camera_id,"reason_code":"FACE_RECOGNITION",
-            "metadata":{"recognition_event_id":str(envelope.get("event_id") or "")},
+            "evidence":_action_evidence_manifest(event_metadata,str(envelope.get("event_id") or "")),
+            "metadata":{"recognition_event_id":str(envelope.get("event_id") or ""),
+                        "attendance_session_id":_attendance_session_id(person_id,when,event_id)},
         })
     event_id="auto-attendance-"+secrets.token_urlsafe(12)
     store.record_portal_event({"event_id":event_id,"tenant_id":tenant_id,
@@ -1316,7 +1496,7 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         "camera_id":camera_id,"event_type":"ATTENDANCE_ENTRY",
         "event_time":when.isoformat(timespec="milliseconds").replace("+00:00","Z"),
         "payload":{"person_id":person_id,"event_type":"ATTENDANCE_ENTRY",
-        "metadata":{"attendance_session_id":_attendance_session_id(person_id,when),
+        "metadata":{"attendance_session_id":_attendance_session_id(person_id,when,event_id),
         "recognition_event_id":envelope.get("event_id"),"automatic":True,
         "crm_operation":"loginUsingFaceTenant+LoginLogout","crm_tenant_id":crm_tenant_id,
         "crm_user_id":authenticated_user_id}}})
@@ -1777,12 +1957,40 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
         raise HTTPException(502,"CRM attendance action failed") from exc
 
     audit_id="manual-"+secrets.token_urlsafe(12)
+    if action=="CHECK_IN":
+        if hasattr(store,"touch_attendance_presence"):
+            store.set_attendance_presence_break(tenant_id,principal.shop_id,person_id,False)
+            store.touch_attendance_presence(
+                tenant_id=tenant_id,shop_id=principal.shop_id,local_person_id=person_id,
+                crm_user_id=authenticated_user_id,seen_at=now,camera_id=request.camera_id,
+                camera_zone=camera.get("camera_zone"),recognition_event_id=request.recognition_event_id,
+                checked_in=True,
+            )
+    elif action=="CHECK_OUT":
+        if hasattr(store,"complete_presence_checkout"):
+            store.complete_presence_checkout(tenant_id,principal.shop_id,person_id,True)
+    elif action=="BREAK_START" and hasattr(store,"set_attendance_presence_break"):
+        store.set_attendance_presence_break(tenant_id,principal.shop_id,person_id,True)
+    elif action=="BREAK_END" and hasattr(store,"set_attendance_presence_break"):
+        store.set_attendance_presence_break(tenant_id,principal.shop_id,person_id,False)
+    payload_metadata=payload.get("metadata") if isinstance(payload.get("metadata"),dict) else {}
+    if hasattr(store,"record_attendance_activity"):
+        store.record_attendance_activity({
+            "id":audit_id,"tenant_id":tenant_id,"shop_id":principal.shop_id,
+            "crm_user_id":authenticated_user_id,"local_person_id":person_id,
+            "activity_type":action,"occurred_at":now,"source":"MANUAL",
+            "camera_id":request.camera_id,"reason_code":"ATTENDANCE_STATION_ACTION",
+            "evidence":_action_evidence_manifest(payload_metadata,request.recognition_event_id),
+            "metadata":{"recognition_event_id":request.recognition_event_id,
+                        "attendance_session_id":_attendance_session_id(person_id,now,audit_id),
+                        "confirmed_by_user_id":principal.user_id},
+        })
     canonical_type={"CHECK_IN":"ATTENDANCE_ENTRY","CHECK_OUT":"ATTENDANCE_EXIT",
         "BREAK_START":"BREAK_START","BREAK_END":"BREAK_END"}[action]
     store.record_portal_event({"event_id":audit_id,"tenant_id":tenant_id,"company_code":principal.company_code,"shop_id":principal.shop_id,
         "site_id":str(camera.get("site_id") or principal.shop_id),"edge_id":request.edge_id,"camera_id":request.camera_id,
         "event_type":canonical_type,"event_time":crm_timestamp,"payload":{"person_id":person_id,"event_type":canonical_type,
-        "event_time":crm_timestamp,"metadata":{"attendance_session_id":_attendance_session_id(person_id,now),
+        "event_time":crm_timestamp,"metadata":{"attendance_session_id":_attendance_session_id(person_id,now,audit_id),
         "recognition_event_id":request.recognition_event_id,"manual":True,"confirmed_by_user_id":principal.user_id,
         "confirmed_by_name":principal.display_name,"confirmed_by_role":principal.role,"camera_name":camera.get("name"),
         "crm_user_id":authenticated_user_id}}})
@@ -1960,41 +2168,48 @@ def portal_edges(tenant_id: str, principal: PortalPrincipal = Depends(require_po
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/events/{event_id}/evidence")
-def portal_event_evidence(tenant_id: str, event_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+def portal_event_evidence(tenant_id: str, event_id: str, index: int = 0,
+                          principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
-    event = store.get_event(tenant_id, principal.shop_id, event_id)
-    if not event:
-        raise HTTPException(404, "Event not found")
-    envelope = event["payload"]
-    evidence = (envelope.get("payload", envelope).get("metadata") or {}).get("cloud_evidence") or {}
-    evidence_id = evidence.get("evidence_id")
-    if not evidence_id:
-        raise HTTPException(404, "Snapshot not available")
-    root = Path(os.getenv("SNAPKEY_EVIDENCE_ROOT", "/app/data/evidence")).resolve()
-    allowed = (root / tenant_id / principal.shop_id / event["edge_id"]).resolve()
-    path = (root / evidence_id).resolve()
-    if not allowed.is_relative_to(root) or not path.is_relative_to(allowed) or not path.is_file():
-        raise HTTPException(404, "Snapshot not available")
-    return FileResponse(path, headers={"Cache-Control": "private, no-store"})
+    path=_resolve_attendance_event_media(tenant_id,principal.shop_id,event_id,"snapshot",index)
+    return FileResponse(path,headers={"Cache-Control":"private, no-store"})
 
 
 @app.get("/portal/v1/tenants/{tenant_id}/events/{event_id}/clip")
 def portal_event_clip(tenant_id: str, event_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
-    event = store.get_event(tenant_id, principal.shop_id, event_id)
+    path=_resolve_attendance_event_media(tenant_id,principal.shop_id,event_id,"video")
+    return FileResponse(path,media_type="video/mp4",headers={"Cache-Control":"private, no-store"})
+
+
+def _resolve_attendance_event_media(tenant_id: str,shop_id: str,event_id: str,
+                                    kind: str,index: int=0) -> Path:
+    event=store.get_event(tenant_id,shop_id,event_id)
+    missing_message="Snapshot not available" if kind=="snapshot" else "Video clip not available"
     if not event:
-        raise HTTPException(404, "Event not found")
-    envelope = event["payload"]
-    evidence = (envelope.get("payload", envelope).get("metadata") or {}).get("cloud_clip") or {}
-    evidence_id = evidence.get("evidence_id")
+        raise HTTPException(404,"Event not found")
+    envelope=event.get("payload") or {}
+    local_event=envelope.get("payload") if isinstance(envelope.get("payload"),dict) else envelope
+    metadata=local_event.get("metadata") or {}
+    if kind=="snapshot":
+        assets=metadata.get("cloud_evidence_snapshots") or []
+        if assets:
+            asset=next((item for position,item in enumerate(assets)
+                        if isinstance(item,dict) and int(item.get("index",position))==index),None)
+            evidence=asset.get("evidence") if isinstance(asset,dict) else None
+        else:
+            evidence=metadata.get("cloud_evidence") if index==0 else None
+    else:
+        evidence=metadata.get("cloud_clip")
+    evidence_id=evidence.get("evidence_id") if isinstance(evidence,dict) else None
     if not evidence_id:
-        raise HTTPException(404, "Video clip not available")
-    root = Path(os.getenv("SNAPKEY_EVIDENCE_ROOT", "/app/data/evidence")).resolve()
-    allowed = (root / tenant_id / principal.shop_id / event["edge_id"]).resolve()
-    path = (root / evidence_id).resolve()
+        raise HTTPException(404,missing_message)
+    root=Path(os.getenv("SNAPKEY_EVIDENCE_ROOT","/app/data/evidence")).resolve()
+    allowed=(root/tenant_id/shop_id/str(event.get("edge_id") or "")).resolve()
+    path=(root/str(evidence_id)).resolve()
     if not allowed.is_relative_to(root) or not path.is_relative_to(allowed) or not path.is_file():
-        raise HTTPException(404, "Video clip not available")
-    return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "private, no-store"})
+        raise HTTPException(404,missing_message)
+    return path
 
 
 @app.post("/portal/v1/licenses/issue")
@@ -2037,13 +2252,17 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
             raise RuntimeError("CRM rejected automatic checkout")
         store.complete_presence_checkout(tenant_id,shop_id,person_id,True)
         last_seen=presence["last_seen_at"]
+        recognition_id=presence.get("last_recognition_event_id")
         store.record_attendance_activity({
             "id":"activity-"+secrets.token_urlsafe(12),"tenant_id":tenant_id,"shop_id":shop_id,
             "crm_user_id":crm_user_id,"local_person_id":person_id,
             "activity_type":"CHECK_OUT","occurred_at":now,"source":"CAMERA_EYE",
             "camera_id":presence.get("last_camera_id"),"reason_code":reason_code,
+            "evidence":_evidence_manifest_for_last_recognition(
+                tenant_id,shop_id,recognition_id,"checkout_snapshot"),
             "metadata":{"last_seen_at":last_seen.isoformat() if hasattr(last_seen,"isoformat") else str(last_seen),
-                        "last_recognition_event_id":presence.get("last_recognition_event_id")},
+                        "last_recognition_event_id":recognition_id,
+                        "attendance_session_id":_attendance_session_id(person_id,now,str(recognition_id or "checkout"))},
         })
         event_type="MAX_LOGOFF_AUTO_CHECK_OUT" if reason_code=="MAX_LOGOFF_REACHED" else "AUTO_CHECK_OUT"
         alert={"event_id":"auto-checkout-"+secrets.token_urlsafe(12),"tenant_id":tenant_id,"shop_id":shop_id,
@@ -2095,48 +2314,102 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
         return
     tenant=str(row["tenant_id"]);shop=str(row["shop_id"]);user=str(row["crm_user_id"])
     started=row["last_seen_at"]
-    # This endpoint is contractually reserved for a full 60-minute absence.
-    if (now-started).total_seconds() < 60*60:
+    # Policy thresholds drive absence alerts; this one fixed limit is reserved
+    # solely for the CRM endpoint's confirmed 60-minute absence contract.
+    if (now-started).total_seconds() < CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES*60:
         return
     attendance_camera_id=row.get("last_camera_id")
-    if not attendance_camera_id or not store.attendance_camera_coverage_healthy(
-            tenant,shop,now,camera_id=attendance_camera_id):
+    coverage_zone=row.get("last_camera_zone") or policy.get("attendanceCameraZone")
+    if not attendance_camera_id or not _attendance_coverage_status(
+            tenant,shop,now,attendance_camera_id,coverage_zone).get("state")=="HEALTHY":
         return
-    if not store.claim_crm_auto_logout(tenant,shop,user,started):
+    if not store.claim_crm_auto_logout(tenant,shop,user,started,
+            str(row.get("local_person_id") or ""),attendance_camera_id,
+            str(row.get("last_recognition_event_id") or "")):
         return
+    crm_mutation_sent=False; crm_confirmation_persisted=False
     try:
         token=_v2_face_token(tenant,shop,user)
+        crm_mutation_sent=True
         result=crm_client.auto_logout_with_face_token(
-            user,"AUTO_LOGOUT: Employee not detected by a healthy attendance camera for 60 minutes",token)
+            user,f"AUTO_LOGOUT: Employee not detected by a healthy attendance camera for {CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES} minutes",token)
         if not _crm_mutation_succeeded(result):
-            raise RuntimeError("CRM auto-logout rejected request")
-        store.complete_crm_auto_logout(tenant,shop,user,started,True)
-        store.complete_presence_checkout(tenant,shop,str(row["local_person_id"]),True)
-        store.record_attendance_activity({
-            "id":"v2-auto-logout-"+secrets.token_urlsafe(12),
-            "tenant_id":tenant,"shop_id":shop,"crm_user_id":user,
-            "local_person_id":row["local_person_id"],"activity_type":"CHECK_OUT",
-            "occurred_at":now,"reason_code":"ABSENCE_60_MIN_AUTO_LOGOUT",
-            "source":"CAMERA_EYE","camera_id":row.get("last_camera_id"),
-            "metadata":{"absence_started_at":started.isoformat(),"crm_operation":"auto-logout"},
+            # A definitive business rejection is safe to retry with backoff.
+            store.release_crm_auto_logout_for_retry(tenant,shop,user,started,"CRM_business_rejection")
+            return
+        if not store.mark_crm_auto_logout_confirmed(tenant,shop,user,started):
+            raise RuntimeError("CRM succeeded but local action confirmation could not be persisted")
+        crm_confirmation_persisted=True
+        activity_id="v2-"+_v2_auto_logout_action_id(tenant,shop,user,started)
+        state=store.finalize_crm_auto_logout_local(tenant,shop,user,started,{
+            "id":activity_id,"occurred_at":now,"camera_id":row.get("last_camera_id"),
+            "evidence":_evidence_manifest_for_last_recognition(
+                tenant,shop,row.get("last_recognition_event_id"),"absence_action_snapshot"),
+            "metadata":{"absence_started_at":started.isoformat(),"crm_operation":"auto-logout",
+                        "crm_contract_minimum_minutes":CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES,
+                        "recognition_event_id":row.get("last_recognition_event_id")},
         })
+        if state!="SUCCEEDED":
+            logger.error("V2_AUTO_LOGOUT_LOCAL_RECONCILIATION_REQUIRED tenant_id=%s shop_id=%s user_id=%s state=%s",
+                         tenant,shop,user,state)
     except Exception as exc:
         # A timeout may mean CRM accepted the mutation: operator must reconcile
         # before retrying. Do not blindly resubmit a potentially successful logout.
-        store.complete_crm_auto_logout(tenant,shop,user,started,False,"REQUIRES_RECONCILIATION")
-        logger.exception("V2_AUTO_LOGOUT_NEEDS_RECONCILIATION user_id=%s",user)
+        try:
+            if crm_confirmation_persisted:
+                # Leave CRM_CONFIRMED_LOCAL_PENDING intact. The next worker pass
+                # performs only the local transaction and never resubmits CRM.
+                pass
+            elif crm_mutation_sent:
+                store.mark_crm_auto_logout_reconciliation_required(
+                    tenant,shop,user,started,"crm_result_or_local_confirmation_ambiguous")
+            else:
+                store.release_crm_auto_logout_for_retry(tenant,shop,user,started,type(exc).__name__)
+        finally:
+            logger.exception("V2_AUTO_LOGOUT_NEEDS_RECONCILIATION user_id=%s",user)
+
+
+def _attendance_coverage_status(tenant: str, shop: str, now: datetime,
+                                camera_id: str | None, camera_zone: str | None) -> dict[str, Any]:
+    if hasattr(store,"attendance_camera_coverage_status"):
+        return store.attendance_camera_coverage_status(
+            tenant,shop,now,camera_id=camera_id,camera_zone=camera_zone)
+    healthy=bool(store.attendance_camera_coverage_healthy(
+        tenant,shop,now,camera_id=camera_id,camera_zone=camera_zone))
+    return {"state":"HEALTHY" if healthy else "UNKNOWN",
+            "reason":"healthy" if healthy else "coverage_unavailable",
+            "cameraZone":camera_zone,"healthyCameraIds":[]}
+
+
+def _recover_v2_auto_logout_local_finalizations(now: datetime) -> None:
+    """Finish local commits after CRM already confirmed; never repeat the CRM call."""
+    if not hasattr(store,"list_v2_crm_auto_logout_recovery"):
+        return
+    for action in store.list_v2_crm_auto_logout_recovery(limit=100):
+        tenant=str(action["tenant_id"]);shop=str(action["shop_id"]);user=str(action["crm_user_id"])
+        started=action["absence_started_at"]
+        activity_id="v2-"+_v2_auto_logout_action_id(tenant,shop,user,started)
+        try:
+            state=store.finalize_crm_auto_logout_local(tenant,shop,user,started,{
+                "id":activity_id,"occurred_at":now,"camera_id":action.get("camera_id"),
+                "evidence":_evidence_manifest_for_last_recognition(
+                    tenant,shop,action.get("last_recognition_event_id"),"recovered_absence_action_snapshot"),
+                "metadata":{"absence_started_at":started.isoformat(),
+                            "crm_operation":"auto-logout","recovered_local_commit":True,
+                            "recognition_event_id":action.get("last_recognition_event_id")},
+            })
+            logger.info("V2_AUTO_LOGOUT_RECOVERY user_id=%s state=%s",user,state)
+        except Exception:
+            logger.exception("V2_AUTO_LOGOUT_RECOVERY_FAILED user_id=%s",user)
 
 
 def _evaluate_v2_person_absences() -> None:
-    """Record durable person-wise absence thresholds without unsafe CRM mutations.
-
-    CRM logout remains pending until encrypted per-user face tokens and retry
-    semantics are implemented. Camera health failure must never imply absence.
-    """
+    """Record person-wise policy transitions; MANUAL sessions remain monitored."""
     if not hasattr(store,"list_v2_attendance_presence"):
         return
     from cloud_portal.person_attendance_rules import PersonAttendancePolicy, evaluate_absence
     now=datetime.now(timezone.utc)
+    _recover_v2_auto_logout_local_finalizations(now)
     for row in store.list_v2_attendance_presence(limit=200):
         try:
             policy_data=row["policy_json"]
@@ -2155,9 +2428,10 @@ def _evaluate_v2_person_absences() -> None:
             tenant=str(row["tenant_id"]); shop=str(row["shop_id"])
             user=str(row["crm_user_id"]); seen=row["last_seen_at"]
             attendance_camera_id=row.get("last_camera_id")
-            if not attendance_camera_id or not store.attendance_camera_coverage_healthy(
-                    tenant,shop,now,camera_id=attendance_camera_id):
-                continue
+            coverage_zone=row.get("last_camera_zone") or policy_data.get("attendanceCameraZone")
+            coverage=_attendance_coverage_status(tenant,shop,now,attendance_camera_id,coverage_zone)
+            if hasattr(store,"save_v2_camera_coverage"):
+                store.save_v2_camera_coverage(tenant,shop,user,coverage,now)
             from zoneinfo import ZoneInfo as _ZoneInfo
             business_day=now.astimezone(_ZoneInfo(policy.timezone)).date().isoformat()
             episodes=store.count_v2_absence_episodes(tenant,shop,user,business_day)
@@ -2165,9 +2439,22 @@ def _evaluate_v2_person_absences() -> None:
             evaluation=evaluate_absence(
                 policy,now=now,last_seen_at=seen,
                 checked_in=bool(row["checked_in"]),on_break=bool(row["on_break"]),
-                camera_coverage_healthy=True,completed_episodes_today=episodes,
+                camera_coverage_healthy=coverage.get("state")=="HEALTHY",completed_episodes_today=episodes,
                 active_episode_counted=True,
             )
+            coverage_transition=("CAMERA_COVERAGE_RESTORED" if coverage.get("state")=="HEALTHY"
+                                 else "CAMERA_COVERAGE_UNKNOWN")
+            store.record_v2_absence_transition(
+                tenant_id=tenant,shop_id=shop,crm_user_id=user,business_date=business_day,
+                absence_started_at=seen,transition=coverage_transition,occurred_at=now,
+                details={"cameraId":attendance_camera_id,"cameraZone":coverage.get("cameraZone"),
+                         "coverageState":coverage.get("state"),"reason":coverage.get("reason"),
+                         "healthyCameraIds":coverage.get("healthyCameraIds",[])},
+            )
+            if coverage.get("state")!="HEALTHY":
+                logger.warning("V2_ATTENDANCE_COVERAGE_UNKNOWN tenant_id=%s shop_id=%s user_id=%s zone=%s reason=%s",
+                    tenant,shop,user,coverage.get("cameraZone"),coverage.get("reason"))
+                continue
             transitions=list(evaluation.transitions)
             if "GRACE_EXCEEDED" in transitions and episodes >= policy.max_out_of_camera_occurrences_per_day:
                 transitions.append("DAILY_ABSENCE_LIMIT_EXCEEDED")
@@ -2179,8 +2466,6 @@ def _evaluate_v2_person_absences() -> None:
                     details={"elapsedMinutes":round(evaluation.elapsed_minutes,2),
                              "cameraId":row.get("last_camera_id"),"state":evaluation.state},
                 )
-                if transition=="CRM_ABSENT_ACTION_PENDING":
-                    _v2_auto_logout(row,now)
                 if created and transition in ("ADMIN_ABSENCE_WARNING","DAILY_ABSENCE_LIMIT_EXCEEDED","PROLONGED_ABSENCE"):
                     try:
                         event={"event_id":f"v2-{transition}-{user}-{int(seen.timestamp())}",
@@ -2197,6 +2482,13 @@ def _evaluate_v2_person_absences() -> None:
                 if created:
                     logger.info("V2_ATTENDANCE_TRANSITION tenant_id=%s shop_id=%s crm_user_id=%s transition=%s",
                                 tenant,shop,user,transition)
+            # Do not bind the fixed CRM endpoint threshold to markAbsentAfterMinutes:
+            # custom policy thresholds may be shorter or longer. Both thresholds
+            # must be met before mutation; the CRM contract floor cannot be lowered.
+            if (policy.attendance_mode=="AUTO" and row.get("checked_in") and not row.get("on_break")
+                    and evaluation.elapsed_minutes>=max(policy.mark_absent_after_minutes,
+                                                        CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES)):
+                _v2_auto_logout(row,now)
         except Exception:
             logger.exception("V2_ATTENDANCE_EVALUATION_FAILED user_id=%s",row.get("crm_user_id"))
 
@@ -2213,6 +2505,7 @@ def _evaluate_absence_checkouts() -> None:
     for presence in store.claim_due_absence_checkouts(now,limit=50):
         _process_automatic_checkout(presence,now=now,reason_code="ABSENCE_GRACE_EXCEEDED",
                                     require_camera_health=True)
+    _dispatch_notification_outbox(limit=100)
 
 
 def _update_root() -> Path:

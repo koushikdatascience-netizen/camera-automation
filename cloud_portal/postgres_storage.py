@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -126,11 +127,15 @@ class PostgresPortalStore:
             """CREATE TABLE IF NOT EXISTS crm_auto_logout_actions(
                 tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,
                 absence_started_at TIMESTAMPTZ NOT NULL,
+                local_person_id TEXT,camera_id TEXT,last_recognition_event_id TEXT,
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 attempts INTEGER NOT NULL DEFAULT 0,
                 claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ,
                 last_error TEXT,
                 PRIMARY KEY(tenant_id,shop_id,crm_user_id,absence_started_at))""",
+            """ALTER TABLE crm_auto_logout_actions ADD COLUMN IF NOT EXISTS local_person_id TEXT""",
+            """ALTER TABLE crm_auto_logout_actions ADD COLUMN IF NOT EXISTS camera_id TEXT""",
+            """ALTER TABLE crm_auto_logout_actions ADD COLUMN IF NOT EXISTS last_recognition_event_id TEXT""",
             """CREATE TABLE IF NOT EXISTS person_attendance_transitions(
                 tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, crm_user_id TEXT NOT NULL,
                 business_date TEXT NOT NULL, absence_started_at TIMESTAMPTZ NOT NULL,
@@ -156,11 +161,28 @@ class PostgresPortalStore:
                 tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, local_person_id TEXT NOT NULL,
                 crm_user_id TEXT NOT NULL, checked_in BOOLEAN NOT NULL DEFAULT FALSE,
                 on_break BOOLEAN NOT NULL DEFAULT FALSE, last_seen_at TIMESTAMPTZ NOT NULL,
-                last_camera_id TEXT, last_recognition_event_id TEXT,
+                last_camera_id TEXT, last_camera_zone TEXT, last_recognition_event_id TEXT,
                 checkout_claimed_at TIMESTAMPTZ, updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY(tenant_id,shop_id,local_person_id))""",
+            """ALTER TABLE attendance_presence ADD COLUMN IF NOT EXISTS last_camera_zone TEXT""",
             """CREATE INDEX IF NOT EXISTS idx_attendance_presence_due
                 ON attendance_presence(checked_in,on_break,last_seen_at)""",
+            """CREATE TABLE IF NOT EXISTS notification_outbox(
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
+                event_id TEXT NOT NULL, channel TEXT NOT NULL, recipient TEXT NOT NULL,
+                payload_json JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING',
+                attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TIMESTAMPTZ NOT NULL,
+                claimed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL,
+                sent_at TIMESTAMPTZ, last_error TEXT,
+                UNIQUE(tenant_id,shop_id,event_id,channel,recipient))""",
+            """CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
+                ON notification_outbox(status,next_attempt_at,created_at)""",
+            """CREATE TABLE IF NOT EXISTS attendance_camera_coverage(
+                tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, crm_user_id TEXT NOT NULL,
+                camera_zone TEXT, state TEXT NOT NULL, reason TEXT NOT NULL,
+                healthy_camera_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                checked_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(tenant_id,shop_id,crm_user_id))""",
         ]
         with self._conn() as conn:
             for statement in statements:
@@ -625,20 +647,34 @@ class PostgresPortalStore:
         return dict(row) if row else None
 
     def claim_crm_auto_logout(self, tenant_id: str, shop_id: str, crm_user_id: str,
-                              absence_started_at: datetime) -> bool:
+                              absence_started_at: datetime,local_person_id: str | None = None,
+                              camera_id: str | None = None,
+                              last_recognition_event_id: str | None = None) -> bool:
         now=self.now()
         with self._conn() as conn:
+            conn.execute(text("""UPDATE crm_auto_logout_actions SET status='FAILED',
+                last_error='safe_preflight_retry_limit_exhausted',completed_at=:now
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                  AND absence_started_at=:started AND status='PENDING' AND attempts>=5"""),{
+                    "now":now,"tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "started":absence_started_at})
             conn.execute(text("""INSERT INTO crm_auto_logout_actions
-                (tenant_id,shop_id,crm_user_id,absence_started_at,status)
-                VALUES(:tenant,:shop,:user,:started,'PENDING')
+                (tenant_id,shop_id,crm_user_id,absence_started_at,local_person_id,camera_id,
+                 last_recognition_event_id,status)
+                VALUES(:tenant,:shop,:user,:started,:person,:camera,:recognition,'PENDING')
                 ON CONFLICT DO NOTHING"""),{
                     "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
-                    "started":absence_started_at})
+                    "started":absence_started_at,"person":local_person_id,"camera":camera_id,
+                    "recognition":last_recognition_event_id})
             row=conn.execute(text("""UPDATE crm_auto_logout_actions
                 SET status='IN_FLIGHT',attempts=attempts+1,claimed_at=:now
                 WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
                 AND absence_started_at=:started
-                AND status='PENDING' AND attempts=0 RETURNING status"""),{
+                AND status='PENDING' AND attempts<5
+                AND EXISTS (SELECT 1 FROM attendance_presence p
+                    WHERE p.tenant_id=:tenant AND p.shop_id=:shop AND p.crm_user_id=:user
+                      AND p.checked_in=TRUE AND p.on_break=FALSE AND p.last_seen_at=:started)
+                RETURNING status"""),{
                     "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
                     "started":absence_started_at,"now":now}).first()
         return row is not None
@@ -655,6 +691,131 @@ class PostgresPortalStore:
                     "completed":self.now() if success else None,
                     "error":error[:200],"tenant":tenant_id,"shop":shop_id,
                     "user":crm_user_id,"started":absence_started_at})
+
+    def mark_crm_auto_logout_confirmed(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                                       absence_started_at: datetime) -> bool:
+        """Persist the upstream success before attempting any local finalization."""
+        with self._conn() as conn:
+            result=conn.execute(text("""UPDATE crm_auto_logout_actions
+                SET status='CRM_CONFIRMED_LOCAL_PENDING',last_error=NULL
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                  AND absence_started_at=:started AND status='IN_FLIGHT'"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,"started":absence_started_at})
+        return result.rowcount==1
+
+    def release_crm_auto_logout_for_retry(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                                          absence_started_at: datetime, error: str) -> None:
+        """Release only failures known to happen before the CRM mutation was sent."""
+        with self._conn() as conn:
+            conn.execute(text("""UPDATE crm_auto_logout_actions SET status='PENDING',claimed_at=NULL,
+                    last_error=:error WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                    AND absence_started_at=:started AND status='IN_FLIGHT'"""),{
+                        "error":error[:200],"tenant":tenant_id,"shop":shop_id,
+                        "user":crm_user_id,"started":absence_started_at})
+
+    def mark_crm_auto_logout_reconciliation_required(self, tenant_id: str, shop_id: str,
+            crm_user_id: str, absence_started_at: datetime, error: str) -> None:
+        with self._conn() as conn:
+            conn.execute(text("""UPDATE crm_auto_logout_actions SET status='RECONCILIATION_REQUIRED',
+                    last_error=:error,completed_at=:now WHERE tenant_id=:tenant AND shop_id=:shop
+                    AND crm_user_id=:user AND absence_started_at=:started
+                    AND status IN ('IN_FLIGHT','CRM_CONFIRMED_LOCAL_PENDING')"""),{
+                        "error":error[:200],"now":self.now(),"tenant":tenant_id,
+                        "shop":shop_id,"user":crm_user_id,"started":absence_started_at})
+
+    def list_v2_crm_auto_logout_recovery(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT tenant_id,shop_id,crm_user_id,absence_started_at,
+                    local_person_id,camera_id,last_recognition_event_id
+                FROM crm_auto_logout_actions WHERE status='CRM_CONFIRMED_LOCAL_PENDING'
+                ORDER BY claimed_at LIMIT :limit"""),{"limit":max(1,min(500,int(limit)))}).mappings().all()
+        return [dict(row) for row in rows]
+
+    def list_v2_crm_auto_logout_actions(self, tenant_id: str,shop_id: str,crm_user_id: str,
+                                        limit: int = 100) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT absence_started_at,local_person_id,camera_id,
+                    last_recognition_event_id,status,attempts,claimed_at,completed_at,last_error
+                FROM crm_auto_logout_actions WHERE tenant_id=:tenant AND shop_id=:shop
+                  AND crm_user_id=:user AND status IN
+                    ('IN_FLIGHT','CRM_CONFIRMED_LOCAL_PENDING','RECONCILIATION_REQUIRED','FAILED')
+                ORDER BY absence_started_at DESC LIMIT :limit"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "limit":max(1,min(200,int(limit)))}).mappings().all()
+        return [dict(row) for row in rows]
+
+    def reconcile_crm_auto_logout_action(self, tenant_id: str,shop_id: str,crm_user_id: str,
+                                         absence_started_at: datetime,outcome: str) -> bool:
+        if outcome not in {"CRM_CONFIRMED","CRM_NOT_APPLIED"}:
+            raise ValueError("invalid reconciliation outcome")
+        with self._conn() as conn:
+            if outcome=="CRM_CONFIRMED":
+                result=conn.execute(text("""UPDATE crm_auto_logout_actions
+                    SET status='CRM_CONFIRMED_LOCAL_PENDING',last_error='CRM_confirmed_by_operator',completed_at=NULL
+                    WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                      AND absence_started_at=:started AND status='RECONCILIATION_REQUIRED'"""),{
+                        "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,"started":absence_started_at})
+            else:
+                result=conn.execute(text("""UPDATE crm_auto_logout_actions
+                    SET status=CASE WHEN attempts<5 THEN 'PENDING' ELSE 'FAILED' END,
+                        claimed_at=NULL,completed_at=NULL,
+                        last_error='CRM_confirmed_not_applied_by_operator'
+                    WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                      AND absence_started_at=:started AND status='RECONCILIATION_REQUIRED'"""),{
+                        "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,"started":absence_started_at})
+        return result.rowcount==1
+
+    def finalize_crm_auto_logout_local(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                                       absence_started_at: datetime,
+                                       activity: dict[str, Any]) -> str:
+        """Atomically apply confirmed CRM checkout, activity, and action completion.
+
+        If recognition advanced while CRM was processing, preserve the newer open
+        local session and make the mismatch visible for operator reconciliation.
+        """
+        with self._conn() as conn:
+            action=conn.execute(text("""SELECT status FROM crm_auto_logout_actions
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                  AND absence_started_at=:started FOR UPDATE"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "started":absence_started_at}).mappings().first()
+            if not action or action["status"]!="CRM_CONFIRMED_LOCAL_PENDING":
+                return str(action["status"] if action else "MISSING")
+            presence=conn.execute(text("""SELECT local_person_id,last_seen_at,checked_in
+                FROM attendance_presence WHERE tenant_id=:tenant AND shop_id=:shop
+                  AND crm_user_id=:user FOR UPDATE"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id}).mappings().first()
+            if not presence:
+                conn.execute(text("""UPDATE crm_auto_logout_actions SET status='RECONCILIATION_REQUIRED',
+                    last_error='presence_missing_after_crm_success',completed_at=:now
+                    WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user AND absence_started_at=:started"""),{
+                        "now":self.now(),"tenant":tenant_id,"shop":shop_id,"user":crm_user_id,"started":absence_started_at})
+                return "RECONCILIATION_REQUIRED"
+            recognition_advanced=presence["last_seen_at"]>absence_started_at
+            activity_metadata=dict(activity.get("metadata") or {})
+            if recognition_advanced:
+                activity_metadata["recognitionAdvancedDuringCrmLogout"]=True
+            conn.execute(text("""INSERT INTO attendance_activity(
+                id,tenant_id,shop_id,crm_user_id,local_person_id,activity_type,occurred_at,
+                reason_code,source,camera_id,evidence_json,metadata_json,created_at)
+                VALUES(:id,:tenant,:shop,:user,:person,'CHECK_OUT',:occurred,
+                'ABSENCE_60_MIN_AUTO_LOGOUT','CAMERA_EYE',:camera,CAST(:evidence AS JSONB),
+                CAST(:metadata AS JSONB),:created) ON CONFLICT(id) DO NOTHING"""),{
+                    "id":activity["id"],"tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "person":presence["local_person_id"],"occurred":activity["occurred_at"],
+                    "camera":activity.get("camera_id"),"evidence":json.dumps(activity.get("evidence") or {}),
+                    "metadata":json.dumps(activity_metadata),"created":self.now()})
+            conn.execute(text("""UPDATE attendance_presence SET checked_in=FALSE,on_break=FALSE,
+                checkout_claimed_at=NULL,updated_at=:now WHERE tenant_id=:tenant AND shop_id=:shop
+                AND local_person_id=:person AND checked_in=TRUE"""),{
+                    "now":self.now(),"tenant":tenant_id,"shop":shop_id,
+                    "person":presence["local_person_id"]})
+            conn.execute(text("""UPDATE crm_auto_logout_actions SET status='SUCCEEDED',completed_at=:now,
+                last_error=NULL WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                AND absence_started_at=:started AND status='CRM_CONFIRMED_LOCAL_PENDING'"""),{
+                    "now":self.now(),"tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "started":absence_started_at})
+        return "SUCCEEDED"
 
     def list_v2_attendance_presence(self, limit: int = 200) -> list[dict[str, Any]]:
         with self._conn() as conn:
@@ -864,23 +1025,28 @@ class PostgresPortalStore:
 
     def touch_attendance_presence(self, *, tenant_id: str, shop_id: str, local_person_id: str,
                                   crm_user_id: str, seen_at: datetime, camera_id: str,
-                                  recognition_event_id: str, checked_in: bool | None = None) -> dict[str, Any]:
+                                  recognition_event_id: str, camera_zone: str | None = None,
+                                  checked_in: bool | None = None) -> dict[str, Any]:
         now=self.now()
         with self._conn() as conn:
             conn.execute(text("""INSERT INTO attendance_presence(
                 tenant_id,shop_id,local_person_id,crm_user_id,checked_in,on_break,last_seen_at,
-                last_camera_id,last_recognition_event_id,checkout_claimed_at,updated_at)
-                VALUES(:tenant,:shop,:person,:crm_user,:checked_in,FALSE,:seen,:camera,:event,NULL,:now)
+                last_camera_id,last_camera_zone,last_recognition_event_id,checkout_claimed_at,updated_at)
+                VALUES(:tenant,:shop,:person,:crm_user,:checked_in,FALSE,:seen,:camera,:zone,:event,NULL,:now)
                 ON CONFLICT(tenant_id,shop_id,local_person_id) DO UPDATE SET
                 crm_user_id=EXCLUDED.crm_user_id,
                 checked_in=CASE WHEN :set_checked_in THEN :checked_in ELSE attendance_presence.checked_in END,
                 last_seen_at=GREATEST(attendance_presence.last_seen_at,EXCLUDED.last_seen_at),
                 last_camera_id=EXCLUDED.last_camera_id,
+                last_camera_zone=COALESCE(EXCLUDED.last_camera_zone,attendance_presence.last_camera_zone),
                 last_recognition_event_id=EXCLUDED.last_recognition_event_id,
-                checkout_claimed_at=NULL,updated_at=:now"""),{
+                checkout_claimed_at=CASE WHEN :set_checked_in AND :checked_in THEN NULL
+                                         ELSE attendance_presence.checkout_claimed_at END,
+                updated_at=:now"""),{
                     "tenant":tenant_id,"shop":shop_id,"person":local_person_id,"crm_user":crm_user_id,
                     "checked_in":bool(checked_in),"set_checked_in":checked_in is not None,
-                    "seen":seen_at,"camera":camera_id,"event":recognition_event_id,"now":now,
+                    "seen":seen_at,"camera":camera_id,"zone":camera_zone,
+                    "event":recognition_event_id,"now":now,
                 })
             row=conn.execute(text("""SELECT * FROM attendance_presence
                 WHERE tenant_id=:tenant AND shop_id=:shop AND local_person_id=:person"""),
@@ -932,27 +1098,157 @@ class PostgresPortalStore:
                     WHERE tenant_id=:tenant AND shop_id=:shop AND local_person_id=:person"""),{
                     "now":self.now(),"tenant":tenant_id,"shop":shop_id,"person":local_person_id})
 
-    def attendance_camera_coverage_healthy(self, tenant_id: str, shop_id: str, now: datetime,
-                                           camera_id: str | None = None,
-                                           heartbeat_max_age_seconds: int = 60) -> bool:
+    def attendance_camera_coverage_status(self, tenant_id: str, shop_id: str, now: datetime,
+                                          camera_id: str | None = None,
+                                          camera_zone: str | None = None,
+                                          heartbeat_max_age_seconds: int = 60) -> dict[str, Any]:
+        """Report healthy coverage from any active entrance camera in the assigned zone.
+
+        The last camera is used to resolve its configured zone. Another camera may
+        provide coverage only when it is an enabled attendance camera in that same
+        zone and has a fresh heartbeat. Missing/stale health is UNKNOWN, never absence.
+        """
         with self._conn() as conn:
-            rows=conn.execute(text("""SELECT h.received_at,h.status_json
-                FROM edge_heartbeats h
-                WHERE h.tenant_id=:tenant AND h.shop_id=:shop
-                ORDER BY h.received_at DESC"""),{"tenant":tenant_id,"shop":shop_id}).mappings().all()
+            if camera_zone is None and camera_id:
+                configured=conn.execute(text("""SELECT camera_zone FROM camera_configs
+                    WHERE tenant_id=:tenant AND shop_id=:shop AND camera_id=:camera
+                    AND camera_role='ENTRANCE_EXIT' ORDER BY updated_at DESC LIMIT 1"""),
+                    {"tenant":tenant_id,"shop":shop_id,"camera":camera_id}).mappings().first()
+                camera_zone=(configured or {}).get("camera_zone") if configured else None
+            if not camera_zone:
+                return {"state":"UNKNOWN","reason":"coverage_zone_unconfigured",
+                        "cameraZone":None,"healthyCameraIds":[],"configuredCameraIds":[]}
+            rows=conn.execute(text("""SELECT c.camera_id,c.camera_zone,c.enabled,c.edge_id,
+                    h.received_at,h.status_json
+                FROM camera_configs c LEFT JOIN edge_heartbeats h
+                  ON h.tenant_id=c.tenant_id AND h.shop_id=c.shop_id AND h.edge_id=c.edge_id
+                WHERE c.tenant_id=:tenant AND c.shop_id=:shop AND c.camera_role='ENTRANCE_EXIT'
+                  AND c.enabled=TRUE AND c.camera_zone=:zone
+                ORDER BY h.received_at DESC"""),
+                {"tenant":tenant_id,"shop":shop_id,"zone":camera_zone}).mappings().all()
+        healthy=[]; configured_ids=set(); fresh_heartbeat=False
+        latest_by_camera={}
         for row in rows:
+            configured_ids.add(str(row["camera_id"]))
             received=row["received_at"]
+            if received is None:
+                continue
             if received.tzinfo is None:
                 received=received.replace(tzinfo=timezone.utc)
-            if (now-received.astimezone(timezone.utc)).total_seconds()>heartbeat_max_age_seconds:
+            age=(now-received.astimezone(timezone.utc)).total_seconds()
+            if age < 0 or age > heartbeat_max_age_seconds:
                 continue
-            status=row["status_json"] if isinstance(row["status_json"],dict) else json.loads(row["status_json"])
-            for camera in status.get("cameras") or []:
-                if (camera_id is not None and str(camera.get("camera_id") or "") != camera_id):
+            fresh_heartbeat=True
+            camera_status=row["status_json"] if isinstance(row["status_json"],dict) else json.loads(row["status_json"] or "{}")
+            for camera in camera_status.get("cameras") or []:
+                identifier=str(camera.get("camera_id") or "")
+                if identifier != str(row["camera_id"]):
                     continue
-                if str(camera.get("camera_role") or "").upper()=="ENTRANCE_EXIT" and bool(camera.get("enabled")) and bool(camera.get("online")):
-                    return True
-        return False
+                # Config is authoritative for role/zone; heartbeat must report the
+                # same zone when it includes one, preventing cross-zone substitution.
+                reported_zone=camera.get("camera_zone")
+                if reported_zone is not None and str(reported_zone)!=str(camera_zone):
+                    continue
+                latest_by_camera[identifier]=bool(camera.get("enabled")) and bool(camera.get("online"))
+                break
+        healthy=sorted(camera for camera,online in latest_by_camera.items() if online)
+        reason="healthy" if healthy else ("cameras_offline" if fresh_heartbeat else "heartbeat_stale_or_missing")
+        return {"state":"HEALTHY" if healthy else "UNKNOWN","reason":reason,
+                "cameraZone":camera_zone,"healthyCameraIds":healthy,
+                "configuredCameraIds":sorted(configured_ids)}
+
+    def attendance_camera_coverage_healthy(self, tenant_id: str, shop_id: str, now: datetime,
+                                           camera_id: str | None = None,
+                                           heartbeat_max_age_seconds: int = 60,
+                                           camera_zone: str | None = None) -> bool:
+        return self.attendance_camera_coverage_status(
+            tenant_id,shop_id,now,camera_id=camera_id,camera_zone=camera_zone,
+            heartbeat_max_age_seconds=heartbeat_max_age_seconds).get("state")=="HEALTHY"
+
+    def save_v2_camera_coverage(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                                coverage: dict[str, Any], checked_at: datetime) -> None:
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO attendance_camera_coverage(
+                tenant_id,shop_id,crm_user_id,camera_zone,state,reason,healthy_camera_ids_json,checked_at)
+                VALUES(:tenant,:shop,:user,:zone,:state,:reason,CAST(:cameras AS JSONB),:now)
+                ON CONFLICT(tenant_id,shop_id,crm_user_id) DO UPDATE SET
+                  camera_zone=EXCLUDED.camera_zone,state=EXCLUDED.state,reason=EXCLUDED.reason,
+                  healthy_camera_ids_json=EXCLUDED.healthy_camera_ids_json,checked_at=EXCLUDED.checked_at"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "zone":coverage.get("cameraZone"),"state":coverage.get("state","UNKNOWN"),
+                    "reason":coverage.get("reason","unknown"),
+                    "cameras":json.dumps(coverage.get("healthyCameraIds") or []),"now":checked_at})
+
+    def get_v2_camera_coverage(self, tenant_id: str, shop_id: str, crm_user_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT * FROM attendance_camera_coverage
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id}).mappings().first()
+        if not row:
+            return None
+        item=dict(row)
+        cameras=item.pop("healthy_camera_ids_json") or []
+        item["healthyCameraIds"]=cameras if isinstance(cameras,list) else json.loads(cameras)
+        return item
+
+    def enqueue_notification_delivery(self, tenant_id: str, shop_id: str, event_id: str,
+                                      channel: str, recipient: str, payload: dict[str, Any]) -> bool:
+        identity="|".join((tenant_id,shop_id,event_id,channel,recipient.strip().lower()))
+        delivery_id=hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        now=self.now()
+        with self._conn() as conn:
+            result=conn.execute(text("""INSERT INTO notification_outbox(
+                id,tenant_id,shop_id,event_id,channel,recipient,payload_json,status,attempts,
+                next_attempt_at,created_at)
+                VALUES(:id,:tenant,:shop,:event,:channel,:recipient,CAST(:payload AS JSONB),
+                       'PENDING',0,:now,:now) ON CONFLICT(tenant_id,shop_id,event_id,channel,recipient)
+                DO NOTHING"""),{"id":delivery_id,"tenant":tenant_id,"shop":shop_id,
+                    "event":event_id,"channel":channel,"recipient":recipient.strip(),
+                    "payload":json.dumps(payload),"now":now})
+        return result.rowcount==1
+
+    def claim_due_notification_deliveries(self, now: datetime, limit: int = 50) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            conn.execute(text("""UPDATE notification_outbox SET status='PENDING',claimed_at=NULL
+                WHERE status='IN_FLIGHT' AND claimed_at<:stale"""),{"stale":now-timedelta(minutes=3)})
+            rows=conn.execute(text("""WITH due AS (
+                    SELECT id FROM notification_outbox WHERE status='PENDING' AND next_attempt_at<=:now
+                    ORDER BY next_attempt_at,created_at FOR UPDATE SKIP LOCKED LIMIT :limit)
+                UPDATE notification_outbox n SET status='IN_FLIGHT',claimed_at=:now,attempts=attempts+1
+                FROM due WHERE n.id=due.id RETURNING n.*"""),{
+                    "now":now,"limit":max(1,min(500,int(limit)))}).mappings().all()
+        output=[]
+        for row in rows:
+            item=dict(row)
+            payload=item.pop("payload_json") or {}
+            item["payload"]=payload if isinstance(payload,dict) else json.loads(payload)
+            output.append(item)
+        return output
+
+    def complete_notification_delivery(self, delivery_id: str, *, success: bool,
+                                       error: str = "", retry_after_seconds: int = 0,
+                                       attempts: int = 1, max_attempts: int = 8) -> None:
+        now=self.now()
+        if success:
+            status="SENT";sent_at=now;next_attempt=now
+        elif int(attempts)<int(max_attempts):
+            # Attempts were incremented atomically when claimed; no extra read is
+            # needed for retry scheduling, and the caller caps exponential delay.
+            status="PENDING";sent_at=None;next_attempt=now+timedelta(seconds=max(1,int(retry_after_seconds)))
+        else:
+            status="FAILED";sent_at=None;next_attempt=now
+        with self._conn() as conn:
+            conn.execute(text("""UPDATE notification_outbox SET status=:status,sent_at=:sent,
+                    next_attempt_at=:next,claimed_at=NULL,last_error=:error
+                WHERE id=:id AND status='IN_FLIGHT'"""),{
+                    "status":status,"sent":sent_at,"next":next_attempt,"error":error[:240],"id":delivery_id})
+
+    def notification_delivery_status(self, tenant_id: str, shop_id: str, event_id: str) -> dict[str, int]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT status,COUNT(*) AS count FROM notification_outbox
+                WHERE tenant_id=:tenant AND shop_id=:shop AND event_id=:event GROUP BY status"""),{
+                    "tenant":tenant_id,"shop":shop_id,"event":event_id}).mappings().all()
+        return {str(row["status"]):int(row["count"]) for row in rows}
 
 
     def claim_due_max_logoff_checkouts(self, now: datetime, limit: int = 50) -> list[dict[str, Any]]:

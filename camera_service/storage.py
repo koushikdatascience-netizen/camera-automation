@@ -50,10 +50,32 @@ class SQLiteStore:
             # databases predate this column, so those rows are quarantinable legacy
             # identities rather than being misclassified as intentional local-only users.
             self._ensure_column(c,'personnel','managed_source',"TEXT NOT NULL DEFAULT 'legacy'")
+            self._recover_interrupted_attendance_evidence(c)
     def _ensure_column(self,conn,table,column,definition):
         existing={row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    def _recover_interrupted_attendance_evidence(self,conn):
+        cutoff=datetime.now(timezone.utc).timestamp()-30
+        rows=conn.execute("SELECT id,payload_json,created_at FROM edge_event_queue WHERE status='PENDING'").fetchall()
+        for row in rows:
+            try:
+                created=datetime.fromisoformat(str(row['created_at']).replace('Z','+00:00'))
+                metadata=json.loads(row['payload_json']).get('metadata') or {}
+                if not metadata.get('evidence_pending') or created.timestamp()>cutoff:
+                    continue
+                metadata['evidence_pending']=False
+                metadata['evidence_status']='PARTIAL' if metadata.get('snapshot_paths') else 'UNAVAILABLE'
+                missing=metadata.get('evidence_missing') if isinstance(metadata.get('evidence_missing'),dict) else {}
+                missing.setdefault('clip','capture_interrupted_by_edge_restart')
+                if len(metadata.get('snapshot_paths') or [])<3:
+                    missing.setdefault('snapshots','capture_interrupted_by_edge_restart')
+                metadata['evidence_missing']=missing
+                payload=json.loads(row['payload_json']);payload['metadata']=metadata
+                conn.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),row['id']))
+                conn.execute("UPDATE person_events SET metadata_json=? WHERE id=?",(json.dumps(metadata),row['id']))
+            except (ValueError,TypeError,json.JSONDecodeError):
+                continue
     @staticmethod
     def now(): return datetime.now(timezone.utc).isoformat()
     def _enqueue_edge_event(self,conn,event_id,event_type,payload):
@@ -204,6 +226,37 @@ class SQLiteStore:
             c.execute("INSERT INTO person_events VALUES(?,?,?,?,?,?,?)",(eid,person_id,store_id,camera_id,event_type,ts.isoformat(),json.dumps(metadata or {})))
             self._enqueue_edge_event(c,eid,event_type,payload)
         return eid
+
+    def update_person_event_evidence(self,event_id,snapshot_paths=None,clip_path=None,
+                                     evidence_missing=None,evidence_pending=None):
+        """Persist attendance evidence completion to both history and queued sync."""
+        with self._lock,self._conn() as c:
+            row=c.execute("SELECT metadata_json FROM person_events WHERE id=?",(event_id,)).fetchone()
+            if not row:
+                return False
+            metadata=json.loads(row["metadata_json"] or "{}")
+            paths=[str(path) for path in (snapshot_paths or metadata.get("snapshot_paths") or []) if path]
+            if paths:
+                metadata["snapshot_paths"]=paths[:3]
+                metadata["snapshot_path"]=paths[0]
+            if clip_path:
+                metadata["clip_path"]=str(clip_path)
+                (metadata.get("evidence_missing") or {}).pop("clip",None)
+            missing=metadata.get("evidence_missing") if isinstance(metadata.get("evidence_missing"),dict) else {}
+            missing.update(evidence_missing or {})
+            metadata["evidence_missing"]=missing
+            if evidence_pending is not None:
+                metadata["evidence_pending"]=bool(evidence_pending)
+            complete=len(paths)>=3 and bool(metadata.get("clip_path"))
+            metadata["evidence_status"]=("PENDING_CAPTURE" if metadata.get("evidence_pending") else
+                "COMPLETE" if complete else "PARTIAL" if paths or metadata.get("clip_path") else "UNAVAILABLE")
+            c.execute("UPDATE person_events SET metadata_json=? WHERE id=?",(json.dumps(metadata),event_id))
+            queued=c.execute("SELECT payload_json,status FROM edge_event_queue WHERE id=?",(event_id,)).fetchone()
+            if queued and queued["status"]=="PENDING":
+                payload=json.loads(queued["payload_json"])
+                payload["metadata"]={**(payload.get("metadata") or {}),**metadata}
+                c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),event_id))
+        return True
     def person_events(self,person_id=None):
         q='''SELECT e.*,p.employee_code,p.full_name,p.role FROM person_events e LEFT JOIN personnel p ON p.id=e.person_id'''
         args=[]
