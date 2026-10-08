@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 from cloud_portal.crm_client import SnapKeyCrmClient
 
@@ -120,3 +121,56 @@ def test_auto_logout_uses_distinct_endpoint_and_exact_payload(monkeypatch):
     assert call["kwargs"]["json"] == {
         "userId":"crm-user-1","remarks":"AUTO_LOGOUT: absent for 60 minutes"}
     assert "expired-static-token" not in str(call)
+
+
+def test_monthly_roster_uses_only_the_configured_tenant_service_token(monkeypatch):
+    FakeClient.calls=[]
+    monkeypatch.setenv("SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON",
+                       '{"tenant-a":"service-a","tenant-b":"service-b"}')
+    monkeypatch.setattr(httpx,"Client",FakeClient)
+    client=SnapKeyCrmClient(base_url="https://apis.snapkey.in",token="legacy-token")
+
+    client.users_roster(2026,10,tenant_code="TENANT-B")
+
+    call=FakeClient.calls[0]
+    assert call["path"]=="/api/UserRoster/GetUsersRoster"
+    assert call["headers"]["Authorization"]=="Bearer service-b"
+    assert "legacy-token" not in str(call)
+    with pytest.raises(RuntimeError,match="No CRM service token"):
+        client.users_roster(2026,10,tenant_code="tenant-c")
+
+
+def test_tenant_service_token_configuration_rejects_invalid_json_without_echoing_it(monkeypatch):
+    monkeypatch.setenv("SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON","not-a-json-secret")
+
+    with pytest.raises(RuntimeError,match="must be valid JSON") as error:
+        SnapKeyCrmClient(token="legacy-token")
+
+    assert "not-a-json-secret" not in str(error.value)
+
+
+def test_break_mutation_uses_tenant_scoped_service_token_not_face_token(monkeypatch):
+    FakeClient.calls=[]
+    monkeypatch.setenv("SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON",
+                       '{"tenant-a":"service-a"}')
+    monkeypatch.setattr(httpx,"Client",FakeClient)
+    client=SnapKeyCrmClient(base_url="https://apis.snapkey.in",token="legacy-token")
+
+    client.start_break("employee-a","break-lunch",tenant_code="tenant-a")
+
+    call=FakeClient.calls[0]
+    assert call["path"]=="/api/UserBreak/start-break"
+    assert call["headers"]["Authorization"]=="Bearer service-a"
+    assert call["kwargs"]["json"]=={"userId":"employee-a","breakMasterId":"break-lunch"}
+    assert "legacy-token" not in str(call)
+
+
+def test_tenant_token_map_never_falls_back_to_legacy_token(monkeypatch):
+    monkeypatch.setenv("SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON",'{"tenant-a":"tenant-a-token"}')
+    client=SnapKeyCrmClient(token="legacy-token")
+
+    with pytest.raises(RuntimeError,match="Tenant code is required"):
+        client.service_token_for_tenant()
+    with pytest.raises(RuntimeError,match="No CRM service token"):
+        client.service_token_for_tenant("tenant-b")
+    assert client.service_token_for_tenant("tenant-a")=="tenant-a-token"

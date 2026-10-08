@@ -24,6 +24,35 @@ def decrypt_token(value: str) -> str:
     return _cipher().decrypt(value.encode()).decode()
 
 
+class TokenScopeError(ValueError):
+    """Encrypted token metadata does not match its tenant/user storage row."""
+
+
+def encrypt_scoped_token(token: str, tenant_id: str, shop_id: str,
+                         crm_user_id: str) -> str:
+    if not tenant_id or not shop_id or not crm_user_id:
+        raise ValueError("tenant, shop and CRM user scope are required")
+    envelope={"version":1,"tenant_id":tenant_id,"shop_id":shop_id,
+              "crm_user_id":crm_user_id,"token":token}
+    return encrypt_token(json.dumps(envelope,separators=(",",":")))
+
+
+def decrypt_scoped_token(value: str, tenant_id: str, shop_id: str,
+                         crm_user_id: str) -> str:
+    try:
+        envelope=json.loads(decrypt_token(value))
+    except (ValueError,TypeError) as exc:
+        raise TokenScopeError("cached CRM token has no valid scope envelope") from exc
+    expected={"tenant_id":tenant_id,"shop_id":shop_id,"crm_user_id":crm_user_id}
+    if (not isinstance(envelope,dict) or envelope.get("version")!=1
+            or any(envelope.get(key)!=identity for key,identity in expected.items())):
+        raise TokenScopeError("cached CRM token scope does not match its storage key")
+    token=envelope.get("token")
+    if not isinstance(token,str) or not token.strip():
+        raise TokenScopeError("cached CRM token is empty")
+    return token
+
+
 def jwt_expiry(token: str, *, issued_at: datetime | None = None) -> datetime:
     """Bound 24h CRM contract by embedded exp; decoding is NOT signature verification."""
     now=issued_at or datetime.now(timezone.utc)

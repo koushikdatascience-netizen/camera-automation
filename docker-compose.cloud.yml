@@ -48,6 +48,7 @@ services:
       # Tenant/shop identities are supplied dynamically by the authenticated CRM backend.
       SNAPKEY_CRM_API_BASE_URL: ${SNAPKEY_CRM_API_BASE_URL:-https://apis.snapkey.in}
       SNAPKEY_CRM_API_TOKEN: ${SNAPKEY_CRM_API_TOKEN:-}
+      SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON: '${SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON:-}'
       # Automatic camera attendance posts the current face crop to the CRM
       # face-login service. Override this while that service is hosted separately.
       SNAPKEY_CRM_FACE_LOGIN_URL: ${SNAPKEY_CRM_FACE_LOGIN_URL:-https://apis.snapkey.in/api/Auth/loginUsingFaceTenant}

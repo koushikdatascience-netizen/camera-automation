@@ -142,27 +142,29 @@ def test_crm_attendance_deployed_payload_and_logout_opt_in(tmp_path, monkeypatch
  })
  calls=[]
  monkeypatch.setattr(api.crm_client,'token','test-token')
- monkeypatch.setattr(api.crm_client,'login_logout',lambda payload: calls.append(payload) or {'ok':True})
+ monkeypatch.setattr(api,'_crm_face_login_token_for_user',lambda *_args:('tenant-uuid','face-token'))
+ monkeypatch.setattr(api.crm_client,'login_logout_with_face_token',
+                     lambda payload,token: calls.append((payload,token)) or {'ok':True})
  base={'schema_version':'edge.event.v1','tenant_id':'tenant-a','shop_id':'shop1','site_id':'site-1',
        'edge_id':'edge-1','event_id':'evt-entry','event_type':'ATTENDANCE_ENTRY',
        'event_time':'2026-09-28T12:03:40.692Z','payload':{'person_id':'person-1'}}
  api._deliver_crm_attendance_event(base)
- assert calls[-1]=={
+ assert calls[-1]==({
   'userId':'crm-user-1','date':'2026-09-28',
   'actualStartTime':'12:03:40','actualOffTime':None,
   'loginLocation':'Camera Eye - site-1','logoutLocation':None,
- }
+ },'face-token')
  exit_event={**base,'event_id':'evt-exit','event_type':'ATTENDANCE_EXIT','event_time':'2026-09-28T18:15:20.000Z'}
  api._deliver_crm_attendance_event(exit_event)
  assert len(calls)==1, 'Automatic logout must remain disabled by default'
  monkeypatch.setenv('SNAPKEY_CRM_AUTO_LOGOUT_ENABLED','1')
  api._deliver_crm_attendance_event(exit_event)
  assert len(calls)==2
- assert calls[-1]=={
+ assert calls[-1]==({
   'userId':'crm-user-1','date':'2026-09-28',
   'actualStartTime':None,'actualOffTime':'18:15:20',
   'loginLocation':None,'logoutLocation':'Camera Eye - site-1',
- }
+ },'face-token')
 
 
 

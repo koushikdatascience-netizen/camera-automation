@@ -729,6 +729,14 @@ class PostgresPortalStore:
                     "tenant":tenant_id,"shop":shop_id,"user":crm_user_id}).mappings().first()
         return dict(row) if row else None
 
+    def delete_crm_face_token(self, tenant_id: str, shop_id: str,
+                              crm_user_id: str) -> None:
+        """Invalidate one tenant/shop/user face token without affecting peers."""
+        with self._conn() as conn:
+            conn.execute(text("""DELETE FROM crm_face_tokens
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id})
+
     def claim_crm_auto_logout(self, tenant_id: str, shop_id: str, crm_user_id: str,
                               absence_started_at: datetime,local_person_id: str | None = None,
                               camera_id: str | None = None,

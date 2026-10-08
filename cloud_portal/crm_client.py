@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -23,6 +24,20 @@ class SnapKeyCrmClient:
     def __init__(self, base_url: str | None = None, token: str | None = None, timeout: float = 15.0):
         self.base_url=(base_url or os.getenv("SNAPKEY_CRM_API_BASE_URL","https://apis.snapkey.in")).rstrip("/")
         self.token=(token or os.getenv("SNAPKEY_CRM_API_TOKEN","")).strip()
+        raw_tenant_tokens=os.getenv("SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON","").strip()
+        try:
+            configured_tenant_tokens=json.loads(raw_tenant_tokens) if raw_tenant_tokens else {}
+        except ValueError as exc:
+            raise RuntimeError("SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON must be valid JSON") from exc
+        if not isinstance(configured_tenant_tokens,dict):
+            raise RuntimeError("SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON must be a JSON object")
+        self.tenant_tokens={}
+        for tenant_code,service_token in configured_tenant_tokens.items():
+            key=str(tenant_code or "").strip().casefold()
+            value=str(service_token or "").strip()
+            if not key or not value or key in self.tenant_tokens:
+                raise RuntimeError("SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON has an invalid tenant entry")
+            self.tenant_tokens[key]=value
         self.face_login_url=os.getenv(
             "SNAPKEY_CRM_FACE_LOGIN_URL",
             self.base_url + "/api/Auth/loginUsingFaceTenant",
@@ -37,7 +52,33 @@ class SnapKeyCrmClient:
     @property
     def configured(self) -> bool:
         """Whether legacy CRM operations that require a service token are configured."""
-        return bool(self.token)
+        return bool(self.token or self.tenant_tokens)
+
+    def service_token_for_tenant(self, tenant_code: str | None = None) -> str:
+        """Select only an exact tenant credential, with the legacy token as fallback.
+
+        Callers performing scoped operations must still verify the token against
+        the tenant's CRM directory/roster before allowing a mutation.
+        """
+        code=str(tenant_code or "").strip().casefold()
+        if self.tenant_tokens:
+            if not code:
+                raise RuntimeError("Tenant code is required when tenant CRM service tokens are configured")
+            token=self.tenant_tokens.get(code)
+            if not token:
+                raise RuntimeError("No CRM service token is configured for this tenant")
+        else:
+            token=self.token
+        if not token:
+            raise RuntimeError("No CRM service token is configured for this tenant")
+        return token
+
+    def configured_for_tenant(self, tenant_code: str | None = None) -> bool:
+        try:
+            self.service_token_for_tenant(tenant_code)
+            return True
+        except RuntimeError:
+            return False
 
     @property
     def face_attendance_configured(self) -> bool:
@@ -73,11 +114,16 @@ class SnapKeyCrmClient:
         return value[:240]
 
     def _request(self, method: str, path: str, *, operation: str,
-                 auth_token: str | None = None, tenant_code: str | None = None,
+                 auth_token: str | None = None, service_token: str | None = None,
+                 tenant_code: str | None = None,
                  user_id: str | None = None, require_auth: bool = True, **kwargs) -> Any:
-        auth_context="face_token" if auth_token else ("service_token" if require_auth else "public")
+        auth_context=("face_token" if auth_token else
+                      ("tenant_service_token" if service_token else
+                       ("service_token" if require_auth else "public")))
         headers=(self._token_headers(auth_token) if auth_token else
-                 (self._headers() if require_auth else {"Accept":"application/json"}))
+                 ({"Authorization":f"Bearer {service_token}","Accept":"application/json"}
+                  if service_token else
+                  (self._headers() if require_auth else {"Accept":"application/json"})))
         headers={**headers,**kwargs.pop("headers",{})}
         started=time.monotonic()
         logger.info(
@@ -116,21 +162,34 @@ class SnapKeyCrmClient:
             logger.warning("CRM_NON_JSON_RESPONSE operation=%s status=%s",operation,response.status_code)
             return {"ok":True,"text":response.text[:1000]}
 
-    def all_users(self) -> Any:
-        return self._request("GET","/api/User/AllUser",operation="all_users")
+    def all_users(self, tenant_code: str | None = None) -> Any:
+        token=self.service_token_for_tenant(tenant_code) if tenant_code else None
+        return self._request("GET","/api/User/AllUser",operation="all_users",
+                             service_token=token,tenant_code=tenant_code)
 
-    def my_breaks(self, auth_token: str | None = None, user_id: str | None = None) -> Any:
+    def my_breaks(self, auth_token: str | None = None, user_id: str | None = None,
+                  tenant_code: str | None = None) -> Any:
+        service_token=(self.service_token_for_tenant(tenant_code)
+                       if tenant_code and not auth_token else None)
         return self._request("GET","/api/BreakMaster/my-breaks",operation="my_breaks",
-                             auth_token=auth_token,user_id=user_id)
+                             auth_token=auth_token,service_token=service_token,
+                             tenant_code=tenant_code,user_id=user_id)
 
-    def start_break(self, user_id: str, break_master_id: str, auth_token: str | None = None) -> Any:
+    def start_break(self, user_id: str, break_master_id: str, auth_token: str | None = None,
+                    tenant_code: str | None = None) -> Any:
+        service_token=(self.service_token_for_tenant(tenant_code)
+                       if tenant_code and not auth_token else None)
         return self._request("POST","/api/UserBreak/start-break",operation="start_break",
-            auth_token=auth_token,user_id=user_id,
+            auth_token=auth_token,service_token=service_token,tenant_code=tenant_code,user_id=user_id,
             json={"userId":user_id,"breakMasterId":break_master_id})
 
-    def end_break(self, user_id: str, auth_token: str | None = None) -> Any:
+    def end_break(self, user_id: str, auth_token: str | None = None,
+                  tenant_code: str | None = None) -> Any:
+        service_token=(self.service_token_for_tenant(tenant_code)
+                       if tenant_code and not auth_token else None)
         return self._request("POST","/api/UserBreak/end-break",operation="end_break",
-            auth_token=auth_token,user_id=user_id,params={"userId":user_id})
+            auth_token=auth_token,service_token=service_token,tenant_code=tenant_code,
+            user_id=user_id,params={"userId":user_id})
 
     def face_embeddings(self, tenant_code: str, *, force_refresh: bool = False) -> Any:
         """Return the tenant face directory, refreshing the in-process cache every 60s by default.
@@ -214,16 +273,23 @@ class SnapKeyCrmClient:
         return result
 
     def users_roster(self, year: int, month: int, user_id: str | None = None,
-                     auth_token: str | None = None) -> Any:
+                     auth_token: str | None = None,tenant_code: str | None = None) -> Any:
         uid=(user_id or "").strip()
         params={"year":int(year),"month":int(month),"userId":uid}
+        service_token=(self.service_token_for_tenant(tenant_code)
+                       if tenant_code and not auth_token else None)
         return self._request("GET","/api/UserRoster/GetUsersRoster",operation="users_roster",
-                             auth_token=auth_token,user_id=uid or None,params=params)
+                             auth_token=auth_token,service_token=service_token,
+                             tenant_code=tenant_code,user_id=uid or None,params=params)
 
-    def login_logout(self, payload: dict[str,Any]) -> Any:
+    def login_logout(self, payload: dict[str,Any], auth_token: str | None = None,
+                     tenant_code: str | None = None) -> Any:
         user_id=str(payload.get("userId") or "").strip()
+        service_token=(self.service_token_for_tenant(tenant_code)
+                       if tenant_code and not auth_token else None)
         return self._request("POST","/api/UserRoster/LoginLogout",operation="login_logout_service",
-                             user_id=user_id,json=payload)
+                             auth_token=auth_token,service_token=service_token,
+                             tenant_code=tenant_code,user_id=user_id,json=payload)
 
     def login_logout_with_face_token(self, payload: dict[str,Any], face_token: str) -> Any:
         user_id=str(payload.get("userId") or "").strip()

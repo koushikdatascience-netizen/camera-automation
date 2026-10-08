@@ -548,10 +548,155 @@ def test_crm_service_token_scope_uses_only_matching_crm_user_ids(
 
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(
         face_embeddings=lambda _tenant:directory,
-        users_roster=lambda *_args:roster))
+        users_roster=lambda *_args,**_kwargs:roster))
 
     if should_raise:
         with pytest.raises(RuntimeError,match="scoped to a different tenant"):
             api._assert_crm_service_token_scope("tenant-code")
     else:
         api._assert_crm_service_token_scope("tenant-code")
+
+
+def test_crm_service_token_scope_fails_closed_for_empty_or_unrecognized_roster(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(
+        face_embeddings=lambda _tenant:{"items":[{"id":"employee-1"}]},
+        users_roster=lambda *_args,**_kwargs:{"data":[{"userId":"employee-1"}]}))
+
+    with pytest.raises(RuntimeError,match="scope could not be verified"):
+        api._assert_crm_service_token_scope("tenant-code")
+
+
+def test_crm_service_token_scope_rejects_user_outside_verified_tenant_intersection(monkeypatch):
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(
+        face_embeddings=lambda _tenant:[{"id":"employee-a"},{"id":"employee-b"}],
+        users_roster=lambda *_args,**_kwargs:[{"userId":"employee-a"},{"userId":"employee-b"}]))
+
+    with pytest.raises(RuntimeError,match="does not include the requested CRM user"):
+        api._assert_crm_service_token_scope("tenant-code","employee-c")
+
+
+def test_face_login_token_is_bound_to_directory_user_and_tenant(monkeypatch):
+    calls=[]
+    monkeypatch.setattr(api,"_crm_face_login_identity",lambda tenant,user:
+                        ("crm-tenant-uuid","redacted-enrolled-image"))
+    monkeypatch.setattr(api,"_crm_face_login_succeeded",lambda result:result.get("success") is True)
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(login_using_face_tenant=lambda image,tenant:
+        calls.append((image,tenant)) or {"success":True,"token":"user-token",
+                                         "user":{"id":"employee-a","tenantId":tenant}}))
+
+    tenant,token=api._crm_face_login_token_for_user("tenant-code","employee-a")
+
+    assert calls==[("redacted-enrolled-image","crm-tenant-uuid")]
+    assert (tenant,token)==("crm-tenant-uuid","user-token")
+
+
+def test_legacy_checkout_uses_verified_employee_face_token(monkeypatch):
+    calls=[]
+    class Store:
+        def attendance_camera_coverage_healthy(self,*_args,**_kwargs):
+            raise AssertionError("max-logoff keeps its existing coverage-independent policy")
+        def complete_presence_checkout(self,*args): calls.append(("complete",args))
+        def record_attendance_activity(self,item): calls.append(("activity",item))
+        def record_portal_event(self,item): calls.append(("event",item))
+
+    monkeypatch.setenv("SNAPKEY_CRM_AUTO_LOGOUT_ENABLED","1")
+    monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"_crm_face_login_token_for_user",
+                        lambda tenant,user:("crm-tenant-uuid","employee-face-token"))
+    monkeypatch.setattr(api,"_evidence_manifest_for_last_recognition",lambda *_args:{"status":"UNAVAILABLE"})
+    monkeypatch.setattr(api,"_notify_cloud_event",lambda _event:None)
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(
+        login_logout=lambda *_args:pytest.fail("static service credential must not perform attendance logout"),
+        login_logout_with_face_token=lambda payload,token:
+            calls.append(("crm",payload,token)) or {"success":True}))
+    monkeypatch.setattr(api,"_crm_mutation_succeeded",lambda _result:True)
+    now=datetime.now(timezone.utc)
+    presence={"tenant_id":"tenant","shop_id":"shop","local_person_id":"person",
+              "crm_user_id":"employee-a","last_seen_at":now-timedelta(hours=1),
+              "last_camera_id":"camera"}
+
+    api._process_automatic_checkout(presence,now=now,reason_code="MAX_LOGOFF_REACHED",
+                                    require_camera_health=False)
+
+    crm_call=next(call for call in calls if call[0]=="crm")
+    assert crm_call[1]["userId"]=="employee-a"
+    assert crm_call[2]=="employee-face-token"
+    assert ("complete",("tenant","shop","person",True)) in calls
+
+
+def test_v2_auto_logout_invalidates_token_on_401_without_retry(monkeypatch):
+    import httpx
+
+    now=datetime.now(timezone.utc);started=now-timedelta(minutes=70);calls=[]
+    class Store:
+        def attendance_camera_coverage_status(self,*_args,**_kwargs): return {"state":"HEALTHY"}
+        def claim_crm_auto_logout(self,*_args): return True
+        def delete_crm_face_token(self,*args): calls.append(("invalidate",args))
+        def mark_crm_auto_logout_reconciliation_required(self,*args): calls.append(("reconcile",args))
+
+    response=httpx.Response(401,request=httpx.Request("POST","https://crm.invalid"))
+    error=httpx.HTTPStatusError("unauthorized",request=response.request,response=response)
+    def rejected(*_args):
+        calls.append(("crm",))
+        raise error
+    monkeypatch.setenv("CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED","true")
+    monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"_v2_face_token",lambda *_args:"revoked-face-token")
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(auto_logout_with_face_token=rejected))
+    row={"tenant_id":"tenant","shop_id":"shop","crm_user_id":"employee-a",
+         "local_person_id":"person","checked_in":True,"on_break":False,
+         "last_seen_at":started,"last_camera_id":"camera","last_camera_zone":"inside",
+         "policy_json":{"absenceMonitoringEnabled":True,"markAbsentAfterMinutes":60}}
+
+    api._v2_auto_logout(row,now)
+
+    assert calls[0]==("crm",)
+    assert calls[1]==("invalidate",("tenant","shop","employee-a"))
+    assert calls[2][0]=="reconcile"
+    assert len(calls)==3
+
+
+@pytest.mark.parametrize("action",["BREAK_START","BREAK_END"])
+def test_manual_break_uses_scoped_service_credential_after_face_identity_check(monkeypatch,action):
+    now=datetime.now(timezone.utc)
+    event={"id":"recognition-break","event_type":"PERSON_RECOGNIZED","camera_id":"cam",
+           "edge_id":"edge","event_time":now.isoformat(),
+           "payload":{"payload":{"person_id":"person","metadata":{}}}}
+    calls=[]
+    class Store:
+        def get_event(self,*_args): return event
+        def crm_person_mapping(self,*_args):
+            return {"crm_user_id":"employee-a","break_master_id":"lunch"}
+        def set_attendance_presence_break(self,*args): calls.append(("local-break",args))
+        def record_attendance_activity(self,item): calls.append(("activity",item))
+        def record_portal_event(self,item): calls.append(("event",item))
+
+    monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"_portal_scope",lambda *_args:None)
+    monkeypatch.setattr(api,"_portal_camera_lookup",lambda *_args:{
+        "camera_role":"ENTRANCE_EXIT","camera_zone":"inside"})
+    monkeypatch.setattr(api,"_crm_tenant_uuid_for_user",lambda *_args:"crm-tenant-uuid")
+    monkeypatch.setattr(api,"_recognition_image_base64",lambda _payload:"redacted-image")
+    monkeypatch.setattr(api,"_crm_face_login_succeeded",lambda _result:True)
+    monkeypatch.setattr(api,"_assert_crm_service_token_scope",
+                        lambda tenant,user=None:calls.append(("scope",tenant,user)))
+    monkeypatch.setattr(api,"_crm_mutation_succeeded",lambda _result:True)
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(
+        face_attendance_configured=True,
+        login_using_face_tenant=lambda *_args:{"success":True,"token":"face-token",
+                                                "user":{"id":"employee-a"}},
+        start_break=lambda *args,**kwargs:calls.append(("start",args,kwargs)) or {"success":True},
+        end_break=lambda *args,**kwargs:calls.append(("end",args,kwargs)) or {"success":True}))
+
+    result=api.attendance_station_action("tenant",api.AttendanceStationActionRequest(
+        camera_id="cam",edge_id="edge",recognition_event_id="recognition-break",action=action),
+        PortalPrincipal("session","tenant",None,"shop","admin","Admin","OWNER"))
+
+    assert result["ok"] is True
+    operation="start" if action=="BREAK_START" else "end"
+    crm_call=next(call for call in calls if call[0]==operation)
+    assert crm_call[1][0]=="employee-a"
+    assert crm_call[2]=={"tenant_code":"tenant"}
+    assert ("scope","tenant","employee-a") in calls
