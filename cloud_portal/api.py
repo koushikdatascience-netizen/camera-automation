@@ -541,6 +541,68 @@ def integration_get_person_attendance_policy(tenant_id: str, shop_id: str, crm_u
     return {"policy": saved}
 
 
+
+def _attendance_day_window(day: date, timezone_name: str) -> tuple[datetime, datetime]:
+    zone=ZoneInfo(timezone_name)
+    start=datetime.combine(day,time.min,tzinfo=zone)
+    return start.astimezone(timezone.utc),(start+timedelta(days=1)).astimezone(timezone.utc)
+
+
+@app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/activities")
+def integration_person_attendance_activities(tenant_id: str, shop_id: str, crm_user_id: str,
+                                             request: Request, day: date,
+                                             page: int = 1, page_size: int = 50):
+    _require_crm_integration(request)
+    if page < 1 or not 1 <= page_size <= 200:
+        raise HTTPException(422, "Invalid pagination")
+    policy=store.person_attendance_policy(tenant_id,shop_id,crm_user_id)
+    zone=(policy or {}).get("timezone") or "Asia/Kolkata"
+    start,end=_attendance_day_window(day,zone)
+    items=store.list_person_attendance_activities(tenant_id,shop_id,crm_user_id,start,end,
+                                                   page_size,(page-1)*page_size)
+    return {"items":items,"page":page,"pageSize":page_size,"date":day.isoformat(),"timezone":zone}
+
+
+@app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/presence")
+def integration_person_attendance_presence(tenant_id: str, shop_id: str, crm_user_id: str,
+                                           request: Request):
+    _require_crm_integration(request)
+    presence=store.get_person_attendance_presence(tenant_id,shop_id,crm_user_id)
+    if presence is None:
+        raise HTTPException(404,"No presence record")
+    return {"presence":presence,"cameraCoverageHealth":"NOT_EVALUATED",
+            "note":"Last seen is not proof of current presence; use camera health before absence decisions"}
+
+
+@app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/daily-summary")
+def integration_person_attendance_summary(tenant_id: str, shop_id: str, crm_user_id: str,
+                                          request: Request, day: date):
+    _require_crm_integration(request)
+    from cloud_portal.working_time import calculate_working_time
+    policy=store.person_attendance_policy(tenant_id,shop_id,crm_user_id)
+    zone=(policy or {}).get("timezone") or "Asia/Kolkata"
+    start,end=_attendance_day_window(day,zone)
+    activities=store.list_attendance_activity(tenant_id,shop_id,crm_user_id,start,end)
+    required=int((policy or {}).get("requiredWorkingMinutes",540))
+    return {"userId":crm_user_id,"date":day.isoformat(),"timezone":zone,
+            "summary":calculate_working_time(activities,required_minutes=required),
+            "note":"Provisional: open sessions, cross-day sessions and absence payroll treatment require reconciliation"}
+
+
+@app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/activities/{activity_id}/evidence")
+def integration_person_attendance_evidence(tenant_id: str, shop_id: str, crm_user_id: str,
+                                           activity_id: str, request: Request):
+    _require_crm_integration(request)
+    activity=store.get_person_attendance_activity(tenant_id,shop_id,crm_user_id,activity_id)
+    if activity is None:
+        raise HTTPException(404,"Attendance activity not found")
+    evidence=activity.get("evidence") or {}
+    # Never return unvalidated filesystem paths or storage keys as public URLs.
+    return {"activityId":activity_id,"status":"MANIFEST_ONLY",
+            "evidenceAvailable":bool(evidence),"manifest":evidence,
+            "mediaAccess":"NOT_IMPLEMENTED","note":"Signed media access pending"}
+
+
 @app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/daily-activity")
 def integration_daily_activity(tenant_id: str, shop_id: str, crm_user_id: str, day: date, request: Request):
     _require_crm_integration(request)
