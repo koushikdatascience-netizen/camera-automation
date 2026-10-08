@@ -2128,6 +2128,19 @@ def _evaluate_v2_person_absences() -> None:
                 )
                 if transition=="CRM_ABSENT_ACTION_PENDING":
                     _v2_auto_logout(row,now)
+                if created and transition in ("ADMIN_ABSENCE_WARNING","DAILY_ABSENCE_LIMIT_EXCEEDED","PROLONGED_ABSENCE"):
+                    try:
+                        event={"event_id":f"v2-{transition}-{user}-{int(seen.timestamp())}",
+                               "tenant_id":tenant,"shop_id":shop,"site_id":shop,
+                               "camera_id":row.get("last_camera_id"),"edge_id":"cloud-policy",
+                               "event_type":"ATTENDANCE_POLICY_VIOLATION",
+                               "event_time":now.isoformat(),
+                               "payload":{"metadata":{"crm_user_id":user,
+                                   "reason_code":transition,
+                                   "elapsed_minutes":round(evaluation.elapsed_minutes,2)}}}
+                        _notify_cloud_event(event)
+                    except Exception:
+                        logger.exception("V2_NOTIFICATION_FAILED user_id=%s transition=%s",user,transition)
                 if created:
                     logger.info("V2_ATTENDANCE_TRANSITION tenant_id=%s shop_id=%s crm_user_id=%s transition=%s",
                                 tenant,shop,user,transition)
