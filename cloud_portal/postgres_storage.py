@@ -118,6 +118,12 @@ class PostgresPortalStore:
                 whatsapp_recipients_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                 updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY(tenant_id,shop_id))""",
+            """CREATE TABLE IF NOT EXISTS person_attendance_transitions(
+                tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, crm_user_id TEXT NOT NULL,
+                business_date TEXT NOT NULL, absence_started_at TIMESTAMPTZ NOT NULL,
+                transition TEXT NOT NULL, occurred_at TIMESTAMPTZ NOT NULL,
+                details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                PRIMARY KEY(tenant_id,shop_id,crm_user_id,absence_started_at,transition))""",
             """CREATE TABLE IF NOT EXISTS person_attendance_policies(
                 tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, crm_user_id TEXT NOT NULL,
                 policy_json JSONB NOT NULL, version INTEGER NOT NULL DEFAULT 1,
@@ -582,6 +588,60 @@ class PostgresPortalStore:
 
 
 
+
+
+    def list_v2_attendance_presence(self, limit: int = 200) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT p.*,pp.policy_json
+                FROM attendance_presence p JOIN person_attendance_policies pp
+                ON p.tenant_id=pp.tenant_id AND p.shop_id=pp.shop_id
+                   AND p.crm_user_id=pp.crm_user_id
+                WHERE p.checked_in=TRUE
+                ORDER BY p.last_seen_at LIMIT :limit"""),{
+                    "limit":max(1,min(500,int(limit))),
+                }).mappings().all()
+        return [dict(row) for row in rows]
+
+    def count_v2_absence_episodes(self, tenant_id: str, shop_id: str,
+                                  crm_user_id: str, business_date: str) -> int:
+        with self._conn() as conn:
+            return int(conn.execute(text("""SELECT COUNT(*) FROM person_attendance_transitions
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                AND business_date=:day AND transition='GRACE_EXCEEDED'"""),{
+                "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,"day":business_date,
+            }).scalar() or 0)
+
+    def record_v2_absence_transition(self, *, tenant_id: str, shop_id: str,
+                                     crm_user_id: str, business_date: str,
+                                     absence_started_at: datetime, transition: str,
+                                     occurred_at: datetime, details: dict[str, Any]) -> bool:
+        with self._conn() as conn:
+            result=conn.execute(text("""INSERT INTO person_attendance_transitions(
+                tenant_id,shop_id,crm_user_id,business_date,absence_started_at,
+                transition,occurred_at,details_json)
+                VALUES(:tenant,:shop,:user,:day,:started,:transition,:now,CAST(:details AS JSONB))
+                ON CONFLICT DO NOTHING"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "day":business_date,"started":absence_started_at,
+                    "transition":transition,"now":occurred_at,
+                    "details":json.dumps(details),
+                })
+        return result.rowcount == 1
+
+    def list_v2_absence_alerts(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                               business_date: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT business_date,absence_started_at,transition,
+                occurred_at,details_json FROM person_attendance_transitions
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                  AND business_date=:day AND transition IN
+                    ('ADMIN_ABSENCE_WARNING','DAILY_ABSENCE_LIMIT_EXCEEDED',
+                     'PROLONGED_ABSENCE','CRM_ABSENT_ACTION_PENDING')
+                ORDER BY occurred_at DESC LIMIT :limit"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "day":business_date,"limit":max(1,min(200,int(limit))),
+                }).mappings().all()
+        return [{**dict(row),"details":row["details_json"] or {}} for row in rows]
 
     def upsert_person_attendance_policy(self, tenant_id: str, shop_id: str, crm_user_id: str,
                                         policy: dict[str, Any]) -> dict[str, Any]:
