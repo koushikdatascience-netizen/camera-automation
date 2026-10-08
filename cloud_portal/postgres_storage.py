@@ -653,7 +653,7 @@ class PostgresPortalStore:
                 SET status=:status,completed_at=:completed,last_error=:error
                 WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
                 AND absence_started_at=:started AND status='IN_FLIGHT'"""),{
-                    "status":"SUCCEEDED" if success else "PENDING",
+                    "status":"SUCCEEDED" if success else "RECONCILIATION_REQUIRED",
                     "completed":self.now() if success else None,
                     "error":error[:200],"tenant":tenant_id,"shop":shop_id,
                     "user":crm_user_id,"started":absence_started_at})
