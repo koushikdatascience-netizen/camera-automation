@@ -634,15 +634,25 @@
       if(!cameraResponse.ok)throw new Error(cameraBody.detail||"Unable to load cameras.");
       if(!edgeResponse.ok)throw new Error(edgeBody.detail||"Unable to load edge status.");
       const edges=edgeBody.items||[],selected=edges.find(edge=>edgeOnline(edge))||edges[0],inventory=[];
-      edges.forEach(edge=>(edge.status?.cameras||[]).forEach(camera=>inventory.push({...camera,edge_id:edge.edge_id||edge.id})));
-      const configured=cameraBody.items||[],byId=new Map(configured.map(x=>[cameraKey(x),x]));
-      inventory.forEach(x=>byId.set(cameraKey(x),{...(byId.get(cameraKey(x))||{}),...x}));
-      const cameras=[...byId.values()],onlineCount=inventory.filter(x=>x.online).length;
-      setText("cloud-live-summary",cameras.length+" cameras · "+onlineCount+" online");
+      // Old edge heartbeats are snapshots, not current camera inventory. Never
+      // resurrect their reported cameras as live tiles after an edge disconnects.
+      edges.filter(edgeOnline).forEach(edge=>(edge.status?.cameras||[]).forEach(camera=>inventory.push({...camera,edge_id:edge.edge_id||edge.id})));
+      const configured=cameraBody.items||[],byId=new Map();
+      configured.forEach(camera=>byId.set(cameraKey(camera),camera));
+      inventory.forEach(camera=>{
+        const key=cameraKey(camera);
+        byId.set(key,{...(byId.get(key)||{}),...camera});
+      });
+      const allCameras=[...byId.values()];
+      const runtimeByKey=new Map(inventory.map(camera=>[cameraKey(camera),camera]));
+      const onlineCameras=allCameras.filter(camera=>!!runtimeByKey.get(cameraKey(camera))?.online);
+      const showOffline=!!document.getElementById("cloud-live-show-offline")?.checked;
+      const cameras=showOffline?allCameras:onlineCameras;
+      setText("cloud-live-summary",onlineCameras.length+" online · "+(allCameras.length-onlineCameras.length)+" offline"+(showOffline?"":" (hidden)"));
       const edgeState=document.getElementById("live-edge-state");if(edgeState)edgeState.textContent=(selected&&edgeOnline(selected))?"● Edge Online":"● Edge Offline";
-      if(!cameras.length){grid.innerHTML="<div class='camera-panel' style='padding:36px;text-align:center'>No cameras configured for this shop.</div>";return;}
+      if(!cameras.length){grid.innerHTML="<div class='camera-panel' style='padding:36px;text-align:center'>"+(allCameras.length?"No cameras are currently online. Enable ‘Show offline cameras’ to review saved configurations.":"No cameras configured for this shop.")+"</div>";return;}
       grid.innerHTML=cameras.map(camera=>{
-        const runtime=inventory.find(x=>cameraKey(x)===cameraKey(camera)),online=!!runtime?.online,features=camera.features||{};
+        const runtime=runtimeByKey.get(cameraKey(camera)),online=!!runtime?.online,features=camera.features||{};
         const pills=[features.face_recognition?"Face Recognition":null,(camera.settings?.tracking_mode==="track"||camera.tracking_mode==="track")?"Tracking":null,features.object_security?"Security":null].filter(Boolean);
         const role=String(camera.camera_role||runtime?.camera_role||"").toUpperCase(),attendance=role==="ENTRANCE_EXIT";
         return "<article class='cloud-camera-tile'><div class='cloud-camera-visual' style='position:relative'><div class='cloud-camera-overlay'><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><span class='"+(online?"camera-state-online":"camera-state-offline")+"'>● "+(online?"ONLINE":"OFFLINE")+"</span></div><video class='live-video' autoplay playsinline muted style='width:100%;height:100%;object-fit:contain;display:none;background:#0f172a'></video><div class='live-video-message'><strong>Edge AI Live View</strong><br><small>"+(online?"Start live to see the same annotated detection, recognized names and unknown-person boxes produced by the EXE.":"Camera is not currently online")+"</small></div></div><div class='cloud-camera-meta'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><div class='camera-feature-pills'>"+pills.map(x=>"<span class='camera-feature-pill'>"+x+"</span>").join("")+"</div></div><div style='display:flex;gap:8px'><button class='btn btn-primary cloud-live-start' data-camera='"+escapeHtml(cameraKey(camera))+"' "+(!online?"disabled":"")+">View Live</button>"+(attendance?"<a class='btn btn-light' href='/portal/attendance.html'>Take Attendance</a>":"")+"<a class='btn btn-light' href='/portal/cameras.html'>Settings</a></div></div></article>";
@@ -654,6 +664,7 @@
     if(!document.getElementById("cloud-live-grid"))return;
     ++cloudLivePageGeneration;
     document.getElementById("refresh-cloud-live")?.addEventListener("click",loadCloudLiveCameras);
+    document.getElementById("cloud-live-show-offline")?.addEventListener("change",loadCloudLiveCameras);
     document.querySelectorAll("[data-grid]").forEach(button=>button.addEventListener("click",()=>{const grid=document.getElementById("cloud-live-grid"),mode=button.dataset.grid;grid.className="professional-live-grid"+(mode==="1"?" cols-1":mode==="3"?" cols-3":"");}));
     window.addEventListener("pagehide",()=>{++cloudLivePageGeneration;[...cloudLiveRooms.keys()].forEach(key=>void stopCloudLive(key));});
     loadCloudLiveCameras();
