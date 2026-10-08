@@ -1125,6 +1125,34 @@ class PostgresPortalStore:
                     AND camera_role='ENTRANCE_EXIT' ORDER BY updated_at DESC LIMIT 1"""),
                     {"tenant":tenant_id,"shop":shop_id,"camera":camera_id}).mappings().first()
                 camera_zone=(configured or {}).get("camera_zone") if configured else None
+            # Edge-local cameras can have an ID different from the legacy portal
+            # camera_configs row (e.g. webcam_1 vs camera-UUID). Resolve the
+            # attendance zone only when the advertised ID is unique to a single
+            # edge, the edge's camera metadata agrees, and a configured entrance
+            # camera on that SAME edge has the SAME zone. Never use an offline
+            # heartbeat as evidence of healthy coverage.
+            if not camera_zone and camera_id:
+                matches=conn.execute(text("""SELECT DISTINCT h.edge_id,
+                        advertised.camera->>'camera_zone' AS advertised_zone
+                    FROM edge_heartbeats h
+                    CROSS JOIN LATERAL jsonb_array_elements(
+                        COALESCE(h.status_json->'cameras','[]'::jsonb)) AS advertised(camera)
+                    WHERE h.tenant_id=:tenant AND h.shop_id=:shop
+                      AND advertised.camera->>'camera_id'=:camera
+                      AND advertised.camera->>'camera_role'='ENTRANCE_EXIT'
+                      AND advertised.camera->>'camera_zone' IS NOT NULL
+                """),{"tenant":tenant_id,"shop":shop_id,"camera":camera_id}).mappings().all()
+                if len({(m["edge_id"],m["advertised_zone"]) for m in matches})==1:
+                    match=matches[0]
+                    candidates=conn.execute(text("""SELECT DISTINCT camera_zone
+                        FROM camera_configs
+                        WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge
+                          AND camera_role='ENTRANCE_EXIT' AND enabled=TRUE
+                          AND camera_zone=:zone"""),{
+                            "tenant":tenant_id,"shop":shop_id,"edge":match["edge_id"],
+                            "zone":match["advertised_zone"]}).scalars().all()
+                    if len(candidates)==1:
+                        camera_zone=match["advertised_zone"]
             if not camera_zone:
                 return {"state":"UNKNOWN","reason":"coverage_zone_unconfigured",
                         "cameraZone":None,"healthyCameraIds":[],"configuredCameraIds":[]}
@@ -1150,9 +1178,20 @@ class PostgresPortalStore:
                 continue
             fresh_heartbeat=True
             camera_status=row["status_json"] if isinstance(row["status_json"],dict) else json.loads(row["status_json"] or "{}")
-            for camera in camera_status.get("cameras") or []:
+            cameras=camera_status.get("cameras") or []
+            exact=[camera for camera in cameras if str(camera.get("camera_id") or "")==str(row["camera_id"])]
+            # A legacy alias is accepted only when one configured camera and
+            # one advertised camera exist on this same edge and zone. An
+            # ambiguous inventory is UNKNOWN, never HEALTHY.
+            configured_for_edge=[c for c in rows if c["edge_id"]==row["edge_id"]]
+            aliases=[camera for camera in cameras
+                     if camera.get("camera_role")=="ENTRANCE_EXIT"
+                     and camera.get("camera_zone")==camera_zone]
+            candidates=exact or (aliases if len(configured_for_edge)==1 and len(aliases)==1
+                                  and len(cameras)==1 else [])
+            for camera in candidates:
                 identifier=str(camera.get("camera_id") or "")
-                if identifier != str(row["camera_id"]):
+                if not identifier:
                     continue
                 # Config is authoritative for role/zone; heartbeat must report the
                 # same zone when it includes one, preventing cross-zone substitution.
