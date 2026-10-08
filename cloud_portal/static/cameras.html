@@ -105,8 +105,8 @@
 
       <div class="panel-heading">
         <div>
-          <h2>Camera Configuration</h2>
-          <p>Set up camera details, detection features and tracking preferences.</p>
+          <h2>Simple Camera Setup</h2>
+          <p>Choose attendance or unknown-person security. Technical settings are managed automatically.</p>
         </div>
 
         <span class="configuration-badge">
@@ -212,14 +212,13 @@
             </label>
 
             <select id="camera-role">
-              <option value="">Select role</option>
-              <option value="ENTRANCE_EXIT">Attendance / Entrance-Exit</option>
-              <option value="SECURITY">Security / Monitoring</option>
+              <option value="ENTRANCE_EXIT">Attendance Camera</option>
+              <option value="GENERAL">Unknown Person Security</option>
             </select>
           </div>
 
 
-          <div class="form-group">
+          <div class="form-group" style="display:none">
             <label for="camera-zone">
               Camera Zone
               <span>*</span>
@@ -233,7 +232,7 @@
           </div>
 
 
-          <div class="form-group">
+          <div class="form-group" style="display:none">
             <label for="crowd-threshold">
               Crowd Alert Threshold
               <span>*</span>
@@ -260,14 +259,15 @@
 
       <div class="form-section">
 
-        <h3>Features</h3>
+        <h3>Automatic Detection</h3>
 
         <p class="section-description">
-          Select the detection and monitoring capabilities for this camera.
+          Camera AI features are selected automatically based on camera purpose.
         </p>
 
 
-        <div class="feature-grid">
+        <p id="camera-purpose-description" role="status">Employee attendance is recorded through the configured CRM workflow.</p>
+      <div class="feature-grid" style="display:none" aria-hidden="true">
 
           <label class="feature-card">
 
@@ -345,7 +345,7 @@
 
       <!-- TRACKING PERFORMANCE -->
 
-      <div class="form-section">
+      <div class="form-section" style="display:none">
 
         <h3>AI Performance</h3>
 

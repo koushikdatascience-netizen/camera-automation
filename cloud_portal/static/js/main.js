@@ -449,7 +449,8 @@
     document.getElementById("source-type").value=camera.source_type||"rtsp";
     document.getElementById("camera-zone").value=camera.camera_zone||"";
     document.getElementById("crowd-threshold").value=camera.crowd_threshold||10;
-    const role=document.getElementById("camera-role"); role.value=camera.camera_role==="GENERAL"?"General":"Entry";
+    const role=document.getElementById("camera-role"); role.value=camera.camera_role==="GENERAL"?"GENERAL":"ENTRANCE_EXIT";
+    updateCameraPurposeDescription();
     window.scrollTo({top:0,behavior:"smooth"});
   }
 
@@ -466,7 +467,8 @@
     document.getElementById("camera-zone").value=camera.camera_zone||"";
     document.getElementById("crowd-threshold").value=camera.crowd_threshold||10;
     const role=document.getElementById("camera-role");
-    role.value=(camera.camera_role==="ENTRANCE_EXIT")?"Entry":"General";
+    role.value=(camera.camera_role==="ENTRANCE_EXIT")?"ENTRANCE_EXIT":"GENERAL";
+    updateCameraPurposeDescription();
     showMessage("Camera loaded from edge. Choose role/features and save; source stays hidden on the local PC.");
     window.scrollTo({top:0,behavior:"smooth"});
   }
@@ -482,6 +484,14 @@
     }catch(error){showMessage(error.message,true);}
   }
 
+  function updateCameraPurposeDescription(){
+    const security=document.getElementById("camera-role")?.value==="GENERAL";
+    const message=document.getElementById("camera-purpose-description");
+    if(message)message.textContent=security
+      ?"Unknown-person monitoring. Detection defaults to the entire frame; configure a bounded area using Detection Zones on the saved camera."
+      :"Employee recognition and attendance. CRM check-in, checkout and break actions use configured attendance rules.";
+  }
+
   async function saveCamera() {
     try {
       const scope = requireScope(["tenant_id", "shop_id", "site_id", "edge_id"]);
@@ -495,7 +505,7 @@
         || (cloudExistingCamera === cameraId ? "__KEEP_EXISTING__" : "");
       const roleValue = document.getElementById("camera-role").value;
       if (!cameraId || !name || !source || !roleValue) throw new Error("Camera Name, Camera ID, Camera Source and Camera Role are required.");
-      const checks = Array.from(document.querySelectorAll(".feature-card input[type=checkbox]"));
+      const securityCamera=roleValue==="GENERAL";
       const payload = {
         ...scope,
         company_code: scope.company_code || null,
@@ -503,25 +513,25 @@
         name,
         source_type: document.getElementById("source-type").value||sourceType(source),
         source,
-        camera_role: roleValue.toLowerCase() === "general" ? "GENERAL" : "ENTRANCE_EXIT",
+        camera_role: securityCamera ? "GENERAL" : "ENTRANCE_EXIT",
         camera_zone: document.getElementById("camera-zone").value.trim() || null,
         crowd_threshold: Number(document.getElementById("crowd-threshold").value || 10),
         enabled: document.getElementById("camera-id").dataset.enabled !== 'false',
         // These keys intentionally match CameraFeatures/apply_cloud_camera on the edge.
         // UI-only labels must never silently create feature names the edge ignores.
         features: {
-          attendance: !!checks[0]?.checked,
-          face_recognition: !!checks[1]?.checked,
-          unknown_detection: !!checks[3]?.checked,
+          attendance: !securityCamera,
+          face_recognition: true,
+          unknown_detection: securityCamera,
           shoplifting: false,
-          object_security: !!checks[4]?.checked
+          object_security: false
         },
         settings: {
           // Person Tracking is a runtime mode, not an unrelated detection feature.
           tracking_fps: Math.max(1, Math.round(30 / Math.max(1, Number(document.getElementById("frame-skip").value || 2)))),
           tracking_imgsz: Number(document.getElementById("max-width").value || 640),
           tracking_quality: 65,
-          tracking_mode: checks[2]?.checked ? "track" : "detect"
+          tracking_mode: "track"
         }
       };
       const response = await authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras/" + encodeURIComponent(cameraId), {
@@ -552,13 +562,16 @@
       source.placeholder = "RTSP URL, video file path or webcam index";
     }
     const role = document.getElementById("camera-role");
-    if (role) role.value = "";
+    if (role) role.value = "ENTRANCE_EXIT";
+    updateCameraPurposeDescription();
   }
 
   function wireCameraPage() {
     const save = document.getElementById("save-camera-btn");
     if (!save) return;
     save.addEventListener("click", saveCamera);
+    document.getElementById("camera-role")?.addEventListener("change",updateCameraPurposeDescription);
+    updateCameraPurposeDescription();
     document.getElementById("cancel-camera-btn")?.addEventListener("click", resetCameraForm);
     document.getElementById("test-camera-btn")?.addEventListener("click", testCameraConnection);
     document.getElementById("discover-camera-btn")?.addEventListener("click", discoverOnvifCamera);
@@ -634,15 +647,25 @@
       if(!cameraResponse.ok)throw new Error(cameraBody.detail||"Unable to load cameras.");
       if(!edgeResponse.ok)throw new Error(edgeBody.detail||"Unable to load edge status.");
       const edges=edgeBody.items||[],selected=edges.find(edge=>edgeOnline(edge))||edges[0],inventory=[];
-      edges.forEach(edge=>(edge.status?.cameras||[]).forEach(camera=>inventory.push({...camera,edge_id:edge.edge_id||edge.id})));
-      const configured=cameraBody.items||[],byId=new Map(configured.map(x=>[cameraKey(x),x]));
-      inventory.forEach(x=>byId.set(cameraKey(x),{...(byId.get(cameraKey(x))||{}),...x}));
-      const cameras=[...byId.values()],onlineCount=inventory.filter(x=>x.online).length;
-      setText("cloud-live-summary",cameras.length+" cameras · "+onlineCount+" online");
+      // Old edge heartbeats are snapshots, not current camera inventory. Never
+      // resurrect their reported cameras as live tiles after an edge disconnects.
+      edges.filter(edgeOnline).forEach(edge=>(edge.status?.cameras||[]).forEach(camera=>inventory.push({...camera,edge_id:edge.edge_id||edge.id})));
+      const configured=cameraBody.items||[],byId=new Map();
+      configured.forEach(camera=>byId.set(cameraKey(camera),camera));
+      inventory.forEach(camera=>{
+        const key=cameraKey(camera);
+        byId.set(key,{...(byId.get(key)||{}),...camera});
+      });
+      const allCameras=[...byId.values()];
+      const runtimeByKey=new Map(inventory.map(camera=>[cameraKey(camera),camera]));
+      const onlineCameras=allCameras.filter(camera=>!!runtimeByKey.get(cameraKey(camera))?.online);
+      const showOffline=!!document.getElementById("cloud-live-show-offline")?.checked;
+      const cameras=showOffline?allCameras:onlineCameras;
+      setText("cloud-live-summary",onlineCameras.length+" online · "+(allCameras.length-onlineCameras.length)+" offline"+(showOffline?"":" (hidden)"));
       const edgeState=document.getElementById("live-edge-state");if(edgeState)edgeState.textContent=(selected&&edgeOnline(selected))?"● Edge Online":"● Edge Offline";
-      if(!cameras.length){grid.innerHTML="<div class='camera-panel' style='padding:36px;text-align:center'>No cameras configured for this shop.</div>";return;}
+      if(!cameras.length){grid.innerHTML="<div class='camera-panel' style='padding:36px;text-align:center'>"+(allCameras.length?"No cameras are currently online. Enable ‘Show offline cameras’ to review saved configurations.":"No cameras configured for this shop.")+"</div>";return;}
       grid.innerHTML=cameras.map(camera=>{
-        const runtime=inventory.find(x=>cameraKey(x)===cameraKey(camera)),online=!!runtime?.online,features=camera.features||{};
+        const runtime=runtimeByKey.get(cameraKey(camera)),online=!!runtime?.online,features=camera.features||{};
         const pills=[features.face_recognition?"Face Recognition":null,(camera.settings?.tracking_mode==="track"||camera.tracking_mode==="track")?"Tracking":null,features.object_security?"Security":null].filter(Boolean);
         const role=String(camera.camera_role||runtime?.camera_role||"").toUpperCase(),attendance=role==="ENTRANCE_EXIT";
         return "<article class='cloud-camera-tile'><div class='cloud-camera-visual' style='position:relative'><div class='cloud-camera-overlay'><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><span class='"+(online?"camera-state-online":"camera-state-offline")+"'>● "+(online?"ONLINE":"OFFLINE")+"</span></div><video class='live-video' autoplay playsinline muted style='width:100%;height:100%;object-fit:contain;display:none;background:#0f172a'></video><div class='live-video-message'><strong>Edge AI Live View</strong><br><small>"+(online?"Start live to see the same annotated detection, recognized names and unknown-person boxes produced by the EXE.":"Camera is not currently online")+"</small></div></div><div class='cloud-camera-meta'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><div class='camera-feature-pills'>"+pills.map(x=>"<span class='camera-feature-pill'>"+x+"</span>").join("")+"</div></div><div style='display:flex;gap:8px'><button class='btn btn-primary cloud-live-start' data-camera='"+escapeHtml(cameraKey(camera))+"' "+(!online?"disabled":"")+">View Live</button>"+(attendance?"<a class='btn btn-light' href='/portal/attendance.html'>Take Attendance</a>":"")+"<a class='btn btn-light' href='/portal/cameras.html'>Settings</a></div></div></article>";
@@ -654,6 +677,7 @@
     if(!document.getElementById("cloud-live-grid"))return;
     ++cloudLivePageGeneration;
     document.getElementById("refresh-cloud-live")?.addEventListener("click",loadCloudLiveCameras);
+    document.getElementById("cloud-live-show-offline")?.addEventListener("change",loadCloudLiveCameras);
     document.querySelectorAll("[data-grid]").forEach(button=>button.addEventListener("click",()=>{const grid=document.getElementById("cloud-live-grid"),mode=button.dataset.grid;grid.className="professional-live-grid"+(mode==="1"?" cols-1":mode==="3"?" cols-3":"");}));
     window.addEventListener("pagehide",()=>{++cloudLivePageGeneration;[...cloudLiveRooms.keys()].forEach(key=>void stopCloudLive(key));});
     loadCloudLiveCameras();
@@ -824,12 +848,50 @@
     }catch(error){showMessage(error.message,true);}
   }
 
+  let alertBaseline=null,alertSoundEnabled=false,alertAudioContext=null;
+  function notifyNewSecurityAlerts(items){
+    const ids=new Set(items.map(event=>String(event.id||"")).filter(Boolean));
+    if(alertBaseline===null){alertBaseline=ids;return;}
+    const fresh=items.filter(event=>event.id&&!alertBaseline.has(String(event.id)));
+    alertBaseline=ids;
+    if(!alertSoundEnabled||!fresh.length)return;
+    const event=fresh[0];
+    try{
+      if(alertAudioContext){
+        const oscillator=alertAudioContext.createOscillator(),gain=alertAudioContext.createGain();
+        oscillator.type="sine";oscillator.frequency.value=760;
+        gain.gain.setValueAtTime(0.0001,alertAudioContext.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.12,alertAudioContext.currentTime+0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001,alertAudioContext.currentTime+0.35);
+        oscillator.connect(gain).connect(alertAudioContext.destination);
+        oscillator.start();oscillator.stop(alertAudioContext.currentTime+0.36);
+      }
+      if("Notification" in window&&Notification.permission==="granted"){
+        const note=new Notification("Camera Eye · Security alert",{
+          body:(event.camera_id||"Camera")+" · "+String(event.event_type||"Unknown person detected").replaceAll("_"," "),
+          tag:"camera-eye-security-"+String(event.id)
+        });
+        note.onclick=()=>{window.focus();note.close();};
+      }
+    }catch(_){/* Browser permission or autoplay restrictions must not block alert history. */}
+  }
+  async function enableBrowserSecurityAlerts(){
+    const button=document.getElementById("enable-alert-sound");
+    try{
+      const Context=window.AudioContext||window.webkitAudioContext;
+      if(Context){alertAudioContext=alertAudioContext||new Context();await alertAudioContext.resume();}
+      if("Notification" in window&&Notification.permission==="default")await Notification.requestPermission();
+      alertSoundEnabled=true;
+      if(button)button.textContent="Sound enabled"+(("Notification" in window&&Notification.permission==="granted")?" · Notifications enabled":"");
+    }catch(_){if(button)button.textContent="Browser sound unavailable";}
+  }
   async function loadAlerts(){
     const body=document.getElementById('alerts-body'); if(!body)return;
     const scope=requireScope(['tenant_id']);
     const response=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/events?limit=500');
     const data=await response.json(); if(!response.ok)throw new Error(data.detail||'Unable to load alerts.');
     const items=(data.items||[]).filter(e=>/ALERT|UNKNOWN|INCIDENT|SHOPLIFTING/.test(e.event_type||''));
+    notifyNewSecurityAlerts(items);
     body.replaceChildren();
     for(const event of items){
       const payload=event.payload?.payload||event.payload||{}, metadata=payload.metadata||{};
@@ -849,7 +911,9 @@
   function wireAlertsPage(){
     if(!document.getElementById('alerts-body'))return;
     const refresh=()=>loadAlerts().catch(error=>showMessage(error.message,true));
-    document.getElementById('refresh-alerts').addEventListener('click',refresh);refresh();setInterval(refresh,15000);
+    document.getElementById('refresh-alerts').addEventListener('click',refresh);
+    document.getElementById('enable-alert-sound')?.addEventListener('click',enableBrowserSecurityAlerts);
+    refresh();setInterval(refresh,15000);
   }
   document.querySelectorAll('.nav-menu').forEach(nav=>{
     if(!nav.querySelector('a[href="/portal/system-status.html"]')){
