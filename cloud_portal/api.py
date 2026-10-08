@@ -2414,7 +2414,7 @@ def _evaluate_v2_person_absences() -> None:
         try:
             tenant=str(row["tenant_id"]); shop=str(row["shop_id"])
             from cloud_portal.policy_resolution import resolve_attendance_policy
-            shop_data=store.attendance_policy(tenant,shop) or {}
+            shop_data=(store.attendance_policy(tenant,shop) or {}) if hasattr(store,"attendance_policy") else {}
             resolved=resolve_attendance_policy(row.get("policy_json"),shop_data)
             policy_data=resolved.values
             if not policy_data.get("absenceMonitoringEnabled",True):
