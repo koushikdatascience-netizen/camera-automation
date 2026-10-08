@@ -286,11 +286,12 @@ class PostgresPortalStore:
         envelope=dict(item); envelope.setdefault("store_id",item.get("shop_id")); envelope.setdefault("payload",{})
         return self.ingest_event(envelope)
 
-    def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100, shop_id: str | None = None):
+    def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100, shop_id: str | None = None, alerts_only: bool = False):
         clauses=["tenant_id=:tenant"]; params={"tenant":tenant_id,"limit":max(1,min(500,int(limit)))}
         if shop_id: clauses.append("shop_id=:shop"); params["shop"]=shop_id
         if site_id: clauses.append("site_id=:site"); params["site"]=site_id
         if event_type: clauses.append("event_type=:event_type"); params["event_type"]=event_type
+        if alerts_only: clauses.append("(event_type LIKE '%UNKNOWN%' OR event_type LIKE '%ALERT%' OR event_type LIKE '%INCIDENT%' OR event_type LIKE '%SHOPLIFTING%')")
         query="SELECT * FROM edge_events WHERE "+" AND ".join(clauses)+" ORDER BY event_time DESC LIMIT :limit"
         with self._conn() as conn:
             rows=conn.execute(text(query),params).mappings().all()

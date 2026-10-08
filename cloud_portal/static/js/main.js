@@ -888,7 +888,7 @@
   async function loadAlerts(){
     const body=document.getElementById('alerts-body'); if(!body)return;
     const scope=requireScope(['tenant_id']);
-    const response=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/events?limit=500');
+    const response=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/events?limit=500&alerts_only=true');
     const data=await response.json(); if(!response.ok)throw new Error(data.detail||'Unable to load alerts.');
     const items=(data.items||[]).filter(e=>/ALERT|UNKNOWN|INCIDENT|SHOPLIFTING/.test(e.event_type||''));
     notifyNewSecurityAlerts(items);

@@ -130,7 +130,7 @@ class PortalStore:
         envelope=dict(item); envelope.setdefault("store_id",item.get("shop_id")); envelope.setdefault("payload",{})
         return self.ingest_event(envelope)
 
-    def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100, shop_id: str | None = None) -> list[dict[str, Any]]:
+    def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100, shop_id: str | None = None, alerts_only: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM edge_events WHERE tenant_id=?"
         args: list[Any] = [tenant_id]
         if shop_id:
@@ -142,6 +142,8 @@ class PortalStore:
         if event_type:
             query += " AND event_type=?"
             args.append(event_type)
+        if alerts_only:
+            query += " AND (event_type LIKE '%UNKNOWN%' OR event_type LIKE '%ALERT%' OR event_type LIKE '%INCIDENT%' OR event_type LIKE '%SHOPLIFTING%')"
         query += " ORDER BY event_time DESC LIMIT ?"
         args.append(max(1, min(500, int(limit))))
         with self._conn() as conn:
