@@ -223,6 +223,21 @@ class AttendancePolicyRequest(BaseModel):
     whatsapp_recipients: list[str] = Field(default_factory=list, max_length=20)
 
 
+
+class PersonAttendancePolicyRequest(BaseModel):
+    attendanceMode: str = Field(default="AUTO", pattern="^(AUTO|MANUAL)$")
+    presenceUpdateIntervalMinutes: int = Field(default=2, ge=1, le=60)
+    outOfCameraGraceMinutes: int = Field(default=5, ge=1, le=1438)
+    maxOutOfCameraOccurrencesPerDay: int = Field(default=5, ge=1, le=100)
+    adminNotificationAfterMinutes: int = Field(default=15, ge=2, le=1439)
+    markAbsentAfterMinutes: int = Field(default=60, ge=3, le=1440)
+    requiredWorkingMinutes: int = Field(default=540, ge=1, le=1440)
+    dayEndAutoLogoutEnabled: bool = True
+    absenceMonitoringEnabled: bool = True
+    timezone: str = "Asia/Kolkata"
+    emailNotificationsEnabled: bool = True
+    whatsappNotificationsEnabled: bool = True
+
 class AttendanceLiveStartRequest(BaseModel):
     camera_id: str
     edge_id: str
@@ -486,6 +501,44 @@ def integration_put_attendance_policy(tenant_id: str, shop_id: str, payload: Att
 def integration_get_attendance_policy(tenant_id: str, shop_id: str, request: Request):
     _require_crm_integration(request)
     return {"policy":store.attendance_policy(tenant_id,shop_id)}
+
+
+
+@app.put("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/policy")
+def integration_put_person_attendance_policy(tenant_id: str, shop_id: str, crm_user_id: str,
+                                             payload: PersonAttendancePolicyRequest, request: Request):
+    _require_crm_integration(request)
+    from cloud_portal.person_attendance_rules import PersonAttendancePolicy
+    try:
+        PersonAttendancePolicy(
+            attendance_mode=payload.attendanceMode,
+            presence_update_interval_minutes=payload.presenceUpdateIntervalMinutes,
+            out_of_camera_grace_minutes=payload.outOfCameraGraceMinutes,
+            max_out_of_camera_occurrences_per_day=payload.maxOutOfCameraOccurrencesPerDay,
+            admin_notification_after_minutes=payload.adminNotificationAfterMinutes,
+            mark_absent_after_minutes=payload.markAbsentAfterMinutes,
+            required_working_minutes=payload.requiredWorkingMinutes,
+            timezone=payload.timezone,
+        )
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not all((tenant_id.strip(), shop_id.strip(), crm_user_id.strip())):
+        raise HTTPException(422, "Tenant, shop and CRM user ID are required")
+    if not hasattr(store, "upsert_person_attendance_policy"):
+        raise HTTPException(503, "Person-wise policies require PostgreSQL")
+    saved=store.upsert_person_attendance_policy(tenant_id, shop_id, crm_user_id, payload.model_dump())
+    return {"policy": saved}
+
+
+@app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/policy")
+def integration_get_person_attendance_policy(tenant_id: str, shop_id: str, crm_user_id: str, request: Request):
+    _require_crm_integration(request)
+    if not hasattr(store, "person_attendance_policy"):
+        raise HTTPException(503, "Person-wise policies require PostgreSQL")
+    saved=store.person_attendance_policy(tenant_id, shop_id, crm_user_id)
+    if saved is None:
+        raise HTTPException(404, "No person-specific policy configured")
+    return {"policy": saved}
 
 
 @app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/daily-activity")
