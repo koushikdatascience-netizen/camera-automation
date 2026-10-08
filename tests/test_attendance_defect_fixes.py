@@ -448,3 +448,110 @@ def test_action_evidence_proxy_resolves_only_the_linked_scoped_media(tmp_path,mo
     with pytest.raises(HTTPException) as error:
         api._resolve_attendance_event_media("tenant","shop","recognition-1","snapshot",2)
     assert error.value.status_code==404
+
+
+def test_legacy_automatic_checkout_scheduler_never_claims_when_disabled(monkeypatch):
+    calls=[]
+    class Store:
+        def claim_due_absence_checkouts(self,*_args,**_kwargs):
+            calls.append("absence-claim"); return []
+        def claim_due_max_logoff_checkouts(self,*_args,**_kwargs):
+            calls.append("max-logoff-claim"); return []
+
+    monkeypatch.delenv("SNAPKEY_CRM_AUTO_LOGOUT_ENABLED",raising=False)
+    monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"_evaluate_v2_person_absences",lambda:calls.append("v2-monitor"))
+    monkeypatch.setattr(api,"_dispatch_notification_outbox",lambda **_kwargs:calls.append("notifications"))
+
+    api._evaluate_absence_checkouts()
+
+    assert calls==["v2-monitor","notifications"]
+
+
+def test_legacy_automatic_checkout_defense_in_depth_releases_claim_without_crm(monkeypatch):
+    completions=[];crm_calls=[]
+    class Store:
+        def complete_presence_checkout(self,*args): completions.append(args)
+
+    monkeypatch.setenv("SNAPKEY_CRM_AUTO_LOGOUT_ENABLED","0")
+    monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(login_logout=lambda payload:crm_calls.append(payload)))
+    presence={"tenant_id":"tenant","shop_id":"shop","local_person_id":"person",
+              "crm_user_id":"crm-user","last_seen_at":datetime.now(timezone.utc),
+              "last_camera_id":"camera"}
+
+    api._process_automatic_checkout(presence,now=datetime.now(timezone.utc),
+                                    reason_code="ABSENCE_GRACE_EXCEEDED",
+                                    require_camera_health=True)
+
+    assert completions==[("tenant","shop","person",False)]
+    assert crm_calls==[]
+
+
+def test_v2_automatic_checkout_flag_off_blocks_crm_mutation(monkeypatch):
+    from cloud_portal import api
+
+    calls=[]
+    row={"tenant_id":"tenant","shop_id":"shop","crm_user_id":"user",
+         "local_person_id":"person","checked_in":True,"on_break":False,
+         "last_seen_at":datetime.now(timezone.utc)-timedelta(hours=2),
+         "last_camera_id":"cam","last_camera_zone":"inside",
+         "policy_json":{"absenceMonitoringEnabled":True}}
+    monkeypatch.setenv("CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED","false")
+    monkeypatch.setattr(api,"store",SimpleNamespace(
+        attendance_camera_coverage_status=lambda *_args,**_kwargs:{"state":"HEALTHY"},
+        claim_crm_auto_logout=lambda *_args:calls.append("claim") or True))
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(
+        auto_logout_with_face_token=lambda *_args:calls.append("crm")))
+
+    api._v2_auto_logout(row,datetime.now(timezone.utc))
+
+    assert calls==[]
+
+
+def test_legacy_max_logoff_policy_still_runs_when_auto_logout_enabled(monkeypatch):
+    from cloud_portal import api
+
+    calls=[]
+    due={"tenant_id":"tenant","shop_id":"shop","local_person_id":"person",
+         "crm_user_id":"crm-user","last_seen_at":datetime.now(timezone.utc),
+         "last_camera_id":"camera"}
+    class Store:
+        def claim_due_max_logoff_checkouts(self,*_args,**_kwargs): return [due]
+        def claim_due_absence_checkouts(self,*_args,**_kwargs): return []
+
+    monkeypatch.setenv("SNAPKEY_CRM_AUTO_LOGOUT_ENABLED","1")
+    monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"_evaluate_v2_person_absences",lambda:None)
+    monkeypatch.setattr(api,"_process_automatic_checkout",lambda presence,**kwargs:
+                        calls.append((presence,kwargs)))
+    monkeypatch.setattr(api,"_dispatch_notification_outbox",lambda **_kwargs:None)
+
+    api._evaluate_absence_checkouts()
+
+    assert len(calls)==1
+    assert calls[0][0] is due
+    assert calls[0][1]["reason_code"]=="MAX_LOGOFF_REACHED"
+    assert calls[0][1]["require_camera_health"] is False
+
+
+@pytest.mark.parametrize("directory,roster,should_raise",[
+    ({"items":[{"id":"employee-1"}]},[{"userId":"employee-1"}],False),
+    ({"data":[{"id":"tenant-a-user"}]},[{"userId":"tenant-b-user"}],True),
+    ([{"id":1395}],[{"userId":"1395"}],False),
+])
+def test_crm_service_token_scope_uses_only_matching_crm_user_ids(
+    monkeypatch,directory,roster,should_raise
+):
+    from types import SimpleNamespace
+    from cloud_portal import api
+
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(
+        face_embeddings=lambda _tenant:directory,
+        users_roster=lambda *_args:roster))
+
+    if should_raise:
+        with pytest.raises(RuntimeError,match="scoped to a different tenant"):
+            api._assert_crm_service_token_scope("tenant-code")
+    else:
+        api._assert_crm_service_token_scope("tenant-code")

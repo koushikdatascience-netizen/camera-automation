@@ -2385,10 +2385,22 @@ def issue_license(request: LicenseIssueRequest, http_request: Request):
     )
 
 
+def _legacy_crm_auto_logout_enabled() -> bool:
+    """Return whether legacy background workers may mutate CRM attendance."""
+    return os.getenv("SNAPKEY_CRM_AUTO_LOGOUT_ENABLED", "0").strip() == "1"
+
+
 def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reason_code: str,
                                 require_camera_health: bool) -> None:
     tenant_id=str(presence["tenant_id"]); shop_id=str(presence["shop_id"])
     person_id=str(presence["local_person_id"]); crm_user_id=str(presence["crm_user_id"])
+    if not _legacy_crm_auto_logout_enabled():
+        # A row may already have been claimed by another/older worker. Release
+        # it without contacting CRM so it cannot remain stuck in claimed state.
+        store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
+        logger.info("AUTO_CHECKOUT_SKIPPED tenant_id=%s shop_id=%s person_id=%s reason=feature_disabled",
+                    tenant_id,shop_id,person_id)
+        return
     try:
         attendance_camera_id=presence.get("last_camera_id")
         if require_camera_health and (not attendance_camera_id or not store.attendance_camera_coverage_healthy(
@@ -2663,12 +2675,15 @@ def _evaluate_absence_checkouts() -> None:
         return
     _evaluate_v2_person_absences()
     now=datetime.now(timezone.utc)
-    for presence in store.claim_due_max_logoff_checkouts(now,limit=50):
-        _process_automatic_checkout(presence,now=now,reason_code="MAX_LOGOFF_REACHED",
-                                    require_camera_health=False)
-    for presence in store.claim_due_absence_checkouts(now,limit=50):
-        _process_automatic_checkout(presence,now=now,reason_code="ABSENCE_GRACE_EXCEEDED",
-                                    require_camera_health=True)
+    if _legacy_crm_auto_logout_enabled():
+        for presence in store.claim_due_max_logoff_checkouts(now,limit=50):
+            _process_automatic_checkout(presence,now=now,reason_code="MAX_LOGOFF_REACHED",
+                                        require_camera_health=False)
+        for presence in store.claim_due_absence_checkouts(now,limit=50):
+            _process_automatic_checkout(presence,now=now,reason_code="ABSENCE_GRACE_EXCEEDED",
+                                        require_camera_health=True)
+    else:
+        logger.debug("AUTO_CHECKOUT_SCHEDULER_SKIPPED reason=feature_disabled")
     _dispatch_notification_outbox(limit=100)
 
 
