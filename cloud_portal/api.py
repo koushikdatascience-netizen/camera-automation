@@ -2019,6 +2019,63 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
 
 
 
+
+def _v2_face_token(tenant_id: str, shop_id: str, crm_user_id: str) -> str:
+    """Reuse encrypted CRM token or refresh via non-attendance face login."""
+    from cloud_portal.attendance_tokens import decrypt_token, encrypt_token, jwt_expiry, usable
+    cached=store.get_crm_face_token(tenant_id,shop_id,crm_user_id)
+    if cached and usable(cached["expires_at"]):
+        return decrypt_token(cached["encrypted_token"])
+    crm_tenant_id,enrolled_face=_crm_face_login_identity(tenant_id,crm_user_id)
+    response=crm_client.login_using_face_tenant(enrolled_face,crm_tenant_id)
+    if not _crm_face_login_succeeded(response):
+        raise RuntimeError("CRM face token refresh rejected")
+    crm_user=response.get("user") if isinstance(response.get("user"),dict) else {}
+    if str(crm_user.get("id") or "")!=crm_user_id:
+        raise RuntimeError("CRM face token refresh identity mismatch")
+    token=str(response.get("token") or "").strip()
+    if not token:
+        raise RuntimeError("CRM face token refresh returned no token")
+    expires=jwt_expiry(token)
+    if not usable(expires):
+        raise RuntimeError("CRM face token already expired")
+    store.save_crm_face_token(tenant_id,shop_id,crm_user_id,encrypt_token(token),expires)
+    return token
+
+
+def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
+    """Feature gated: must not execute external attendance mutations by default."""
+    if os.getenv("CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED","false").lower()!="true":
+        return
+    tenant=str(row["tenant_id"]);shop=str(row["shop_id"]);user=str(row["crm_user_id"])
+    started=row["last_seen_at"]
+    if not store.attendance_camera_coverage_healthy(tenant,shop,now):
+        return
+    if not store.claim_crm_auto_logout(tenant,shop,user,started):
+        return
+    try:
+        token=_v2_face_token(tenant,shop,user)
+        result=crm_client.auto_logout_with_face_token(
+            user,"AUTO_LOGOUT: Employee not detected by a healthy attendance camera for 60 minutes",token)
+        if not _crm_mutation_succeeded(result):
+            raise RuntimeError("CRM auto-logout rejected request")
+        store.complete_crm_auto_logout(tenant,shop,user,started,True)
+        store.complete_presence_checkout(tenant,shop,str(row["local_person_id"]),True)
+        store.record_attendance_activity({
+            "id":"v2-auto-logout-"+secrets.token_urlsafe(12),
+            "tenant_id":tenant,"shop_id":shop,"crm_user_id":user,
+            "local_person_id":row["local_person_id"],"activity_type":"CHECK_OUT",
+            "occurred_at":now,"reason_code":"ABSENCE_60_MIN_AUTO_LOGOUT",
+            "source":"CAMERA_EYE","camera_id":row.get("last_camera_id"),
+            "metadata":{"absence_started_at":started.isoformat(),"crm_operation":"auto-logout"},
+        })
+    except Exception as exc:
+        # A timeout may mean CRM accepted the mutation: operator must reconcile
+        # before retrying. Do not blindly resubmit a potentially successful logout.
+        store.complete_crm_auto_logout(tenant,shop,user,started,False,"REQUIRES_RECONCILIATION")
+        logger.exception("V2_AUTO_LOGOUT_NEEDS_RECONCILIATION user_id=%s",user)
+
+
 def _evaluate_v2_person_absences() -> None:
     """Record durable person-wise absence thresholds without unsafe CRM mutations.
 
@@ -2069,6 +2126,8 @@ def _evaluate_v2_person_absences() -> None:
                     details={"elapsedMinutes":round(evaluation.elapsed_minutes,2),
                              "cameraId":row.get("last_camera_id"),"state":evaluation.state},
                 )
+                if transition=="CRM_ABSENT_ACTION_PENDING":
+                    _v2_auto_logout(row,now)
                 if created:
                     logger.info("V2_ATTENDANCE_TRANSITION tenant_id=%s shop_id=%s crm_user_id=%s transition=%s",
                                 tenant,shop,user,transition)
