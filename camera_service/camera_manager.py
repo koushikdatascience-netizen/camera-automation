@@ -13,6 +13,7 @@ import numpy as np
 import time
 import sys
 import subprocess
+import logging
 from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, Field, model_validator
 from enum import Enum
@@ -21,6 +22,8 @@ from camera_service.line_crossing import LineCrossingDetector
 from camera_service.object_security.alerts import ObjectSecurityAlerter
 from camera_service.domain import ResourceScope
 from camera_service.inference import build_runtime_router, select_runtime_backend
+
+logger = logging.getLogger(__name__)
 
 class CameraRole(str, Enum):
     ENTRANCE_EXIT = "ENTRANCE_EXIT"
@@ -98,6 +101,8 @@ class CameraStatus(BaseModel):
     frames_dropped: int = 0
     reconnect_count: int = 0
     last_error: Optional[str] = None
+    frame_width: Optional[int] = None
+    frame_height: Optional[int] = None
 
 class CameraManager:
     def __init__(self, db_path: str):
@@ -164,6 +169,16 @@ class CameraManager:
             );
             CREATE INDEX IF NOT EXISTS idx_security_zones_camera ON security_zones(camera_id);
 
+            CREATE TABLE IF NOT EXISTS camera_detection_config (
+                camera_id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('FULL_FRAME','CUSTOM_ZONES')),
+                version INTEGER NOT NULL DEFAULT 1,
+                cloud_version INTEGER NOT NULL DEFAULT 0,
+                sync_status TEXT NOT NULL DEFAULT 'LOCAL',
+                local_override INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS camera_status (
                 camera_id TEXT PRIMARY KEY,
                 state TEXT NOT NULL,
@@ -175,6 +190,8 @@ class CameraManager:
                 frames_dropped INTEGER DEFAULT 0,
                 reconnect_count INTEGER DEFAULT 0,
                 last_error TEXT,
+                frame_width INTEGER,
+                frame_height INTEGER,
                 FOREIGN KEY(camera_id) REFERENCES cameras(camera_id)
             );
             ''')
@@ -194,6 +211,9 @@ class CameraManager:
             # Forward-compatible runtime metadata used by newer edge builds. Keeping
             # the migration here makes existing ProgramData databases safe to upgrade.
             self._ensure_column(c, 'camera_status', 'operating_json', "TEXT NOT NULL DEFAULT '{}'")
+
+            self._ensure_column(c, 'camera_status', 'frame_width', 'INTEGER')
+            self._ensure_column(c, 'camera_status', 'frame_height', 'INTEGER')
 
     def publish_live_ai_frame(self, camera_id: str, frame) -> None:
         """Keep one in-memory annotated frame for temporary remote WebRTC viewing."""
@@ -226,6 +246,104 @@ class CameraManager:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def get_detection_config(self, camera_id: str, unknown_enabled: bool = True) -> dict[str, Any]:
+        zones = self.list_security_zones(camera_id)
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM camera_detection_config WHERE camera_id=?", (camera_id,)).fetchone()
+        if row:
+            mode = row["mode"]
+            version = int(row["version"])
+            cloud_version = int(row["cloud_version"])
+            sync_status = row["sync_status"]
+            local_override = bool(row["local_override"])
+        else:
+            # Existing installations with saved zones retain their custom behavior;
+            # cameras without zones get safe full-frame detection by default.
+            mode = "CUSTOM_ZONES" if zones else "FULL_FRAME"
+            version, cloud_version, sync_status, local_override = 0, 0, "DEFAULT", False
+        full_frame = [{"id": "FULL_FRAME", "name": "Full frame", "x": 0.0, "y": 0.0,
+                       "width": 1.0, "height": 1.0, "enabled": True}]
+        effective_mode = "DISABLED" if (not unknown_enabled or (mode == "CUSTOM_ZONES" and not any(zone.get("enabled") for zone in zones))) else mode
+        effective_zones = full_frame if effective_mode == "FULL_FRAME" else (
+            [zone for zone in zones if zone.get("enabled")] if effective_mode == "CUSTOM_ZONES" else []
+        )
+        return {"camera_id": camera_id, "mode": mode, "version": version,
+                "cloud_version": cloud_version, "sync_status": sync_status,
+                "local_override": local_override, "zones": zones,
+                "effective_mode": effective_mode, "effective_zones": effective_zones}
+
+    def replace_detection_config(self, camera_id: str, mode: str, zones: list[dict[str, Any]],
+                                 expected_version: int | None = None, *, source: str = "LOCAL",
+                                 cloud_version: int | None = None) -> dict[str, Any]:
+        mode = str(mode or "").strip().upper()
+        if mode not in {"FULL_FRAME", "CUSTOM_ZONES"}:
+            raise ValueError("mode must be FULL_FRAME or CUSTOM_ZONES")
+        if mode == "FULL_FRAME" and zones:
+            raise ValueError("FULL_FRAME mode does not accept custom zones")
+        cleaned = []
+        seen_ids = set()
+        for zone in zones:
+            zone_id = str(zone.get("id") or uuid.uuid4())
+            if zone_id in seen_ids:
+                raise ValueError("Zone IDs must be unique")
+            seen_ids.add(zone_id)
+            name = str(zone.get("name") or "Detection Zone").strip()
+            if not name or len(name) > 80:
+                raise ValueError("Zone name must contain 1 to 80 characters")
+            x, y, width, height = [float(zone.get(key, 0)) for key in ("x", "y", "width", "height")]
+            if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < width <= 1 and 0 < height <= 1):
+                raise ValueError("Zone coordinates must be normalized to 0..1")
+            if x + width > 1.000001 or y + height > 1.000001:
+                raise ValueError("Zone must fit inside the camera frame")
+            cleaned.append({"id": zone_id, "name": name, "x": x, "y": y, "width": width,
+                            "height": height, "enabled": bool(zone.get("enabled", True))})
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._conn() as c:
+            current = c.execute("SELECT * FROM camera_detection_config WHERE camera_id=?", (camera_id,)).fetchone()
+            version = int(current["version"]) if current else 0
+            if expected_version is not None and expected_version != version:
+                raise RuntimeError(f"Detection configuration version conflict: expected {expected_version}, current {version}")
+            existing_zones = [dict(row) for row in c.execute(
+                "SELECT id,name,x,y,width,height,enabled FROM security_zones WHERE camera_id=? ORDER BY created_at,id",
+                (camera_id,)).fetchall()]
+            desired = sorted(cleaned, key=lambda item: item["id"])
+            existing_norm = sorted([{**item, "enabled": bool(item["enabled"])} for item in existing_zones],
+                                   key=lambda item: item["id"])
+            same = current and current["mode"] == mode and existing_norm == desired
+            next_version = version if same else version + 1
+            if not same:
+                # Replace only this canonical camera's zones. A full-frame switch
+                # preserves its custom zone cache so users can switch back safely.
+                if mode == "CUSTOM_ZONES":
+                    c.execute("DELETE FROM security_zones WHERE camera_id=?", (camera_id,))
+                    for zone in cleaned:
+                        c.execute("""INSERT INTO security_zones(id,camera_id,name,x,y,width,height,enabled,created_at,updated_at)
+                            VALUES(?,?,?,?,?,?,?,?,?,?)""", (zone["id"],camera_id,zone["name"],zone["x"],zone["y"],
+                            zone["width"],zone["height"],1 if zone["enabled"] else 0,now,now))
+                c.execute("""INSERT INTO camera_detection_config(camera_id,mode,version,cloud_version,sync_status,local_override,updated_at)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(camera_id) DO UPDATE SET mode=excluded.mode,
+                    version=excluded.version,cloud_version=CASE WHEN ? IS NULL THEN camera_detection_config.cloud_version ELSE excluded.cloud_version END,
+                    sync_status=excluded.sync_status,local_override=excluded.local_override,updated_at=excluded.updated_at""",
+                    (camera_id,mode,next_version,int(cloud_version or 0),"SYNCED" if source == "CLOUD" else "LOCAL",
+                     0 if source == "CLOUD" else 1,now,cloud_version))
+            elif source == "CLOUD" and cloud_version is not None:
+                c.execute("UPDATE camera_detection_config SET cloud_version=?,sync_status='SYNCED',local_override=0,updated_at=? WHERE camera_id=?",
+                          (int(cloud_version),now,camera_id))
+        return self.get_detection_config(camera_id)
+
+    def apply_cloud_detection_config(self, camera_id: str, configuration: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_detection_config(camera_id)
+        if current["local_override"]:
+            return {**current, "sync_status": "LOCAL_OVERRIDE"}
+        mode = str(configuration.get("mode") or "FULL_FRAME").upper()
+        cloud_version = max(0, int(configuration.get("version") or 0))
+        if cloud_version < current["cloud_version"]:
+            return {**current, "sync_status": "STALE_CLOUD_CONFIG"}
+        zones = configuration.get("zones") or []
+        result = self.replace_detection_config(camera_id, mode, zones,
+            source="CLOUD", cloud_version=cloud_version)
+        return result
+
     def save_security_zone(self, camera_id: str, zone: Dict[str, Any]):
         name = str(zone.get("name") or "Detection Zone").strip()[:80]
         values = [float(zone.get(key, 0)) for key in ("x", "y", "width", "height")]
@@ -235,25 +353,23 @@ class CameraManager:
         if x + width > 1.000001 or y + height > 1.000001:
             raise ValueError("Zone must fit inside the camera frame")
         zone_id = str(zone.get("id") or uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock, self._conn() as c:
-            c.execute(
-                """INSERT INTO security_zones(id,camera_id,name,x,y,width,height,enabled,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(id) DO UPDATE SET name=excluded.name,x=excluded.x,y=excluded.y,
-                   width=excluded.width,height=excluded.height,enabled=excluded.enabled,updated_at=excluded.updated_at""",
-                (zone_id, camera_id, name, x, y, width, height,
-                 1 if zone.get("enabled", True) else 0, now, now),
-            )
-        return next(item for item in self.list_security_zones(camera_id) if item["id"] == zone_id)
+        zones = [item for item in self.list_security_zones(camera_id) if item["id"] != zone_id]
+        zones.append({"id": zone_id, "name": name, "x": x, "y": y, "width": width,
+                      "height": height, "enabled": bool(zone.get("enabled", True))})
+        config = self.replace_detection_config(camera_id, "CUSTOM_ZONES", zones)
+        return next(item for item in config["zones"] if item["id"] == zone_id)
 
     def delete_security_zone(self, camera_id: str, zone_id: str) -> bool:
-        with self._lock, self._conn() as c:
-            cur = c.execute("DELETE FROM security_zones WHERE id=? AND camera_id=?", (zone_id, camera_id))
-            return cur.rowcount > 0
+        zones = self.list_security_zones(camera_id)
+        if not any(item["id"] == zone_id for item in zones):
+            return False
+        self.replace_detection_config(camera_id, "CUSTOM_ZONES",
+                                      [item for item in zones if item["id"] != zone_id])
+        return True
 
     def _matching_security_zone(self, camera_id: str, bbox, frame_shape):
-        zones = [z for z in self.list_security_zones(camera_id) if z.get("enabled")]
+        detection = self.get_detection_config(camera_id, unknown_enabled=True)
+        zones = detection["effective_zones"]
         if not zones:
             return None
         height, width = frame_shape[:2]
@@ -275,6 +391,9 @@ class CameraManager:
                     self._unknown_zone_state.pop(key, None)
             return None
         key = key_prefix + str(zone["id"])
+        for previous_key in list(self._unknown_zone_state):
+            if previous_key.startswith(key_prefix) and previous_key != key:
+                self._unknown_zone_state.pop(previous_key, None)
         state = self._unknown_zone_state.setdefault(key, {"first_seen": now, "last_seen": now})
         # A long recognition/camera gap breaks temporal confirmation. Do not let
         # one observation followed much later by another confirm an unknown.
@@ -284,6 +403,30 @@ class CameraManager:
         if now - state["first_seen"] >= max(0.5, float(seconds)):
             return zone
         return None
+
+    def _unknown_confirmation_elapsed(self, camera_id: str, track_id: str, zone_id: str | None = None) -> float:
+        prefix = f"{camera_id}:{track_id}:"
+        now = time.monotonic()
+        starts = [float(state.get("first_seen", now)) for key, state in self._unknown_zone_state.items()
+                  if key == prefix + str(zone_id)] if zone_id is not None else [
+                      float(state.get("first_seen", now)) for key, state in self._unknown_zone_state.items()
+                      if key.startswith(prefix)]
+        return max(0.0, now - min(starts)) if starts else 0.0
+
+    @staticmethod
+    def _log_unknown_decision(recognition_config, camera_id, track_id, reason, recognition_outcome,
+                              confirmation_duration=0.0):
+        if not bool(getattr(recognition_config, "unknown_detection_diagnostics", False)):
+            return
+        # Deliberately limited to identifiers and decision metadata. Never include
+        # face embeddings, image paths, or image content in diagnostics.
+        logger.info("unknown_detection_decision %s", json.dumps({
+            "camera_id": str(camera_id),
+            "track_id": str(track_id),
+            "decision_reason": str(reason),
+            "confirmation_duration_seconds": round(float(confirmation_duration), 3),
+            "recognition_outcome": str(recognition_outcome),
+        }, separators=(",", ":")))
 
     def _mask_rtsp_password(self, rtsp_url: str) -> str:
         """Mask password in RTSP URL for security"""
@@ -406,19 +549,29 @@ class CameraManager:
             "features": local_features,
         }
         existing = self.get_camera(camera_id)
+        detection_config = camera_data.get("detection_config")
         if existing:
             with self._conn() as c:
                 row = c.execute('SELECT local_override FROM cameras WHERE camera_id = ?', (camera_id,)).fetchone()
             if row and bool(row['local_override']):
+                if isinstance(detection_config, dict):
+                    self.apply_cloud_detection_config(camera_id, detection_config)
                 return existing
             payload['features'] = {**existing.features.model_dump(), **local_features}
             candidate = CameraConfig(**{**existing.model_dump(), **payload})
             if candidate.model_dump() == existing.model_dump():
-                return existing
-            return self.update_camera(camera_id, payload)
+                result = existing
+            else:
+                result = self.update_camera(camera_id, payload)
+            if isinstance(detection_config, dict):
+                self.apply_cloud_detection_config(camera_id, detection_config)
+            return result
         if any(camera.rtsp_url == source for camera in self.list_cameras()):
             raise ValueError("Camera source is already saved; configure the existing camera")
-        return self.create_camera(payload)
+        result = self.create_camera(payload)
+        if isinstance(detection_config, dict):
+            self.apply_cloud_detection_config(camera_id, detection_config)
+        return result
 
     @staticmethod
     def _normalize_cloud_zone(value: Any) -> str:
@@ -1055,6 +1208,9 @@ class CameraManager:
             if runtime_camera_config is None:
                 runtime_camera_config = camera_config
             camera_zone = runtime_camera_config.camera_zone.value if runtime_camera_config is not None else "inside"
+            unknown_confirmation_seconds = max(
+                0.5, float(getattr(recognition_config, "unknown_confirmation_seconds", 3.0) or 3.0)
+            )
             crowd_threshold = camera_config.crowd_threshold if camera_config is not None else 10
             summary = {
                 "people": 0,
@@ -1129,6 +1285,28 @@ class CameraManager:
                 x1, y1, x2, y2 = [int(v) for v in coords]
                 label = names.get(class_id, f"class_{class_id}")
                 recognized_text = None
+                confirmed_unknown_zone = None
+
+                if label == "person" and track_id is not None and runtime_camera_config is not None:
+                    unknown_role_allowed = runtime_camera_config.camera_role in {
+                        CameraRole.SECURITY, CameraRole.ENTRANCE_EXIT
+                    }
+                    unknown_feature_enabled = runtime_camera_config.features.unknown_enabled
+                    if unknown_role_allowed and unknown_feature_enabled and camera_zone == "inside":
+                        # Zone presence is tracked at the camera AI frame cadence,
+                        # independent of the slower face-recognition retry cadence.
+                        confirmed_unknown_zone = self._confirmed_unknown_zone(
+                            camera_id, str(track_id), (x1, y1, x2, y2), frame.shape,
+                            seconds=unknown_confirmation_seconds,
+                        )
+                    elif runtime_camera_config.camera_role in {CameraRole.SECURITY, CameraRole.ENTRANCE_EXIT}:
+                        reason = "unknown_detection_disabled" if not unknown_feature_enabled else "camera_zone_not_inside"
+                        self._log_unknown_decision(recognition_config, camera_id, track_id, reason,
+                                                   "not_attempted")
+                        prefix = f"{camera_id}:{track_id}:"
+                        for key in list(self._unknown_zone_state):
+                            if key.startswith(prefix):
+                                self._unknown_zone_state.pop(key, None)
 
                 if label == "person" and track_id is not None and attendance_line is not None and runtime_camera_config.attendance_active:
                     direction = attendance_line.update(str(track_id), (float(x1), float(y1), float(x2), float(y2)))
@@ -1166,8 +1344,11 @@ class CameraManager:
                         except Exception:
                             faces = []
                             face_detection_failed = True
+                            self._track_identity_cache.pop(cache_key, None)
                             if stream_state is not None:
                                 stream_state["face_error"] = "Face recognition is unavailable"
+                            self._log_unknown_decision(recognition_config, camera_id, track_id,
+                                                       "face_detection_failed", "error")
                         if faces:
                             best = max(faces, key=lambda face: face_service.quality(face, roi.shape))
                             if best.get("embedding") is not None and face_service.quality(best, roi.shape) >= recognition_config.minimum_face_quality:
@@ -1176,9 +1357,14 @@ class CameraManager:
                                 except Exception:
                                     match, score = None, 0.0
                                     face_detection_failed = True
+                                    self._track_identity_cache.pop(cache_key, None)
                                     if stream_state is not None:
                                         stream_state["face_error"] = "Face recognition is unavailable"
+                                    self._log_unknown_decision(recognition_config, camera_id, track_id,
+                                                               "recognition_failed", "error")
                                 if match:
+                                    self._log_unknown_decision(recognition_config, camera_id, track_id,
+                                                               "known_face_match", "known")
                                     active_known_tracks.add(str(track_id))
                                     snapshot_path = self._save_event_snapshot(frame, camera_id, "recognized")
                                     # Preserve the actual face that triggered recognition. The cloud
@@ -1223,15 +1409,16 @@ class CameraManager:
                                         "name": recognized_name,
                                         "score": score,
                                     }
-                                elif (not face_detection_failed
-                                      and runtime_camera_config.camera_role in {CameraRole.SECURITY, CameraRole.ENTRANCE_EXIT}
-                                      and runtime_camera_config.features.unknown_enabled
-                                      and camera_zone == "inside" and store):
-                                    confirmed_zone = self._confirmed_unknown_zone(camera_id, str(track_id), (x1, y1, x2, y2), frame.shape)
+                                elif (not face_detection_failed and unknown_role_allowed
+                                      and unknown_feature_enabled and camera_zone == "inside" and store):
+                                    confirmation_duration = self._unknown_confirmation_elapsed(
+                                        camera_id, str(track_id),
+                                        confirmed_unknown_zone.get("id") if confirmed_unknown_zone else None,
+                                    )
                                     should_create = bool(
-                                        confirmed_zone
+                                        confirmed_unknown_zone
                                         and self._should_emit_alert(
-                                            f"unknown:{camera_id}:{track_id}:{confirmed_zone['id']}", 20
+                                            f"unknown:{camera_id}:{track_id}:{confirmed_unknown_zone['id']}", 20
                                         )
                                     )
                                     if should_create:
@@ -1244,6 +1431,11 @@ class CameraManager:
                                             face_path=face_snapshot, person_path=person_snapshot,
                                         )
                                         if created:
+                                            self._log_unknown_decision(
+                                                recognition_config, camera_id, track_id,
+                                                "incident_created", "unmatched_face",
+                                                confirmation_duration,
+                                            )
                                             try:
                                                 store.add_person_event(
                                                     None, getattr(attendance_engine, "store_id", "store-1"), camera_id,
@@ -1253,6 +1445,12 @@ class CameraManager:
                                             except Exception:
                                                 pass
                                             self._begin_unknown_clip(stream_state, incident_id, camera_id)
+                                        else:
+                                            self._log_unknown_decision(
+                                                recognition_config, camera_id, track_id,
+                                                "duplicate_open_incident", "unmatched_face",
+                                                confirmation_duration,
+                                            )
                                     if not face_detection_failed:
                                         self._track_identity_cache[cache_key] = {
                                             "checked_at": now,
@@ -1260,7 +1458,24 @@ class CameraManager:
                                             "text": f"Unknown person {score:.2f}",
                                             "score": score,
                                         }
+                                    if not should_create:
+                                        reason = "zone_not_confirmed" if not confirmed_unknown_zone else "incident_cooldown"
+                                        self._log_unknown_decision(
+                                            recognition_config, camera_id, track_id, reason,
+                                            "unmatched_face", confirmation_duration,
+                                        )
+                                elif not match and not face_detection_failed:
+                                    reason = "unknown_detection_disabled" if not unknown_feature_enabled else "role_or_zone_not_allowed"
+                                    self._log_unknown_decision(recognition_config, camera_id, track_id,
+                                                               reason, "unmatched_face")
                             else:
+                                self._track_identity_cache.pop(cache_key, None)
+                                if best.get("embedding") is None:
+                                    reason, outcome = "embedding_missing", "inconclusive"
+                                else:
+                                    reason, outcome = "face_quality_below_threshold", "inconclusive"
+                                self._log_unknown_decision(recognition_config, camera_id, track_id,
+                                                           reason, outcome)
                                 self._track_identity_cache[cache_key] = {
                                     "checked_at": now,
                                     "person_id": None,
@@ -1268,6 +1483,9 @@ class CameraManager:
                                     "score": 0.0,
                                 }
                         elif not face_detection_failed:
+                            self._track_identity_cache.pop(cache_key, None)
+                            self._log_unknown_decision(recognition_config, camera_id, track_id,
+                                                       "no_face_detected", "inconclusive")
                             self._track_identity_cache[cache_key] = {
                                 "checked_at": now,
                                 "person_id": None,
@@ -1280,7 +1498,7 @@ class CameraManager:
                     if (recognized_text and recognized_text.lower().startswith('unknown')
                         and camera_zone == 'inside' and runtime_camera_config.features.unknown_enabled
                         and runtime_camera_config.camera_role in {CameraRole.SECURITY, CameraRole.ENTRANCE_EXIT}
-                        and self._confirmed_unknown_zone(camera_id, str(track_id), (x1, y1, x2, y2), frame.shape)):
+                        and confirmed_unknown_zone):
                         self._security_alerter.alarm_beep(f'unknown:{camera_id}', True, 1250, 650, 8.0)
 
                 track_text = f" ID {track_id}" if track_id is not None else ""
@@ -1795,7 +2013,8 @@ class CameraManager:
                 frames_received=row['frames_received'],
                 frames_dropped=row['frames_dropped'],
                 reconnect_count=row['reconnect_count'],
-                last_error=row['last_error']
+                last_error=row['last_error'],
+                frame_width=row['frame_width'], frame_height=row['frame_height']
             )
             if status.online:
                 stamp = datetime.fromisoformat(status.last_frame_at) if status.last_frame_at else None
@@ -1826,8 +2045,8 @@ class CameraManager:
             c.execute('''
                 INSERT OR REPLACE INTO camera_status
                 (camera_id, state, online, last_frame_at, capture_fps, ai_fps,
-                 frames_received, frames_dropped, reconnect_count, last_error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 frames_received, frames_dropped, reconnect_count, last_error,frame_width,frame_height)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 status.camera_id,
                 status.state.value,
@@ -1838,7 +2057,8 @@ class CameraManager:
                 status.frames_received,
                 status.frames_dropped,
                 status.reconnect_count,
-                status.last_error
+                status.last_error,
+                status.frame_width,status.frame_height
             ))
 
     def delete_camera_status(self, camera_id: str) -> None:

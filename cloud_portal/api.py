@@ -860,6 +860,28 @@ class PortalCameraConfig(BaseModel):
     features: dict[str, bool] = Field(default_factory=dict)
     settings: dict[str, Any] = Field(default_factory=dict)
 
+class DetectionZonePayload(BaseModel):
+    id: str = Field(min_length=1,max_length=128)
+    name: str = Field(default="Detection Zone",min_length=1,max_length=80)
+    x: float = Field(ge=0,le=1)
+    y: float = Field(ge=0,le=1)
+    width: float = Field(gt=0,le=1)
+    height: float = Field(gt=0,le=1)
+    enabled: bool = True
+
+class DetectionConfigPayload(BaseModel):
+    mode: str
+    zones: list[DetectionZonePayload] = Field(default_factory=list,max_length=64)
+    expected_version: int = Field(ge=0)
+
+class DetectionZoneMutation(DetectionZonePayload):
+    expected_version: int = Field(ge=0)
+
+class DetectionConfigAck(BaseModel):
+    version: int = Field(ge=0)
+    status: str
+    local_override: bool = False
+
 
 
 def _portal_scope(tenant_id: str, principal: PortalPrincipal) -> None:
@@ -923,7 +945,7 @@ def portal_cameras(tenant_id: str, shop_id: str | None = None, edge_id: str | No
             cid = str(advertised.get("camera_id") or "")
             key = (eid, cid)
             if key in keyed:
-                keyed[key].update({k: advertised.get(k) for k in ("online","state","last_frame_at","capture_fps","ai_fps","last_error")})
+                keyed[key].update({k: advertised.get(k) for k in ("online","state","last_frame_at","capture_fps","ai_fps","last_error","frame_width","frame_height")})
                 continue
             keyed[key] = {
                 **advertised,
@@ -976,6 +998,124 @@ def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConf
     elif not request.source.strip():
         raise HTTPException(400, "Camera source is required")
     return {"camera": _portal_camera_view(store.upsert_camera(payload))}
+
+
+def _camera_detection_scope(tenant_id: str, shop_id: str, edge_id: str, camera_id: str) -> dict[str, Any]:
+    camera=store.get_camera(tenant_id,shop_id,edge_id,camera_id)
+    if not camera:
+        raise HTTPException(404,"Camera not found in this tenant, shop, and edge")
+    return camera
+
+
+def _effective_detection_config(tenant_id: str,shop_id: str,edge_id: str,camera_id: str)->dict[str,Any]:
+    config=store.get_detection_config(tenant_id,shop_id,edge_id,camera_id)
+    camera=store.get_camera(tenant_id,shop_id,edge_id,camera_id) or {}
+    features=camera.get("features") or {}
+    enabled=bool(features.get("unknown_detection") or features.get("unknown_person_detection"))
+    if not enabled: config={**config,"effective_mode":"DISABLED","effective_zones":[]}
+    return config
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}/detection-config")
+def portal_get_detection_config(tenant_id: str, camera_id: str, shop_id: str, edge_id: str,
+                                principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    if shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
+    _camera_detection_scope(tenant_id,shop_id,edge_id,camera_id)
+    return _effective_detection_config(tenant_id,shop_id,edge_id,camera_id)
+
+
+@app.put("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}/detection-config")
+def portal_put_detection_config(tenant_id: str, camera_id: str, shop_id: str, edge_id: str,
+                                payload: DetectionConfigPayload,
+                                principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal); _portal_scope(tenant_id,principal)
+    if shop_id != principal.shop_id: raise HTTPException(403,"Portal session is not authorized for this shop")
+    _camera_detection_scope(tenant_id,shop_id,edge_id,camera_id)
+    try:
+        store.replace_detection_config(tenant_id,shop_id,edge_id,camera_id,payload.mode,
+            [z.model_dump() for z in payload.zones],payload.expected_version)
+        return _effective_detection_config(tenant_id,shop_id,edge_id,camera_id)
+    except RuntimeError as exc: raise HTTPException(409,str(exc))
+    except ValueError as exc: raise HTTPException(422,str(exc))
+
+
+@app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/cameras/{camera_id}/detection-config")
+def crm_get_detection_config(tenant_id: str, shop_id: str, camera_id: str, edge_id: str, request: Request):
+    _require_crm_integration(request,tenant_id,shop_id)
+    _camera_detection_scope(tenant_id,shop_id,edge_id,camera_id)
+    return _effective_detection_config(tenant_id,shop_id,edge_id,camera_id)
+
+
+@app.put("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/cameras/{camera_id}/detection-config")
+def crm_put_detection_config(tenant_id: str, shop_id: str, camera_id: str, edge_id: str,
+                             payload: DetectionConfigPayload, request: Request):
+    _require_crm_integration(request,tenant_id,shop_id)
+    _camera_detection_scope(tenant_id,shop_id,edge_id,camera_id)
+    try:
+        store.replace_detection_config(tenant_id,shop_id,edge_id,camera_id,payload.mode,
+            [z.model_dump() for z in payload.zones],payload.expected_version)
+        saved=_effective_detection_config(tenant_id,shop_id,edge_id,camera_id)
+    except RuntimeError as exc: raise HTTPException(409,str(exc))
+    except ValueError as exc: raise HTTPException(422,str(exc))
+    logger.info("CAMERA_DETECTION_CONFIG_UPDATED tenant_id=%s shop_id=%s edge_id=%s camera_id=%s version=%s mode=%s",
+        tenant_id,shop_id,edge_id,camera_id,saved["version"],saved["mode"])
+    return saved
+
+
+def _mutate_zone(tenant_id: str,shop_id: str,edge_id: str,camera_id: str,zone_id: str,
+                 zone: dict[str,Any] | None,expected_version: int,delete: bool=False):
+    current=store.get_detection_config(tenant_id,shop_id,edge_id,camera_id)
+    if int(current["version"])!=expected_version: raise HTTPException(409,"Detection configuration version conflict")
+    zones=list(current["zones"])
+    index=next((i for i,item in enumerate(zones) if str(item["id"])==zone_id),None)
+    if delete:
+        if index is None: raise HTTPException(404,"Detection zone not found")
+        zones.pop(index)
+    elif index is None: zones.append(zone)
+    else: zones[index]=zone
+    try:
+        store.replace_detection_config(tenant_id,shop_id,edge_id,camera_id,"CUSTOM_ZONES",zones,expected_version)
+        return _effective_detection_config(tenant_id,shop_id,edge_id,camera_id)
+    except RuntimeError as exc: raise HTTPException(409,str(exc))
+    except ValueError as exc: raise HTTPException(422,str(exc))
+
+
+@app.post("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/cameras/{camera_id}/detection-zones")
+def crm_create_detection_zone(tenant_id: str,shop_id: str,camera_id: str,edge_id: str,payload: DetectionZoneMutation,request: Request):
+    _require_crm_integration(request,tenant_id,shop_id); _camera_detection_scope(tenant_id,shop_id,edge_id,camera_id)
+    try: return _mutate_zone(tenant_id,shop_id,edge_id,camera_id,payload.id,payload.model_dump(exclude={"expected_version"}),payload.expected_version)
+    except HTTPException: raise
+
+
+@app.put("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/cameras/{camera_id}/detection-zones/{zone_id}")
+def crm_update_detection_zone(tenant_id: str,shop_id: str,camera_id: str,zone_id: str,edge_id: str,payload: DetectionZoneMutation,request: Request):
+    _require_crm_integration(request,tenant_id,shop_id); _camera_detection_scope(tenant_id,shop_id,edge_id,camera_id)
+    if payload.id!=zone_id: raise HTTPException(400,"Zone ID does not match request path")
+    return _mutate_zone(tenant_id,shop_id,edge_id,camera_id,zone_id,payload.model_dump(exclude={"expected_version"}),payload.expected_version)
+
+
+@app.delete("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/cameras/{camera_id}/detection-zones/{zone_id}")
+def crm_delete_detection_zone(tenant_id: str,shop_id: str,camera_id: str,zone_id: str,edge_id: str,expected_version: int,request: Request):
+    _require_crm_integration(request,tenant_id,shop_id); _camera_detection_scope(tenant_id,shop_id,edge_id,camera_id)
+    return _mutate_zone(tenant_id,shop_id,edge_id,camera_id,zone_id,None,expected_version,True)
+
+
+@app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/unknown-incidents")
+def crm_unknown_incidents(tenant_id: str, shop_id: str, request: Request, edge_id: str | None = None,
+                         camera_id: str | None = None, limit: int = 100):
+    _require_crm_integration(request,tenant_id,shop_id)
+    if not 1<=limit<=500: raise HTTPException(422,"limit must be between 1 and 500")
+    rows=store.list_events(tenant_id,event_type="UNKNOWN_INCIDENT",shop_id=shop_id,limit=limit)
+    items=[]
+    for row in rows:
+        if edge_id and str(row.get("edge_id") or "")!=edge_id: continue
+        if camera_id and str(row.get("camera_id") or "")!=camera_id: continue
+        payload=row.get("payload") or {}
+        items.append({"event_id":row.get("id"),"tenant_id":tenant_id,"shop_id":shop_id,
+            "edge_id":row.get("edge_id"),"camera_id":row.get("camera_id"),"event_time":str(row.get("event_time") or ""),
+            "event_type":row.get("event_type"),"incident":payload.get("payload",payload)})
+    return {"items":items}
 
 
 @app.delete("/portal/v1/tenants/{tenant_id}/cameras/{camera_id}")
@@ -1047,14 +1187,28 @@ def edge_command_result(command_id: str, result: dict[str, Any], principal: Edge
 def edge_camera_config(principal: EdgePrincipal = Depends(require_edge_token)):
     if principal.legacy_global:
         raise HTTPException(403, "Scoped edge credential is required for camera configuration")
+    items=store.list_cameras(principal.tenant_id, shop_id=principal.shop_id, edge_id=principal.edge_id)
+    for camera in items:
+        camera["detection_config"]=_effective_detection_config(principal.tenant_id,principal.shop_id,principal.edge_id,camera["camera_id"])
     return {
         "tenant_id": principal.tenant_id,
         "company_code": principal.company_code,
         "shop_id": principal.shop_id,
         "site_id": principal.site_id,
         "edge_id": principal.edge_id,
-        "items": store.list_cameras(principal.tenant_id, shop_id=principal.shop_id, edge_id=principal.edge_id),
+        "items": items,
     }
+
+
+@app.post("/edge/v1/config/cameras/{camera_id}/detection-config/ack")
+def edge_detection_config_ack(camera_id: str, payload: DetectionConfigAck,
+                              principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global: raise HTTPException(403,"Scoped edge credential is required for configuration acknowledgements")
+    if payload.status not in {"APPLIED","LOCAL_OVERRIDE","FAILED"}: raise HTTPException(422,"Invalid acknowledgement status")
+    ok=store.acknowledge_detection_config(principal.tenant_id,principal.shop_id,principal.edge_id,
+        camera_id,payload.version,payload.status,payload.local_override)
+    if not ok: raise HTTPException(409,"Camera configuration version no longer matches")
+    return {"ok":True,"camera_id":camera_id,"version":payload.version,"status":payload.status}
 
 
 @app.get("/edge/v1/config/personnel")

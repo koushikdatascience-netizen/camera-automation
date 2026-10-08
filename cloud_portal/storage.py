@@ -40,6 +40,7 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS edge_events(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, received_at TEXT NOT NULL, payload_json TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS edge_activation_codes(code_hash TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,created_by TEXT,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,consumed_at TEXT,consumed_machine_code TEXT);
                 CREATE TABLE IF NOT EXISTS camera_configs(tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, camera_id TEXT NOT NULL, name TEXT NOT NULL, source_type TEXT NOT NULL, source TEXT NOT NULL, camera_role TEXT NOT NULL, camera_zone TEXT, crowd_threshold INTEGER NOT NULL DEFAULT 10, enabled INTEGER NOT NULL DEFAULT 1, features_json TEXT NOT NULL, settings_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(tenant_id,shop_id,edge_id,camera_id));
+                CREATE TABLE IF NOT EXISTS camera_detection_configs(tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,edge_id TEXT NOT NULL,camera_id TEXT NOT NULL,mode TEXT NOT NULL,zones_json TEXT NOT NULL DEFAULT '[]',version INTEGER NOT NULL DEFAULT 1,sync_status TEXT NOT NULL DEFAULT 'PENDING',applied_version INTEGER NOT NULL DEFAULT 0,local_override INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(tenant_id,shop_id,edge_id,camera_id));
                 CREATE TABLE IF NOT EXISTS edge_commands(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,edge_id TEXT NOT NULL,command_type TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL, result_json TEXT,created_at TEXT NOT NULL,claimed_at TEXT,completed_at TEXT);
                 CREATE TABLE IF NOT EXISTS portal_sessions(session_id TEXT PRIMARY KEY,token_hash TEXT UNIQUE NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,user_id TEXT,display_name TEXT,role TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS portal_users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,display_name TEXT NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'OWNER',enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
@@ -285,7 +286,53 @@ class PortalStore:
         query += " ORDER BY name,camera_id"
         with self._conn() as conn:
             rows = conn.execute(query, args).fetchall()
-        return [self._camera_row(row) for row in rows]
+        result=[self._camera_row(row) for row in rows]
+        for camera in result: camera["detection_config"]=self.get_detection_config(tenant_id,camera["shop_id"],camera["edge_id"],camera["camera_id"])
+        return result
+
+    def get_detection_config(self,tenant_id:str,shop_id:str,edge_id:str,camera_id:str)->dict[str,Any]:
+        with self._conn() as conn:
+            row=conn.execute("SELECT * FROM camera_detection_configs WHERE tenant_id=? AND shop_id=? AND edge_id=? AND camera_id=?",(tenant_id,shop_id,edge_id,camera_id)).fetchone()
+        if not row:return {"camera_id":camera_id,"mode":"FULL_FRAME","zones":[],"version":0,"applied_version":0,"sync_status":"DEFAULT","local_override":False,"effective_mode":"FULL_FRAME","effective_zones":[{"id":"FULL_FRAME","name":"Full frame","x":0,"y":0,"width":1,"height":1,"enabled":True}]}
+        zones=json.loads(row["zones_json"] or "[]");mode=row["mode"]
+        return {"camera_id":camera_id,"mode":mode,"zones":zones,"version":int(row["version"]),"applied_version":int(row["applied_version"]),"sync_status":row["sync_status"],"local_override":bool(row["local_override"]),"effective_mode":mode if mode=="FULL_FRAME" or any(z.get("enabled") for z in zones) else "DISABLED","effective_zones":[{"id":"FULL_FRAME","name":"Full frame","x":0,"y":0,"width":1,"height":1,"enabled":True}] if mode=="FULL_FRAME" else [z for z in zones if z.get("enabled")]}
+
+    def replace_detection_config(self,tenant_id:str,shop_id:str,edge_id:str,camera_id:str,mode:str,zones:list[dict[str,Any]],expected_version:int)->dict[str,Any]:
+        mode=str(mode or "").upper()
+        if mode not in {"FULL_FRAME","CUSTOM_ZONES"}:raise ValueError("mode must be FULL_FRAME or CUSTOM_ZONES")
+        if mode=="FULL_FRAME" and zones:raise ValueError("FULL_FRAME mode does not accept custom zones")
+        if len(zones)>64:raise ValueError("At most 64 custom zones are allowed")
+        clean=[];ids=set()
+        for zone in zones:
+            zid=str(zone.get("id") or "").strip();name=str(zone.get("name") or "Detection Zone").strip()
+            try:x,y,w,h=(float(zone[key]) for key in ("x","y","width","height"))
+            except (KeyError,TypeError,ValueError):raise ValueError("Zone coordinates are required")
+            if not zid or len(zid)>128 or zid in ids:raise ValueError("Zone IDs must be unique and 1 to 128 characters")
+            if not name or len(name)>80:raise ValueError("Zone name must contain 1 to 80 characters")
+            if not(0<=x<=1 and 0<=y<=1 and 0<w<=1 and 0<h<=1 and x+w<=1.000001 and y+h<=1.000001):raise ValueError("Zone coordinates must be normalized and fit inside the camera frame")
+            ids.add(zid);clean.append({"id":zid,"name":name,"x":x,"y":y,"width":w,"height":h,"enabled":bool(zone.get("enabled",True))})
+        zones=sorted(clean,key=lambda item:item["id"])
+        with self._lock,self._conn() as conn:
+            if not conn.execute("SELECT 1 FROM camera_configs WHERE tenant_id=? AND shop_id=? AND edge_id=? AND camera_id=?",(tenant_id,shop_id,edge_id,camera_id)).fetchone():raise LookupError("Camera not found")
+            conn.execute("INSERT OR IGNORE INTO camera_detection_configs(tenant_id,shop_id,edge_id,camera_id,mode,zones_json,version,sync_status,applied_version,local_override,updated_at) VALUES(?,?,?,?,'FULL_FRAME','[]',0,'DEFAULT',0,0,?)",(tenant_id,shop_id,edge_id,camera_id,self.now()))
+            old=conn.execute("SELECT * FROM camera_detection_configs WHERE tenant_id=? AND shop_id=? AND edge_id=? AND camera_id=?",(tenant_id,shop_id,edge_id,camera_id)).fetchone()
+            version=int(old["version"]) if old else 0
+            if version!=expected_version:raise RuntimeError(f"Detection configuration version conflict: expected {expected_version}, current {version}")
+            oldzones=json.loads(old["zones_json"] or "[]") if old else []
+            if old and old["mode"]==mode and oldzones==zones:return self.get_detection_config(tenant_id,shop_id,edge_id,camera_id)
+            conn.execute("""INSERT INTO camera_detection_configs(tenant_id,shop_id,edge_id,camera_id,mode,zones_json,version,sync_status,applied_version,local_override,updated_at)
+                VALUES(?,?,?,?,?,?,?,'PENDING',0,0,?) ON CONFLICT(tenant_id,shop_id,edge_id,camera_id) DO UPDATE SET mode=excluded.mode,zones_json=excluded.zones_json,version=excluded.version,sync_status='PENDING',local_override=0,updated_at=excluded.updated_at""",
+                (tenant_id,shop_id,edge_id,camera_id,mode,json.dumps(zones),version+1,self.now()))
+        return self.get_detection_config(tenant_id,shop_id,edge_id,camera_id)
+
+    def acknowledge_detection_config(self,tenant_id:str,shop_id:str,edge_id:str,camera_id:str,version:int,status:str,local_override:bool=False)->bool:
+        with self._conn() as conn:
+            result=conn.execute("UPDATE camera_detection_configs SET applied_version=CASE WHEN ?='APPLIED' THEN ? ELSE applied_version END,sync_status=?,local_override=? WHERE tenant_id=? AND shop_id=? AND edge_id=? AND camera_id=? AND version=?",(status,version,status,int(local_override),tenant_id,shop_id,edge_id,camera_id,version))
+            if not result.rowcount and version==0:
+                exists=conn.execute("SELECT 1 FROM camera_configs WHERE tenant_id=? AND shop_id=? AND edge_id=? AND camera_id=?",(tenant_id,shop_id,edge_id,camera_id)).fetchone()
+                if exists:
+                    conn.execute("INSERT OR IGNORE INTO camera_detection_configs(tenant_id,shop_id,edge_id,camera_id,mode,zones_json,version,sync_status,applied_version,local_override,updated_at) VALUES(?,?,?,?,'FULL_FRAME','[]',0,?,0,0,?)",(tenant_id,shop_id,edge_id,camera_id,status,self.now()));return True
+        return bool(result.rowcount)
 
     def delete_camera(self, tenant_id: str, shop_id: str, edge_id: str, camera_id: str) -> bool:
         with self._lock, self._conn() as conn:

@@ -1,6 +1,11 @@
 import time
 
 from camera_service.camera_manager import CameraManager
+from camera_service.config import RecognitionConfig
+
+
+def test_unknown_decision_diagnostics_are_disabled_by_default():
+    assert RecognitionConfig().unknown_detection_diagnostics is False
 
 
 def _camera(manager, camera_id="sec-1", role="SECURITY", attendance_active=True):

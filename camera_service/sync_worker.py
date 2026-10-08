@@ -153,6 +153,21 @@ class EdgeSyncWorker:
                     for camera in items:
                         try:
                             self.camera_manager.apply_cloud_camera(camera)
+                            detection=camera.get("detection_config") or {"version":0}
+                            camera_id=str(camera.get("camera_id") or "")
+                            local=self.camera_manager.get_detection_config(camera_id,
+                                bool((camera.get("features") or {}).get("unknown_detection") or (camera.get("features") or {}).get("unknown_person_detection")))
+                            local_override=bool(local.get("local_override"))
+                            incoming_version=int(detection.get("version") or 0)
+                            ack_status="LOCAL_OVERRIDE" if local_override else (
+                                "APPLIED" if int(local.get("cloud_version") or 0)>=incoming_version else "FAILED")
+                            if ack_status=="FAILED": camera_sync["failed"]+=1
+                            acknowledge=getattr(self.cloud_client,"acknowledge_detection_config",None)
+                            if acknowledge:
+                                try: acknowledge(camera_id,incoming_version,ack_status,local_override)
+                                except Exception as ack_exc:
+                                    camera_sync["failed"]+=1
+                                    camera_sync.setdefault("ack_errors",[]).append({"camera_id":camera_id,"error":str(ack_exc)[:240]})
                             camera_sync["applied"] += 1
                         except Exception as exc:
                             camera_sync["failed"] += 1
@@ -259,6 +274,8 @@ class EdgeSyncWorker:
                     "last_frame_at": runtime.last_frame_at if runtime else None,
                     "capture_fps": runtime.capture_fps if runtime else 0.0,
                     "ai_fps": runtime.ai_fps if runtime else 0.0,
+                    "frame_width":runtime.frame_width if runtime else None,
+                    "frame_height":runtime.frame_height if runtime else None,
                     "last_error": runtime.last_error if runtime else None,
                 })
         personnel = []

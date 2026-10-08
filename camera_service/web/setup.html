@@ -763,7 +763,7 @@
                     <div id="station-actions" class="camera-actions"></div>
                     <div class="camera-actions"><button class="btn btn-success" id="attendance-start" type="button">Start Attendance</button><button class="btn btn-danger" id="attendance-stop" type="button">Stop Attendance</button></div>
                     <h3>Recent attendance</h3><div id="station-recent" class="activity-list" style="max-height:300px;overflow:auto"></div></div>
-                    <div id="security-panel" hidden><strong>Security zones</strong><small>Draw zones over the live picture. Unknown-person alarms are confirmed only inside enabled zones.</small><div class="camera-actions"><button class="btn btn-primary" id="security-add-zone" type="button">Add Detection Zone</button><button class="btn btn-secondary" id="security-refresh-zones" type="button">Refresh Zones</button></div><div id="security-zone-list" class="activity-list"></div><small id="security-zone-message"></small><h3>Safety detection</h3><small id="safety-capability">Fire / smoke: checking model capability…</small></div>
+                    <div id="security-panel" hidden><strong>Unknown-person detection area</strong><small>Full Frame is the default. Custom Zones limits alerts to enabled rectangles.</small><label>Detection mode <select id="security-zone-mode"><option value="FULL_FRAME">Full Frame</option><option value="CUSTOM_ZONES">Custom Zones</option></select></label><small id="security-zone-status" role="status"></small><div class="camera-actions"><button class="btn btn-primary" id="security-add-zone" type="button">Add Detection Zone</button><button class="btn btn-secondary" id="security-refresh-zones" type="button">Refresh Zones</button></div><div id="security-zone-list" class="activity-list"></div><small id="security-zone-message" role="status"></small><h3>Safety detection</h3><small id="safety-capability">Fire / smoke: checking model capability…</small></div>
                     <div class="camera-actions"><button class="btn btn-success" id="focus-camera-start" type="button">Start Camera</button><button class="btn btn-secondary" id="focus-camera-stop" type="button">Stop Camera</button><button class="btn btn-secondary" id="focus-camera-capture" type="button">Capture</button><button class="btn btn-secondary" id="focus-camera-settings" type="button">Settings</button><button class="btn btn-secondary" id="focus-camera-fullscreen" type="button">Full Screen</button></div>
                     <small id="focus-control-message" role="status"></small>
                 </aside>
@@ -1600,6 +1600,8 @@
         let liveCameras = [];
         let recognizedCameraId = null;
         let securityZones = [];
+        let securityZoneMode = 'FULL_FRAME';
+        let securityZoneVersion = 0;
         let drawingSecurityZone = false;
         let liveStreamRetryTimer = null;
 
@@ -1702,33 +1704,55 @@
 
         async function loadSecurityZones() {
             const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
-            if(!camera || camera.camera_role!=='SECURITY') return;
-            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones`);
-            const body=await response.json(); securityZones=body.items||[]; renderSecurityZones();
+            if(!camera || !['SECURITY','ENTRANCE_EXIT'].includes(camera.camera_role)) return;
+            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/detection-config`);
+            const body=await response.json(); if(!response.ok) throw new Error(body.detail||'Unable to load detection zones');
+            securityZones=body.zones||[]; securityZoneMode=body.mode||'FULL_FRAME'; securityZoneVersion=body.version||0;
+            document.getElementById('security-zone-mode').value=securityZoneMode;
+            document.getElementById('security-zone-status').textContent=`Effective: ${body.effective_mode||securityZoneMode} · ${body.sync_status||'LOCAL'}${body.local_override?' · local override':''}`;
+            renderSecurityZones();
         }
         async function persistSecurityZone(zone) {
-            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(zone)});
+            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones/${encodeURIComponent(zone.id)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(zone)});
             const body=await response.json();
             if(!response.ok) throw new Error(body.detail||'Unable to save zone');
+            document.getElementById('security-zone-message').textContent='Zone saved locally.';
             return body;
+        }
+        function zoneContentRect() {
+            const layer=document.getElementById('security-zone-layer'),image=document.getElementById('focus-camera-image');
+            const r=layer.getBoundingClientRect(),nw=image.naturalWidth||16,nh=image.naturalHeight||9,scale=Math.min(r.width/nw,r.height/nh),w=nw*scale,h=nh*scale;
+            return {x:(r.width-w)/2,y:(r.height-h)/2,w,h,layer:r};
+        }
+        function zonePoint(clientX,clientY) {
+            const c=zoneContentRect(),rx=(clientX-c.layer.left-c.x)/c.w,ry=(clientY-c.layer.top-c.y)/c.h,x=Math.max(0,Math.min(1,rx)),y=Math.max(0,Math.min(1,ry));
+            return {x,y,inside:rx>=0&&rx<=1&&ry>=0&&ry<=1,px:c.x+x*c.w,py:c.y+y*c.h,content:c};
+        }
+        async function persistDetectionConfig(mode,zones) {
+            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/detection-config`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,zones,expected_version:securityZoneVersion})});
+            const body=await response.json(); if(!response.ok) throw new Error(body.detail||'Unable to save detection configuration');
+            securityZoneMode=body.mode;securityZoneVersion=body.version;securityZones=body.zones||[];renderSecurityZones();
+            document.getElementById('security-zone-message').textContent='Detection configuration saved.';await loadSecurityZones();
         }
         function renderSecurityZones() {
             const layer=document.getElementById('security-zone-layer');
-            layer.innerHTML=securityZones.map(z=>`<div class="security-zone-box" data-zone-id="${escapeHtmlLocal(z.id)}" style="left:${z.x*100}%;top:${z.y*100}%;width:${z.width*100}%;height:${z.height*100}%"><span>${escapeHtmlLocal(z.name)}</span><i class="security-zone-resize" title="Resize"></i></div>`).join('');
-            document.getElementById('security-zone-list').innerHTML=securityZones.map(z=>`<div class="activity-row"><strong>${escapeHtmlLocal(z.name)}</strong><button class="btn btn-danger security-zone-delete" data-zone-id="${escapeHtmlLocal(z.id)}">Delete</button></div>`).join('')||'<div class="activity-empty">No zones. Add one over the live picture.</div>';
-            document.querySelectorAll('.security-zone-delete').forEach(btn=>btn.addEventListener('click',async()=>{await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones/${encodeURIComponent(btn.dataset.zoneId)}`,{method:'DELETE'});loadSecurityZones();}));
+            const c=zoneContentRect();layer.innerHTML=securityZoneMode==='FULL_FRAME'?`<div class="security-zone-box" style="left:${c.x}px;top:${c.y}px;width:${c.w}px;height:${c.h}px;pointer-events:none"><span>Full Frame</span></div>`:securityZones.map(z=>`<div class="security-zone-box" data-zone-id="${escapeHtmlLocal(z.id)}" style="left:${c.x+z.x*c.w}px;top:${c.y+z.y*c.h}px;width:${z.width*c.w}px;height:${z.height*c.h}px;opacity:${z.enabled?1:.45}"><span>${escapeHtmlLocal(z.name)}${z.enabled?'':' (disabled)'}</span><i class="security-zone-resize" title="Resize"></i></div>`).join('');
+            document.getElementById('security-add-zone').disabled=securityZoneMode!=='CUSTOM_ZONES';
+            document.getElementById('security-zone-list').innerHTML=securityZoneMode==='FULL_FRAME'?'<div class="activity-empty">The entire camera frame is monitored.</div>':securityZones.map(z=>`<div class="activity-row"><strong>${escapeHtmlLocal(z.name)}</strong><label><input type="checkbox" class="security-zone-enabled" data-zone-id="${escapeHtmlLocal(z.id)}" ${z.enabled?'checked':''}> Enabled</label><button class="btn btn-danger security-zone-delete" data-zone-id="${escapeHtmlLocal(z.id)}">Delete</button></div>`).join('')||'<div class="activity-empty">No custom zones: detection is disabled until you add one.</div>';
+            document.querySelectorAll('.security-zone-enabled').forEach(btn=>btn.addEventListener('change',async()=>{const z=securityZones.find(item=>item.id===btn.dataset.zoneId);if(z){z.enabled=btn.checked;try{await persistSecurityZone(z);}catch(error){document.getElementById('security-zone-message').textContent=error.message;await loadSecurityZones();}}}));
+            document.querySelectorAll('.security-zone-delete').forEach(btn=>btn.addEventListener('click',async()=>{const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones/${encodeURIComponent(btn.dataset.zoneId)}`,{method:'DELETE'});if(!response.ok){document.getElementById('security-zone-message').textContent='Unable to delete zone.';return;}await loadSecurityZones();}));
             layer.querySelectorAll('.security-zone-box').forEach(box=>{
                 const zone=securityZones.find(z=>z.id===box.dataset.zoneId); if(!zone)return;
                 box.addEventListener('pointerdown',ev=>{
                     if(ev.target.classList.contains('security-zone-resize'))return;
-                    ev.preventDefault(); const rect=layer.getBoundingClientRect(),sx=ev.clientX,sy=ev.clientY,ox=zone.x,oy=zone.y;
-                    const move=e=>{zone.x=Math.max(0,Math.min(1-zone.width,ox+(e.clientX-sx)/rect.width));zone.y=Math.max(0,Math.min(1-zone.height,oy+(e.clientY-sy)/rect.height));box.style.left=(zone.x*100)+'%';box.style.top=(zone.y*100)+'%';};
+                    ev.preventDefault(); const start=zonePoint(ev.clientX,ev.clientY),sx=ev.clientX,sy=ev.clientY,ox=zone.x,oy=zone.y;
+                    const move=e=>{const p=zonePoint(e.clientX,e.clientY);zone.x=Math.max(0,Math.min(1-zone.width,ox+(e.clientX-sx)/start.content.w));zone.y=Math.max(0,Math.min(1-zone.height,oy+(e.clientY-sy)/start.content.h));box.style.left=(start.content.x+zone.x*start.content.w)+'px';box.style.top=(start.content.y+zone.y*start.content.h)+'px';};
                     const up=async()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);try{await persistSecurityZone(zone);}catch(error){document.getElementById('security-zone-message').textContent=error.message;}};
                     window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
                 });
                 box.querySelector('.security-zone-resize').addEventListener('pointerdown',ev=>{
-                    ev.stopPropagation();ev.preventDefault();const rect=layer.getBoundingClientRect(),sx=ev.clientX,sy=ev.clientY,ow=zone.width,oh=zone.height;
-                    const move=e=>{zone.width=Math.max(.02,Math.min(1-zone.x,ow+(e.clientX-sx)/rect.width));zone.height=Math.max(.02,Math.min(1-zone.y,oh+(e.clientY-sy)/rect.height));box.style.width=(zone.width*100)+'%';box.style.height=(zone.height*100)+'%';};
+                    ev.stopPropagation();ev.preventDefault();const c=zoneContentRect(),sx=ev.clientX,sy=ev.clientY,ow=zone.width,oh=zone.height;
+                    const move=e=>{zone.width=Math.max(.02,Math.min(1-zone.x,ow+(e.clientX-sx)/c.w));zone.height=Math.max(.02,Math.min(1-zone.y,oh+(e.clientY-sy)/c.h));box.style.width=(zone.width*c.w)+'px';box.style.height=(zone.height*c.h)+'px';};
                     const up=async()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);try{await persistSecurityZone(zone);}catch(error){document.getElementById('security-zone-message').textContent=error.message;}};
                     window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
                 });
@@ -1740,10 +1764,9 @@
             drawingSecurityZone=true; document.getElementById('security-zone-message').textContent='Drag a rectangle over the camera image.';
             const down=ev=>{
                 if(!drawingSecurityZone)return;
-                const rect=layer.getBoundingClientRect(), sx=Math.max(0,Math.min(1,(ev.clientX-rect.left)/rect.width)), sy=Math.max(0,Math.min(1,(ev.clientY-rect.top)/rect.height));
-                const draft=document.createElement('div');draft.className='security-zone-box';draft.style.left=(sx*100)+'%';draft.style.top=(sy*100)+'%';layer.appendChild(draft);
-                const move=e=>{const ex=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),ey=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height));draft.style.left=(Math.min(sx,ex)*100)+'%';draft.style.top=(Math.min(sy,ey)*100)+'%';draft.style.width=(Math.abs(ex-sx)*100)+'%';draft.style.height=(Math.abs(ey-sy)*100)+'%';};
-                const up=async e=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);drawingSecurityZone=false;const ex=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),ey=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height));const zone={name:prompt('Zone name','Detection Zone')||'Detection Zone',x:Math.min(sx,ex),y:Math.min(sy,ey),width:Math.abs(ex-sx),height:Math.abs(ey-sy),enabled:true};draft.remove();if(zone.width<0.02||zone.height<0.02){document.getElementById('security-zone-message').textContent='Zone was too small.';return;}const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(zone)});const body=await response.json();document.getElementById('security-zone-message').textContent=response.ok?'Zone saved':(body.detail||'Unable to save zone');await loadSecurityZones();};
+                const sp=zonePoint(ev.clientX,ev.clientY);if(!sp.inside){document.getElementById('security-zone-message').textContent='Start drawing inside the visible camera image.';drawingSecurityZone=false;return;}const sx=sp.x,sy=sp.y,draft=document.createElement('div');draft.className='security-zone-box';draft.style.left=sp.px+'px';draft.style.top=sp.py+'px';layer.appendChild(draft);
+                const move=e=>{const p=zonePoint(e.clientX,e.clientY),x=Math.min(sx,p.x),y=Math.min(sy,p.y),w=Math.abs(p.x-sx),h=Math.abs(p.y-sy);draft.style.left=(sp.content.x+x*sp.content.w)+'px';draft.style.top=(sp.content.y+y*sp.content.h)+'px';draft.style.width=(w*sp.content.w)+'px';draft.style.height=(h*sp.content.h)+'px';};
+                const up=async e=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);drawingSecurityZone=false;const ep=zonePoint(e.clientX,e.clientY),zone={id:crypto.randomUUID(),name:prompt('Zone name','Detection Zone')||'Detection Zone',x:Math.min(sx,ep.x),y:Math.min(sy,ep.y),width:Math.abs(ep.x-sx),height:Math.abs(ep.y-sy),enabled:true};draft.remove();if(zone.width<0.02||zone.height<0.02){document.getElementById('security-zone-message').textContent='Zone was too small.';return;}try{await persistSecurityZone(zone);await loadSecurityZones();}catch(error){document.getElementById('security-zone-message').textContent=error.message;}};
                 window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
             };
             layer.addEventListener('pointerdown',down,{once:true});
@@ -1973,6 +1996,13 @@
         document.getElementById('attendance-stop').addEventListener('click', () => setAttendanceActive(false));
         document.getElementById('security-add-zone').addEventListener('click', beginSecurityZoneDraw);
         document.getElementById('security-refresh-zones').addEventListener('click', loadSecurityZones);
+        document.getElementById('security-zone-mode').addEventListener('change', async event=>{
+            const mode=event.target.value;
+            try{await persistDetectionConfig(mode,mode==='CUSTOM_ZONES'?securityZones:[]);}
+            catch(error){document.getElementById('security-zone-message').textContent=error.message;event.target.value=securityZoneMode;}
+        });
+        document.getElementById('focus-camera-image').addEventListener('load',()=>{if(selectedLiveCameraId)renderSecurityZones();});
+        window.addEventListener('resize',()=>{if(selectedLiveCameraId&&livePreviewOpen)renderSecurityZones();});
         document.getElementById('focus-camera-start').addEventListener('click', () => setFocusedMonitoring('start'));
         document.getElementById('focus-camera-stop').addEventListener('click', () => setFocusedMonitoring('stop'));
         document.getElementById('focus-camera-capture').addEventListener('click', () => {

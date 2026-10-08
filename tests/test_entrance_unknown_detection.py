@@ -57,8 +57,13 @@ class _Backend:
 class _FaceService:
     def __init__(self, kind="unknown"):
         self.kind = kind
+        self.detect_calls = 0
+        self.detect_times = []
 
     def detect(self, _roi):
+        self.detect_calls += 1
+        from camera_service.camera_manager import time as camera_time
+        self.detect_times.append(camera_time.monotonic())
         if self.kind == "failure":
             raise RuntimeError("recognition unavailable")
         if self.kind == "no_embedding":
@@ -84,7 +89,8 @@ class _AttendanceEngine:
         self.identities.append(identity)
 
 
-def _pipeline(tmp_path, monkeypatch, role="ENTRANCE_EXIT", enabled=True, face_kind="unknown"):
+def _pipeline(tmp_path, monkeypatch, role="ENTRANCE_EXIT", enabled=True, face_kind="unknown",
+              face_recheck=0.75, confirmation_seconds=2.0, diagnostics=False):
     monkeypatch.setenv("SNAPKEY_INFERENCE_ROUTER_ENABLED", "1")
     manager = CameraManager(str(tmp_path / "camera-manager.db"))
     camera_id = f"stable-camera-{role.lower()}"
@@ -107,13 +113,16 @@ def _pipeline(tmp_path, monkeypatch, role="ENTRANCE_EXIT", enabled=True, face_ki
     clock = {"value": 100.0}
     monkeypatch.setattr("camera_service.camera_manager.time.monotonic", lambda: clock["value"])
     engine = _AttendanceEngine()
-    config = RecognitionConfig(enabled=True, minimum_face_quality=0.25, known_recheck_seconds=0.75)
+    config = RecognitionConfig(enabled=True, minimum_face_quality=0.25,
+        known_recheck_seconds=face_recheck, unknown_confirmation_seconds=confirmation_seconds,
+        unknown_detection_diagnostics=diagnostics)
+    face_service = _FaceService(face_kind)
     state = {}
     def observe(kind=face_kind, advance=1.0):
         clock["value"] += advance
-        manager._track_identity_cache.clear()
         manager._annotate_tracking_frame(np.zeros((100, 100, 3), dtype=np.uint8), "fake.pt",
-            _FaceService(kind), config, camera, engine, store, state)
+            face_service if kind == face_kind else _FaceService(kind), config, camera, engine, store, state)
+    observe.face_service = face_service
     return manager, camera, store, engine, state, observe
 
 
@@ -140,6 +149,33 @@ def test_unknown_face_creates_incident_evidence_and_scoped_sync_event(tmp_path, 
     assert payload["scope"]["camera_id"] == camera.camera_id
     assert payload["metadata"]["face_path"] == incident["best_face_snapshot"]
     assert payload["metadata"]["person_path"] == incident["best_person_snapshot"]
+
+
+def test_entrance_unknown_confirms_at_three_second_face_retry_on_three_fps_frames(
+    tmp_path, monkeypatch, caplog
+):
+    manager, camera, store, _engine, _state, observe = _pipeline(
+        tmp_path, monkeypatch, role="ENTRANCE_EXIT", face_recheck=3.0,
+        confirmation_seconds=3.0, diagnostics=True,
+    )
+    import logging
+    caplog.set_level(logging.INFO, logger="camera_service.camera_manager")
+    observe(advance=0.0)
+    # Keep the camera's person-track presence alive at 3 FPS while recognition
+    # itself is only retried every three seconds.
+    for _ in range(10):
+        observe(advance=1.0 / 3.0)
+    assert observe.face_service.detect_calls >= 2
+    assert observe.face_service.detect_times[-1] - observe.face_service.detect_times[0] >= 3.0
+    incidents = store.unknowns()
+    assert len(incidents) == 1
+    assert incidents[0]["camera_id"] == camera.camera_id
+    diagnostic_lines = [record.message for record in caplog.records
+                        if "unknown_detection_decision" in record.message]
+    assert any(camera.camera_id in line and "stable-track" in line
+               and "incident_created" in line and "confirmation_duration_seconds" in line
+               for line in diagnostic_lines)
+    assert all("embedding" not in line and "image" not in line for line in diagnostic_lines)
 
 
 def test_known_face_does_not_create_unknown_and_keeps_attendance_recognition(tmp_path, monkeypatch):

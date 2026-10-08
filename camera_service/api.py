@@ -750,24 +750,62 @@ class SecurityZoneRequest(BaseModel):
     height: float = Field(gt=0, le=1)
     enabled: bool = True
 
+class DetectionConfigRequest(BaseModel):
+    mode: Literal['FULL_FRAME','CUSTOM_ZONES']
+    zones: list[SecurityZoneRequest] = Field(default_factory=list, max_length=64)
+    expected_version: int | None = Field(default=None, ge=0)
+
+@app.get('/api/v1/cameras/{camera_id}/detection-config')
+def get_detection_config(camera_id: str):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    return camera_manager.get_detection_config(camera_id, camera.features.unknown_enabled)
+
+@app.put('/api/v1/cameras/{camera_id}/detection-config')
+def replace_detection_config(camera_id: str, body: DetectionConfigRequest):
+    camera = camera_manager.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(404, 'Camera not found')
+    try:
+        saved = camera_manager.replace_detection_config(camera_id, body.mode,
+            [zone.model_dump(exclude_none=True) for zone in body.zones], body.expected_version)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return {**saved, 'effective_mode': camera_manager.get_detection_config(
+        camera_id, camera.features.unknown_enabled)['effective_mode']}
+
 @app.get('/api/v1/cameras/{camera_id}/security-zones')
 def list_security_zones(camera_id: str):
     camera = camera_manager.get_camera(camera_id)
     if not camera:
         raise HTTPException(404, 'Camera not found')
-    return {'items': camera_manager.list_security_zones(camera_id)}
+    config = camera_manager.get_detection_config(camera_id, camera.features.unknown_enabled)
+    return {'items': config['zones'], 'mode': config['mode'], 'version': config['version'],
+            'effective_mode': config['effective_mode'], 'sync_status': config['sync_status']}
 
 @app.post('/api/v1/cameras/{camera_id}/security-zones')
 def save_security_zone(camera_id: str, body: SecurityZoneRequest):
     camera = camera_manager.get_camera(camera_id)
     if not camera:
         raise HTTPException(404, 'Camera not found')
-    if camera.camera_role.value != 'SECURITY':
-        raise HTTPException(409, 'Detection zones are available only for Security cameras')
+    if camera.camera_role.value not in {'SECURITY', 'ENTRANCE_EXIT'}:
+        raise HTTPException(409, 'Detection zones are available for Security and Entrance/Exit cameras')
     try:
         return camera_manager.save_security_zone(camera_id, body.model_dump())
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+
+@app.put('/api/v1/cameras/{camera_id}/security-zones/{zone_id}')
+def update_security_zone(camera_id: str, zone_id: str, body: SecurityZoneRequest):
+    camera=camera_manager.get_camera(camera_id)
+    if not camera: raise HTTPException(404,'Camera not found')
+    if camera.camera_role.value not in {'SECURITY','ENTRANCE_EXIT'}: raise HTTPException(409,'Detection zones are available for Security and Entrance/Exit cameras')
+    payload=body.model_dump(); payload['id']=zone_id
+    try: return camera_manager.save_security_zone(camera_id,payload)
+    except ValueError as exc: raise HTTPException(422,str(exc))
 
 @app.delete('/api/v1/cameras/{camera_id}/security-zones/{zone_id}')
 def delete_security_zone(camera_id: str, zone_id: str):

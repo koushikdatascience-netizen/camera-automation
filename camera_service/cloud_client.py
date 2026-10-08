@@ -105,6 +105,13 @@ class CloudSyncClient:
         response.raise_for_status()
         return response.json() if response.content else {"items": []}
 
+    def acknowledge_detection_config(self, camera_id: str, version: int, status: str, local_override: bool = False) -> None:
+        if not self.enabled(): raise RuntimeError("cloud sync is disabled")
+        response=requests.post(self.config.base_url.rstrip("/")+f"/edge/v1/config/cameras/{camera_id}/detection-config/ack",
+            json={"version":int(version),"status":status,"local_override":bool(local_override)},
+            headers={"Authorization":f"Bearer {self.config.api_token}"},timeout=self.config.timeout_seconds)
+        response.raise_for_status()
+
 
     def personnel_config(self) -> dict[str, Any]:
         """Fetch the tenant/shop-scoped personnel roster and face embeddings."""

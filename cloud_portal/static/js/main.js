@@ -339,6 +339,59 @@
     }
   }
 
+  let detectionEditorState=null;
+  function renderDetectionEditor(){
+    const state=detectionEditorState;if(!state)return;
+    const overlay=document.getElementById("zone-editor-overlay"),mode=document.getElementById("zone-editor-mode");
+    mode.value=state.mode;overlay.innerHTML="";
+    if(state.mode==="FULL_FRAME"){
+      overlay.innerHTML="<div style='position:absolute;inset:0;border:3px solid #facc15;background:#facc1518;pointer-events:none'><span style='background:#111827;color:white;padding:3px 6px'>Full Frame</span></div>";
+      document.getElementById("zone-editor-list").textContent="The whole frame is monitored.";return;
+    }
+    state.zones.forEach(zone=>{
+      const box=document.createElement("div");box.dataset.zoneId=zone.id;
+      Object.assign(box.style,{position:"absolute",left:(zone.x*100)+"%",top:(zone.y*100)+"%",width:(zone.width*100)+"%",height:(zone.height*100)+"%",border:"2px solid #facc15",background:"#facc1525",opacity:zone.enabled?"1":".45",boxSizing:"border-box",cursor:"move"});
+      box.innerHTML="<span style='background:#111827;color:#fff;padding:2px 5px'>"+escapeHtml(zone.name)+(zone.enabled?"":" (disabled)")+"</span><i style='position:absolute;right:-5px;bottom:-5px;width:12px;height:12px;background:#facc15;cursor:nwse-resize'></i>";
+      box.addEventListener("pointerdown",event=>{
+        if(event.target.tagName==="SPAN")return;event.preventDefault();event.stopPropagation();
+        const rect=overlay.getBoundingClientRect(),startX=event.clientX,startY=event.clientY,original={...zone},resize=event.target.tagName==="I";
+        const move=e=>{const dx=(e.clientX-startX)/rect.width,dy=(e.clientY-startY)/rect.height;
+          if(resize){zone.width=Math.max(.02,Math.min(1-zone.x,original.width+dx));zone.height=Math.max(.02,Math.min(1-zone.y,original.height+dy));}
+          else{zone.x=Math.max(0,Math.min(1-zone.width,original.x+dx));zone.y=Math.max(0,Math.min(1-zone.height,original.y+dy));}renderDetectionEditor();};
+        const up=()=>{overlay.removeEventListener("pointermove",move);overlay.removeEventListener("pointerup",up);};
+        overlay.addEventListener("pointermove",move);overlay.addEventListener("pointerup",up,{once:true});
+      });overlay.appendChild(box);
+    });
+    document.getElementById("zone-editor-list").innerHTML=state.zones.map(z=>"<div style='display:flex;gap:10px;align-items:center;padding:6px 0'><strong>"+escapeHtml(z.name)+"</strong><label><input type='checkbox' class='zone-enabled' data-zone='"+escapeHtml(z.id)+"' "+(z.enabled?"checked":"")+"> Enabled</label><button type='button' class='btn btn-light zone-delete' data-zone='"+escapeHtml(z.id)+"'>Delete</button></div>").join("")||"No custom zones. Detection is intentionally disabled in this mode.";
+    document.querySelectorAll(".zone-enabled").forEach(el=>el.addEventListener("change",()=>{const z=state.zones.find(x=>x.id===el.dataset.zone);if(z){z.enabled=el.checked;renderDetectionEditor();}}));
+    document.querySelectorAll(".zone-delete").forEach(el=>el.addEventListener("click",()=>{state.zones=state.zones.filter(x=>x.id!==el.dataset.zone);renderDetectionEditor();}));
+  }
+  async function openDetectionEditor(camera){
+    try{
+      const scope=requireScope(["tenant_id","shop_id"]),edgeId=camera.edge_id||scope.edge_id;
+      const query="?shop_id="+encodeURIComponent(scope.shop_id)+"&edge_id="+encodeURIComponent(edgeId);
+      const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/cameras/"+encodeURIComponent(camera.camera_id)+"/detection-config"+query);
+      const body=await response.json();if(!response.ok)throw new Error(body.detail||"Unable to load detection configuration.");
+      detectionEditorState={tenantId:scope.tenant_id,shopId:scope.shop_id,edgeId,cameraId:camera.camera_id,version:body.version||0,mode:body.mode||"FULL_FRAME",zones:body.zones||[]};
+      const fw=Number(camera.frame_width||16),fh=Number(camera.frame_height||9);
+      document.getElementById("zone-editor-canvas").style.aspectRatio=fw+" / "+fh;
+      document.getElementById("zone-editor-title").textContent="Detection zones · "+camera.name;
+      document.getElementById("zone-editor-status").textContent="Effective: "+body.effective_mode+" · Sync: "+body.sync_status+(body.applied_version!==undefined?" · edge applied v"+body.applied_version:" ");
+      document.getElementById("detection-zone-editor").hidden=false;document.getElementById("zone-editor-message").textContent="";renderDetectionEditor();
+      document.getElementById("detection-zone-editor").scrollIntoView({behavior:"smooth",block:"nearest"});
+    }catch(error){showMessage(error.message,true);}
+  }
+  async function saveDetectionEditor(){
+    const state=detectionEditorState;if(!state)return;
+    try{
+      const url="/portal/v1/tenants/"+encodeURIComponent(state.tenantId)+"/cameras/"+encodeURIComponent(state.cameraId)+"/detection-config?shop_id="+encodeURIComponent(state.shopId)+"&edge_id="+encodeURIComponent(state.edgeId);
+      const response=await authFetch(url,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:state.mode,zones:state.mode==="CUSTOM_ZONES"?state.zones:[],expected_version:state.version})});
+      const body=await response.json();if(!response.ok)throw new Error(body.detail||"Unable to save detection configuration.");
+      state.version=body.version;state.mode=body.mode;state.zones=body.zones||[];
+      document.getElementById("zone-editor-status").textContent="Effective: "+body.effective_mode+" · Sync: "+body.sync_status;
+      document.getElementById("zone-editor-message").textContent="Saved. Waiting for edge acknowledgement.";renderDetectionEditor();
+    }catch(error){document.getElementById("zone-editor-message").textContent=error.message;}
+  }
   async function loadConfiguredCameras(){
     const container=document.getElementById("configured-camera-list");
     if(!container) return;
@@ -364,13 +417,14 @@
         const state=runtime ? (runtime.state || (runtime.online?"ONLINE":"OFFLINE")) : "WAITING FOR EDGE";
         const online=!!runtime?.online;
         const statusColor=online?"#166534":(runtime?"#6b7280":"#92400e");
-        return "<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type)+" · "+escapeHtml(camera.camera_role)+" · Cloud managed</small></div><div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end'><strong style='color:"+statusColor+"'>● "+escapeHtml(state)+"</strong><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(camera.edge_id||selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button><button class='btn btn-light edit-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Edit</button><button class='btn btn-light delete-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Delete</button></div></div>";
+        return "<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type)+" · "+escapeHtml(camera.camera_role)+" · Cloud managed</small></div><div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end'><strong style='color:"+statusColor+"'>● "+escapeHtml(state)+"</strong><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(camera.edge_id||selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button><button class='btn btn-light manage-zones' data-id='"+escapeHtml(camera.camera_id)+"'>Detection Zones</button><button class='btn btn-light edit-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Edit</button><button class='btn btn-light delete-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Delete</button></div></div>";
       }).join("");
       const localHtml=localOnly.map(camera=>"<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid #e5e7eb'><div><strong>"+escapeHtml(camera.name||camera.camera_id)+"</strong><br><small>"+escapeHtml(camera.camera_id)+" · "+escapeHtml(camera.source_type||"camera")+" · "+escapeHtml(camera.camera_role||"GENERAL")+" · Edge discovered</small></div><div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end'><strong style='color:"+(camera.online?"#166534":"#6b7280")+"'>● "+(camera.online?"Online":"Offline")+"</strong><button class='btn btn-light test-existing-camera' data-id='"+escapeHtml(camera.camera_id)+"' data-edge-id='"+escapeHtml(selectedEdge)+"' data-source-type='"+escapeHtml(camera.source_type||"")+"'>Test</button><button class='btn btn-light adopt-local-camera' data-id='"+escapeHtml(camera.camera_id)+"'>Configure</button></div></div>").join("");
       container.innerHTML=configuredHtml+localHtml;
       container.querySelectorAll(".test-existing-camera").forEach(button=>button.addEventListener("click",()=>testCameraConnection({cameraId:button.dataset.id,edgeId:button.dataset.edgeId,sourceType:button.dataset.sourceType,button})));
       container.querySelectorAll(".adopt-local-camera").forEach(button=>button.addEventListener("click",()=>adoptLocalCamera(localOnly.find(x=>x.camera_id===button.dataset.id))));
       container.querySelectorAll(".edit-camera").forEach(button=>button.addEventListener("click",()=>editCamera(items.find(x=>x.camera_id===button.dataset.id))));
+      container.querySelectorAll(".manage-zones").forEach(button=>button.addEventListener("click",()=>openDetectionEditor(items.find(x=>x.camera_id===button.dataset.id))));
       container.querySelectorAll(".delete-camera").forEach(button=>button.addEventListener("click",()=>deleteCamera(button.dataset.id,items.find(x=>x.camera_id===button.dataset.id)?.edge_id)));
     }catch(error){container.innerHTML="<p>"+escapeHtml(error.message)+"</p>";}
   }
@@ -508,6 +562,17 @@
     document.getElementById("cancel-camera-btn")?.addEventListener("click", resetCameraForm);
     document.getElementById("test-camera-btn")?.addEventListener("click", testCameraConnection);
     document.getElementById("discover-camera-btn")?.addEventListener("click", discoverOnvifCamera);
+    document.getElementById("zone-editor-close")?.addEventListener("click",()=>{document.getElementById("detection-zone-editor").hidden=true;detectionEditorState=null;});
+    document.getElementById("zone-editor-save")?.addEventListener("click",saveDetectionEditor);
+    document.getElementById("zone-editor-mode")?.addEventListener("change",event=>{if(detectionEditorState){detectionEditorState.mode=event.target.value;renderDetectionEditor();}});
+    document.getElementById("zone-editor-overlay")?.addEventListener("pointerdown",event=>{
+      if(!detectionEditorState||detectionEditorState.mode!=="CUSTOM_ZONES"||event.target.closest("[data-zone-id]"))return;
+      const overlay=event.currentTarget,rect=overlay.getBoundingClientRect(),x=Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width)),y=Math.max(0,Math.min(1,(event.clientY-rect.top)/rect.height));
+      const draft=document.createElement("div");Object.assign(draft.style,{position:"absolute",border:"2px dashed #fff",pointerEvents:"none"});overlay.appendChild(draft);
+      const move=e=>{const ex=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),ey=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height));Object.assign(draft.style,{left:(Math.min(x,ex)*100)+"%",top:(Math.min(y,ey)*100)+"%",width:(Math.abs(ex-x)*100)+"%",height:(Math.abs(ey-y)*100)+"%"});};
+      const up=e=>{overlay.removeEventListener("pointermove",move);overlay.removeEventListener("pointerup",up);draft.remove();const ex=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),ey=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height)),w=Math.abs(ex-x),h=Math.abs(ey-y);if(w<.02||h<.02)return;const name=prompt("Detection zone name","Detection Zone");if(!name)return;detectionEditorState.zones.push({id:crypto.randomUUID(),name:name.trim(),x:Math.min(x,ex),y:Math.min(y,ey),width:w,height:h,enabled:true});renderDetectionEditor();};
+      overlay.addEventListener("pointermove",move);overlay.addEventListener("pointerup",up,{once:true});
+    });
     document.getElementById("onvif-profile")?.addEventListener("change", event => {
       document.getElementById("camera-source").value=event.target.value;
     });

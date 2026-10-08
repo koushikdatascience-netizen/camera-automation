@@ -9,7 +9,8 @@ def cloud_camera(camera_id="CAM-1", source="rtsp://user:pass@192.168.1.20/stream
         "tenant_id":"tenant-1","company_code":"2","shop_id":"WBTEST","site_id":"site-1","edge_id":"edge-1",
         "camera_id":camera_id,"name":"Main Entrance","source_type":"rtsp","source":source,
         "camera_role":"ENTRANCE_EXIT","camera_zone":"Main Gate","crowd_threshold":12,"enabled":True,
-        "features":{"face_recognition":True,"tracking":True,"object_security":True},
+        "features":{"attendance":True,"face_recognition":True,"unknown_detection":True,
+                    "unknown_person_detection":True,"tracking":True,"object_security":True},
         "settings":{"tracking_fps":4,"max_frame_width":640,"tracking_quality":70,"tracking_mode":"track"},
     }
 
@@ -20,6 +21,7 @@ def test_camera_manager_applies_cloud_assignment_idempotently(tmp_path):
     assert first.camera_id=="CAM-1"
     assert first.rtsp_url.startswith("rtsp://")
     assert first.features.face_recognition is True
+    assert first.features.unknown_enabled is True
     assert first.features.object_security is True
     assert first.camera_zone.value=="inside"
     updated=cloud_camera()

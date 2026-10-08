@@ -127,6 +127,7 @@ class CameraWorker:
                         capture_fps=self.frames_received/elapsed,
                         ai_fps=self.ai_frames/elapsed,
                         frames_received=self.frames_received,
+                        frame_width=int(frame.shape[1]),frame_height=int(frame.shape[0]),
                         reconnect_count=self.reconnect_count,
                         last_error=None,
                     )

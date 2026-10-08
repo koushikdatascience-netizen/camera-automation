@@ -93,6 +93,14 @@
           <div><h2>Configured Cameras</h2><p>Cameras assigned to this shop and edge device.</p></div>
         </div>
         <div id="configured-camera-list"><p>Loading cameras...</p></div>
+        <div id="detection-zone-editor" hidden style="border:1px solid #d1d5db;border-radius:10px;padding:18px;margin-top:16px;background:#fff">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><h3 id="zone-editor-title">Detection zones</h3><small id="zone-editor-status"></small></div><button type="button" class="btn btn-light" id="zone-editor-close">Close</button></div>
+          <label for="zone-editor-mode">Detection area</label><select id="zone-editor-mode"><option value="FULL_FRAME">Full Frame</option><option value="CUSTOM_ZONES">Custom Zones</option></select>
+          <p>Frame proportions use the latest edge-reported resolution (16:9 until the edge reports one). Drag in the preview to add a zone, drag a zone to move it, or use its corner handle to resize. An empty Custom Zones list intentionally disables unknown-person detection.</p>
+          <div id="zone-editor-canvas" style="position:relative;width:100%;max-width:960px;aspect-ratio:16/9;background:#111827;border-radius:8px;overflow:hidden;touch-action:none"><span style="position:absolute;inset:45% 0;text-align:center;color:#fff;pointer-events:none">Camera frame preview · normalized coordinates</span><div id="zone-editor-overlay" style="position:absolute;inset:0"></div></div>
+          <div style="display:flex;gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap"><button type="button" class="btn btn-primary" id="zone-editor-save">Save detection zones</button><small id="zone-editor-message" role="status"></small></div>
+          <div id="zone-editor-list" style="margin-top:12px"></div>
+        </div>
       </div>
 
       <div class="panel-heading">
