@@ -774,7 +774,10 @@ class PostgresPortalStore:
                     SELECT p.tenant_id,p.shop_id,p.local_person_id
                     FROM attendance_presence p
                     JOIN attendance_policies ap ON ap.tenant_id=p.tenant_id AND ap.shop_id=p.shop_id
-                    WHERE p.checked_in=TRUE AND p.on_break=FALSE
+                    WHERE NOT EXISTS (SELECT 1 FROM person_attendance_policies pp
+                                      WHERE pp.tenant_id=p.tenant_id AND pp.shop_id=p.shop_id
+                                        AND pp.crm_user_id=p.crm_user_id)
+                      AND p.checked_in=TRUE AND p.on_break=FALSE
                       AND ap.absence_auto_logout_enabled=TRUE
                       AND p.last_seen_at + (ap.grace_period_minutes * INTERVAL '1 minute') <= :now
                       AND (p.checkout_claimed_at IS NULL OR p.checkout_claimed_at < :retry_before)
@@ -829,7 +832,10 @@ class PostgresPortalStore:
                     SELECT p.tenant_id,p.shop_id,p.local_person_id
                     FROM attendance_presence p
                     JOIN attendance_policies ap ON ap.tenant_id=p.tenant_id AND ap.shop_id=p.shop_id
-                    WHERE p.checked_in=TRUE
+                    WHERE NOT EXISTS (SELECT 1 FROM person_attendance_policies pp
+                                      WHERE pp.tenant_id=p.tenant_id AND pp.shop_id=p.shop_id
+                                        AND pp.crm_user_id=p.crm_user_id)
+                      AND p.checked_in=TRUE
                       AND ((:now AT TIME ZONE ap.timezone)::time >= ap.max_logoff_time::time)
                       AND (p.checkout_claimed_at IS NULL OR p.checkout_claimed_at < :retry_before)
                     ORDER BY p.updated_at
