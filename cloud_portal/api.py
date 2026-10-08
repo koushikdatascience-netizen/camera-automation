@@ -482,28 +482,11 @@ def create_edge_activation_code(tenant_id: str, payload: EdgeActivationCodeReque
 def _require_crm_integration(request: Request, tenant_id: str, shop_id: str) -> None:
     if not _crm_integration_key_valid(request.headers.get("X-CRM-Integration-Key")):
         raise HTTPException(401, "Invalid CRM integration key")
-    configured=os.getenv("SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES","").strip()
-    if not configured:
-        # Preserve local developer fixtures, but never permit an unscoped key in
-        # production. Scope config is an allow-list attached to the server key.
-        if os.getenv("SNAPKEY_ENV","").lower()=="production":
-            raise HTTPException(503,"CRM integration tenant/shop scopes are not configured")
-        return
-    try:
-        scopes=json.loads(configured)
-    except ValueError as exc:
-        raise HTTPException(503,"CRM integration scope configuration is invalid") from exc
-    if not isinstance(scopes,list):
-        raise HTTPException(503,"CRM integration scope configuration must be a JSON list")
-    allowed=any(
-        isinstance(item,dict)
-        and str(item.get("tenant_id") or "")==tenant_id
-        and shop_id in [str(value) for value in (item.get("shop_ids") or [])]
-        for item in scopes
-    )
-    if not allowed:
-        logger.warning("CRM_INTEGRATION_SCOPE_DENIED tenant_id=%s shop_id=%s",tenant_id,shop_id)
-        raise HTTPException(403,"CRM integration key is not authorized for this tenant/shop")
+    # The integration key authenticates the trusted CRM backend, which supplies
+    # tenant/shop identity per request. Never provision tenant IDs through env.
+    # This is a service-to-service trust boundary: never expose the key to a browser.
+    if not tenant_id.strip() or not shop_id.strip():
+        raise HTTPException(400, "tenant_id and shop_id are required")
     logger.info("CRM_INTEGRATION_ACCESS tenant_id=%s shop_id=%s method=%s path=%s",
                 tenant_id,shop_id,request.method,request.url.path)
 
