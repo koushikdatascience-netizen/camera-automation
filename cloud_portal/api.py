@@ -965,9 +965,14 @@ def save_portal_camera(tenant_id: str, camera_id: str, request: PortalCameraConf
             camera for camera in store.list_cameras(tenant_id, shop_id=principal.shop_id, edge_id=request.edge_id)
             if str(camera.get("camera_id")) == camera_id
         ), None)
-        if not existing or not str(existing.get("source") or "").strip():
+        if existing and str(existing.get("source") or "").strip():
+            payload["source"] = existing["source"]
+        elif _edge_inventory_camera(tenant_id, principal.shop_id, request.edge_id, camera_id):
+            # The edge advertises local cameras without exposing their device source.
+            # Keep the source on the edge; cloud assignments resolve this reference locally.
+            payload["source"] = f"edge-local:{camera_id}"
+        else:
             raise HTTPException(400, "Existing camera source could not be preserved")
-        payload["source"] = existing["source"]
     elif not request.source.strip():
         raise HTTPException(400, "Camera source is required")
     return {"camera": _portal_camera_view(store.upsert_camera(payload))}
