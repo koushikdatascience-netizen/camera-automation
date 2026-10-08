@@ -830,7 +830,7 @@ class PostgresPortalStore:
     def list_v2_attendance_presence(self, limit: int = 200) -> list[dict[str, Any]]:
         with self._conn() as conn:
             rows=conn.execute(text("""SELECT p.*,pp.policy_json
-                FROM attendance_presence p JOIN person_attendance_policies pp
+                FROM attendance_presence p LEFT JOIN person_attendance_policies pp
                 ON p.tenant_id=pp.tenant_id AND p.shop_id=pp.shop_id
                    AND p.crm_user_id=pp.crm_user_id
                 WHERE p.checked_in=TRUE
