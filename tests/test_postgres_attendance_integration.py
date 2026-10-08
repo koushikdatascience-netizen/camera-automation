@@ -15,10 +15,15 @@ from cloud_portal.postgres_storage import PostgresPortalStore
 def test_postgres_fresh_schema_outbox_and_auto_logout_recovery():
     dsn=os.getenv("SNAPKEY_TEST_DATABASE_URL","").strip()
     if not dsn:
+        if os.getenv("SNAPKEY_REQUIRE_POSTGRES_TESTS")=="1":
+            pytest.fail("SNAPKEY_TEST_DATABASE_URL is required in this PostgreSQL test job")
         pytest.skip("SNAPKEY_TEST_DATABASE_URL is not configured; PostgreSQL integration test not run")
     root_url=make_url(dsn)
     if "test" not in str(root_url.database or "").lower():
-        pytest.skip("refusing integration writes unless database name contains 'test'")
+        message="refusing integration writes unless database name contains 'test'"
+        if os.getenv("SNAPKEY_REQUIRE_POSTGRES_TESTS")=="1":
+            pytest.fail(message)
+        pytest.skip(message)
     schema="camera_eye_test_"+uuid.uuid4().hex[:12]
     admin_engine=create_engine(dsn,pool_pre_ping=True)
     store=None

@@ -30,6 +30,8 @@ Replace database/user names in the backup command if `.env` overrides defaults. 
 
 `PostgresPortalStore._init()` applies idempotent `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, and index statements on portal startup. These are inline schema bootstraps, not a versioned migration system. This hardening adds `attendance_presence.last_camera_zone`, CRM action-recovery metadata, `notification_outbox`, and `attendance_camera_coverage`. Review DDL in `cloud_portal/postgres_storage.py` and take a tested PostgreSQL backup before upgrading. Verify a fresh database and one previous-release upgrade in staging; a SQLite test is not a substitute. `tests/test_postgres_attendance_integration.py` is enabled with `SNAPKEY_TEST_DATABASE_URL` pointed at a disposable database whose name contains `test`.
 
+For a local database integration run, start Docker Desktop and run `tools/run_postgres_integration.ps1` from the repository root. It starts the opt-in `postgres-test` Compose service on loopback port 55432, runs the test against its isolated disposable database, and removes the test container afterward. It does not connect to or modify the portal's persistent `postgres` service. The cloud deploy workflow also creates a disposable `camera_eye_test` database in its ephemeral PostgreSQL service and treats a skipped database test as a failure.
+
 Back up before each upgrade:
 
 ```powershell

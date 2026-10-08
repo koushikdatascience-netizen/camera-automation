@@ -40,9 +40,22 @@ jobs:
           python-version: '3.11'
           cache: pip
           cache-dependency-path: requirements-ci.txt
-      - name: Validate cloud code
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-ci.txt
+      - name: Create disposable PostgreSQL integration database
         run: |
-          python -m pip install -r requirements-ci.txt
+          python - <<'PY'
+          from sqlalchemy import create_engine, text
+          engine = create_engine("postgresql+psycopg://ci:isolated-ci-password@127.0.0.1:5432/camera_ci")
+          with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+              connection.execute(text("CREATE DATABASE camera_eye_test"))
+          engine.dispose()
+          PY
+      - name: Validate cloud code
+        env:
+          SNAPKEY_TEST_DATABASE_URL: postgresql+psycopg://ci:isolated-ci-password@127.0.0.1:5432/camera_eye_test
+          SNAPKEY_REQUIRE_POSTGRES_TESTS: '1'
+        run: |
           python -m compileall -q camera_service cloud_portal tools
           python -m pytest tests -q
           python test_production_package.py

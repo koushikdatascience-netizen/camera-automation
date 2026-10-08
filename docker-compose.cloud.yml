@@ -15,6 +15,23 @@ services:
       retries: 10
     networks: [vision]
 
+  # Isolated, disposable database for the local PostgreSQL integration test.
+  # This profile is opt-in and never shares the cloud portal's data volume.
+  postgres-test:
+    image: postgres:17
+    profiles: [integration-test]
+    environment:
+      POSTGRES_DB: camera_eye_test
+      POSTGRES_USER: camera_eye_test
+      POSTGRES_PASSWORD: camera-eye-test-only
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U camera_eye_test -d camera_eye_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   portal:
     build:
       context: .
