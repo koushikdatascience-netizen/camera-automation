@@ -449,7 +449,8 @@
     document.getElementById("source-type").value=camera.source_type||"rtsp";
     document.getElementById("camera-zone").value=camera.camera_zone||"";
     document.getElementById("crowd-threshold").value=camera.crowd_threshold||10;
-    const role=document.getElementById("camera-role"); role.value=camera.camera_role==="GENERAL"?"General":"Entry";
+    const role=document.getElementById("camera-role"); role.value=camera.camera_role==="GENERAL"?"GENERAL":"ENTRANCE_EXIT";
+    updateCameraPurposeDescription();
     window.scrollTo({top:0,behavior:"smooth"});
   }
 
@@ -466,7 +467,8 @@
     document.getElementById("camera-zone").value=camera.camera_zone||"";
     document.getElementById("crowd-threshold").value=camera.crowd_threshold||10;
     const role=document.getElementById("camera-role");
-    role.value=(camera.camera_role==="ENTRANCE_EXIT")?"Entry":"General";
+    role.value=(camera.camera_role==="ENTRANCE_EXIT")?"ENTRANCE_EXIT":"GENERAL";
+    updateCameraPurposeDescription();
     showMessage("Camera loaded from edge. Choose role/features and save; source stays hidden on the local PC.");
     window.scrollTo({top:0,behavior:"smooth"});
   }
@@ -482,6 +484,14 @@
     }catch(error){showMessage(error.message,true);}
   }
 
+  function updateCameraPurposeDescription(){
+    const security=document.getElementById("camera-role")?.value==="GENERAL";
+    const message=document.getElementById("camera-purpose-description");
+    if(message)message.textContent=security
+      ?"Unknown-person monitoring. Detection defaults to the entire frame; configure a bounded area using Detection Zones on the saved camera."
+      :"Employee recognition and attendance. CRM check-in, checkout and break actions use configured attendance rules.";
+  }
+
   async function saveCamera() {
     try {
       const scope = requireScope(["tenant_id", "shop_id", "site_id", "edge_id"]);
@@ -495,7 +505,7 @@
         || (cloudExistingCamera === cameraId ? "__KEEP_EXISTING__" : "");
       const roleValue = document.getElementById("camera-role").value;
       if (!cameraId || !name || !source || !roleValue) throw new Error("Camera Name, Camera ID, Camera Source and Camera Role are required.");
-      const checks = Array.from(document.querySelectorAll(".feature-card input[type=checkbox]"));
+      const securityCamera=roleValue==="GENERAL";
       const payload = {
         ...scope,
         company_code: scope.company_code || null,
@@ -503,25 +513,25 @@
         name,
         source_type: document.getElementById("source-type").value||sourceType(source),
         source,
-        camera_role: roleValue.toLowerCase() === "general" ? "GENERAL" : "ENTRANCE_EXIT",
+        camera_role: securityCamera ? "GENERAL" : "ENTRANCE_EXIT",
         camera_zone: document.getElementById("camera-zone").value.trim() || null,
         crowd_threshold: Number(document.getElementById("crowd-threshold").value || 10),
         enabled: document.getElementById("camera-id").dataset.enabled !== 'false',
         // These keys intentionally match CameraFeatures/apply_cloud_camera on the edge.
         // UI-only labels must never silently create feature names the edge ignores.
         features: {
-          attendance: !!checks[0]?.checked,
-          face_recognition: !!checks[1]?.checked,
-          unknown_detection: !!checks[3]?.checked,
+          attendance: !securityCamera,
+          face_recognition: true,
+          unknown_detection: securityCamera,
           shoplifting: false,
-          object_security: !!checks[4]?.checked
+          object_security: false
         },
         settings: {
           // Person Tracking is a runtime mode, not an unrelated detection feature.
           tracking_fps: Math.max(1, Math.round(30 / Math.max(1, Number(document.getElementById("frame-skip").value || 2)))),
           tracking_imgsz: Number(document.getElementById("max-width").value || 640),
           tracking_quality: 65,
-          tracking_mode: checks[2]?.checked ? "track" : "detect"
+          tracking_mode: "track"
         }
       };
       const response = await authFetch("/portal/v1/tenants/" + encodeURIComponent(scope.tenant_id) + "/cameras/" + encodeURIComponent(cameraId), {
@@ -552,13 +562,16 @@
       source.placeholder = "RTSP URL, video file path or webcam index";
     }
     const role = document.getElementById("camera-role");
-    if (role) role.value = "";
+    if (role) role.value = "ENTRANCE_EXIT";
+    updateCameraPurposeDescription();
   }
 
   function wireCameraPage() {
     const save = document.getElementById("save-camera-btn");
     if (!save) return;
     save.addEventListener("click", saveCamera);
+    document.getElementById("camera-role")?.addEventListener("change",updateCameraPurposeDescription);
+    updateCameraPurposeDescription();
     document.getElementById("cancel-camera-btn")?.addEventListener("click", resetCameraForm);
     document.getElementById("test-camera-btn")?.addEventListener("click", testCameraConnection);
     document.getElementById("discover-camera-btn")?.addEventListener("click", discoverOnvifCamera);
