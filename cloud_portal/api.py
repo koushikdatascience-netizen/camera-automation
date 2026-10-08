@@ -537,7 +537,7 @@ def integration_put_person_attendance_policy(tenant_id: str, shop_id: str, crm_u
         raise HTTPException(422, "Tenant, shop and CRM user ID are required")
     if not hasattr(store, "upsert_person_attendance_policy"):
         raise HTTPException(503, "Person-wise policies require PostgreSQL")
-    saved=store.upsert_person_attendance_policy(tenant_id, shop_id, crm_user_id, payload.model_dump())
+    saved=store.upsert_person_attendance_policy(tenant_id, shop_id, crm_user_id, payload.model_dump(exclude_unset=True))
     logger.info("V2_ATTENDANCE_POLICY_UPDATED tenant_id=%s shop_id=%s crm_user_id=%s version=%s",
                 tenant_id,shop_id,crm_user_id,saved.get("version"))
     return {"policy": saved}
@@ -2412,7 +2412,11 @@ def _evaluate_v2_person_absences() -> None:
     _recover_v2_auto_logout_local_finalizations(now)
     for row in store.list_v2_attendance_presence(limit=200):
         try:
-            policy_data=row["policy_json"]
+            tenant=str(row["tenant_id"]); shop=str(row["shop_id"])
+            from cloud_portal.policy_resolution import resolve_attendance_policy
+            shop_data=store.attendance_policy(tenant,shop) or {}
+            resolved=resolve_attendance_policy(row.get("policy_json"),shop_data)
+            policy_data=resolved.values
             if not policy_data.get("absenceMonitoringEnabled",True):
                 continue
             policy=PersonAttendancePolicy(
@@ -2422,10 +2426,9 @@ def _evaluate_v2_person_absences() -> None:
                 max_out_of_camera_occurrences_per_day=policy_data.get("maxOutOfCameraOccurrencesPerDay",5),
                 admin_notification_after_minutes=policy_data.get("adminNotificationAfterMinutes",15),
                 mark_absent_after_minutes=policy_data.get("markAbsentAfterMinutes",60),
-                required_working_minutes=policy_data.get("requiredWorkingMinutes",540),
+                required_working_minutes=policy_data.get("requiredWorkingMinutes",480),
                 timezone=policy_data.get("timezone","Asia/Kolkata"),
             )
-            tenant=str(row["tenant_id"]); shop=str(row["shop_id"])
             user=str(row["crm_user_id"]); seen=row["last_seen_at"]
             attendance_camera_id=row.get("last_camera_id")
             coverage_zone=row.get("last_camera_zone") or policy_data.get("attendanceCameraZone")
@@ -2487,6 +2490,7 @@ def _evaluate_v2_person_absences() -> None:
             # must be met before mutation; the CRM contract floor cannot be lowered.
             if (row.get("checked_in") and not row.get("on_break")
                     and policy_data.get("absenceMonitoringEnabled",True)
+                    and policy_data.get("absenceAutoLogoutEnabled",True)
                     and evaluation.elapsed_minutes>=max(policy.mark_absent_after_minutes,
                                                         CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES)):
                 _v2_auto_logout(row,now)
