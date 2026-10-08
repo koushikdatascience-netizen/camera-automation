@@ -97,3 +97,26 @@ def test_face_token_is_used_for_login_logout(monkeypatch):
     assert call["path"] == "/api/UserRoster/LoginLogout"
     assert call["headers"]["Authorization"] == "face-token"
     assert "expired-static-token" not in str(call)
+
+
+def test_auto_logout_uses_distinct_endpoint_and_exact_payload(monkeypatch):
+    class AutoLogoutClient(FakeClient):
+        def request(self, method, path, headers=None, **kwargs):
+            self.calls.append({"method":method,"path":path,"headers":headers or {},"kwargs":kwargs})
+            return FakeResponse({"success":True})
+
+    AutoLogoutClient.calls=[]
+    monkeypatch.setattr(httpx,"Client",AutoLogoutClient)
+    client=SnapKeyCrmClient(base_url="https://apis.snapkey.in",token="expired-static-token")
+
+    result=client.auto_logout_with_face_token(
+        "crm-user-1","AUTO_LOGOUT: absent for 60 minutes","face-token")
+
+    assert result == {"success":True}
+    call=AutoLogoutClient.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/api/UserActivity/auto-logout"
+    assert call["headers"]["Authorization"] == "face-token"
+    assert call["kwargs"]["json"] == {
+        "userId":"crm-user-1","remarks":"AUTO_LOGOUT: absent for 60 minutes"}
+    assert "expired-static-token" not in str(call)

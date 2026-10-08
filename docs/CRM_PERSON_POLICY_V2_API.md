@@ -1,10 +1,10 @@
 # CRM person-wise policy API — implementation handoff
 
-**Status:** Committed on feature branch; not deployed or integration-tested. The API stores person-wise policy values, but the existing presence/checkout worker has **not** yet been migrated to consume them. Do not enable the new 5/15/60-minute policy in production until that migration and the pending CRM absent/logout adapter are complete.
+**Status:** Implemented on the feature branch; not deployed or verified against live CRM/PostgreSQL. The worker evaluates person-wise 5/15/60-minute absence transitions. The separate CRM auto-logout remains disabled by default and requires staging contract validation. Daily report and evidence/notification limitations are documented in `CAMERA_EYE_V2_STAGING_AND_ROLLBACK.md`.
 
 Base URL (after deployment): `https://camera.snapkey.ai`
 
-Authentication: server-to-server header `X-CRM-Integration-Key: <secret>`. Never expose the integration key in browser JavaScript. Route calls through CRM backend. Tenant/shop/user path values must be derived from authenticated CRM context, not untrusted browser input.
+Authentication: server-to-server header `X-CRM-Integration-Key: <secret>`. Never expose the integration key in browser JavaScript. In production, also configure `SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES`; each tenant/shop path must match this server allow-list. Route calls through CRM backend. Tenant/shop/user path values must be derived from authenticated CRM context, not untrusted browser input.
 
 ## Save or update policy
 
@@ -47,10 +47,10 @@ This pre-existing route lists attendance activity for a single CRM user on a bus
 
 ## Outstanding before CRM frontend rollout
 
-- Presence worker migration to person policies, episode persistence, two-minute summaries and deduplicated 5/15/60 thresholds.
-- Alert read endpoints, attendance summary, evidence manifests and authorized media URLs.
-- Authorization hardening: integration key alone does not currently prove tenant/shop entitlement; scope key to permitted tenants before broad rollout.
-- Evidence capture completeness and notification delivery verification.
-- Day-end calculation and exact gross/net paid break rules.
-- CRM absent/auto-logout endpoint supplied by senior; stage adapter and idempotent retries.
+- End-to-end worker checks under PostgreSQL for delayed heartbeats, camera-specific coverage, concurrency, and full-day policy boundaries.
+- Signed/authenticated media delivery and evidence capture completeness; V2 currently returns only a scoped manifest.
+- Per-person notification preferences, durable outbox/retry/dedup/rate limits, and delivery status; current sends are shop-wide and synchronous.
+- Approved payroll policy for absence deduction and paid/unpaid break treatment.
+- Staging verification of the CRM response contract and reconciliation path. Ambiguous auto-logout results are not blindly retried.
+- Backup/restore and previous-schema upgrade verification on PostgreSQL; SQLite tests do not establish migration readiness.
 - PostgreSQL migration, automated tests and staging rollout.

@@ -70,3 +70,19 @@ def test_timezone_required():
         evaluate_absence(P, now=NOW.replace(tzinfo=None), last_seen_at=NOW,
                          checked_in=True, on_break=False, camera_coverage_healthy=True,
                          completed_episodes_today=0)
+
+
+def test_reappearance_resets_absence_elapsed_time():
+    result = evaluate_absence(P, now=NOW, last_seen_at=NOW-timedelta(seconds=30),
+                              checked_in=True, on_break=False, camera_coverage_healthy=True,
+                              completed_episodes_today=2)
+    assert result.state == "PRESENT_OR_GRACE"
+    assert result.transitions == ()
+
+
+def test_business_date_uses_employee_timezone_at_utc_midnight_boundary():
+    local_next_day = datetime(2026, 10, 7, 19, 0, tzinfo=timezone.utc)
+    result = evaluate_absence(P, now=local_next_day, last_seen_at=local_next_day-timedelta(minutes=20),
+                              checked_in=True, on_break=False, camera_coverage_healthy=True,
+                              completed_episodes_today=0)
+    assert result.business_date == "2026-10-08"

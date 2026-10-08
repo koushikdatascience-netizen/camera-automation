@@ -638,11 +638,9 @@ class PostgresPortalStore:
                 SET status='IN_FLIGHT',attempts=attempts+1,claimed_at=:now
                 WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
                 AND absence_started_at=:started
-                AND (status='PENDING' OR (status='IN_FLIGHT' AND claimed_at<:stale))
-                AND attempts<5 RETURNING status"""),{
+                AND status='PENDING' AND attempts=0 RETURNING status"""),{
                     "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
-                    "started":absence_started_at,"now":now,
-                    "stale":now-timedelta(minutes=10)}).first()
+                    "started":absence_started_at,"now":now}).first()
         return row is not None
 
     def complete_crm_auto_logout(self, tenant_id: str, shop_id: str, crm_user_id: str,
@@ -935,6 +933,7 @@ class PostgresPortalStore:
                     "now":self.now(),"tenant":tenant_id,"shop":shop_id,"person":local_person_id})
 
     def attendance_camera_coverage_healthy(self, tenant_id: str, shop_id: str, now: datetime,
+                                           camera_id: str | None = None,
                                            heartbeat_max_age_seconds: int = 60) -> bool:
         with self._conn() as conn:
             rows=conn.execute(text("""SELECT h.received_at,h.status_json
@@ -949,6 +948,8 @@ class PostgresPortalStore:
                 continue
             status=row["status_json"] if isinstance(row["status_json"],dict) else json.loads(row["status_json"])
             for camera in status.get("cameras") or []:
+                if (camera_id is not None and str(camera.get("camera_id") or "") != camera_id):
+                    continue
                 if str(camera.get("camera_role") or "").upper()=="ENTRANCE_EXIT" and bool(camera.get("enabled")) and bool(camera.get("online")):
                     return True
         return False

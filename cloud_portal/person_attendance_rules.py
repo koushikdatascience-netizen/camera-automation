@@ -1,8 +1,7 @@
-"""Person-wise attendance rule evaluation. Pure domain logic; no CRM side effects.
+"""Person-wise attendance rule evaluation with no direct CRM side effects.
 
-This module deliberately does NOT call the pending CRM absent/auto-logout endpoint.
-It is safe to integrate into the presence worker once persistence and API migration
-are completed. Every emitted transition must be deduplicated by (episode_id, kind).
+The cloud worker persists and acts on emitted transitions. Every transition must
+be deduplicated by (episode_id, kind) before any external action is attempted.
 """
 from __future__ import annotations
 

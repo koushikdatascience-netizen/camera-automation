@@ -1,6 +1,6 @@
-# Camera Eye — Person-wise Attendance and CRM Integration Contract (Draft v2)
+# Camera Eye — Person-wise Attendance and CRM Integration Contract (V2)
 
-Status: **design / implementation handoff; NOT deployed or verified endpoints**. CRM absent/auto-logout upstream endpoint and payload are pending from senior. This document must be updated with verified routes and responses after implementation. Existing CRM operations must remain backward-compatible.
+Status: **implemented in the feature branch; not deployed or verified against live CRM/PostgreSQL**. Existing V1 CRM operations remain available. Production release is blocked on scoped integration configuration, staging validation, external response-contract verification, evidence delivery, and notification outbox work. `CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED` must remain `false`.
 
 ## Business rules
 
@@ -12,13 +12,13 @@ Policy scope: (tenantCode, shopCode, crmUserId), never just shop. Authorized adm
 - After **5 minutes** without detection in the agreed coverage area: open one absence episode and create GRACE_EXCEEDED alert. Do not call logout.
 - Count at most one episode per continuous absence; after **more than five** qualifying episodes in the employee's business day, create DAILY_ABSENCE_LIMIT_EXCEEDED alert (dedup once per threshold crossing).
 - After **15 minutes**: notify authorized admins by configured email/WhatsApp, with retry/delivery status and idempotency. No repeated messages on every heartbeat.
-- After **60 minutes**: mark a prolonged-absence state, create PROLONGED_ABSENCE alert, and queue CRM ABSENT/AUTO_LOGOUT mutation pending its official contract. **Do not invoke existing logout API as a substitute**. Until contract is implemented, keep external mutation PENDING and do not claim CRM checkout success.
+- After **60 minutes**: mark a prolonged-absence state, create PROLONGED_ABSENCE alert, and—only when explicitly feature-enabled—call the separate `/api/UserActivity/auto-logout` contract. This is not interchangeable with `/api/UserRoster/LoginLogout`. Ambiguous failures require CRM reconciliation and are never blindly retried.
 - Working target **540 minutes**. Report gross span, explicit breaks, qualifying absence, net worked time, shortfall/overtime separately. Paid/unpaid break rules need approval.
-- Day-end auto calculation/closure: pending decision on shift end/cutoff, time zone, overnight shifts, and shared CRM absent/logout API semantics. Do not silently close sessions at midnight.
+- Daily reports clip intervals to the employee's local business date, include preceding-day activity for overnight shifts, and count an open shift provisionally through now. No session is silently closed at midnight.
 - Times stored UTC with timezone-aware values; group and display by employee policy's IANA timezone (default Asia/Kolkata). CRM date/time payload must be converted to business-local time.
 - Reappearance after 60-minute absence: record RETURNED event, do not invent new login or reopen closed CRM session without a defined re-entry policy.
 
-## Proposed policy API (NOT YET IMPLEMENTED)
+## Implemented person-wise policy API
 
 `PUT /portal/v1/attendance/policies/{crmUserId}`
 `GET /portal/v1/attendance/policies/{crmUserId}?tenantCode=...&shopCode=...`
@@ -46,17 +46,16 @@ Policy scope: (tenantCode, shopCode, crmUserId), never just shop. Authorized adm
 
 Validate ordered thresholds grace < notification < absent, integer bounds, timezone, shop membership, and authenticated admin scope. Resolve policy per employee; do not fall back to a shared shop policy without an explicit versioned fallback rule.
 
-## Proposed CRM-facing read APIs (NOT YET IMPLEMENTED)
+## Implemented CRM-facing read APIs (feature branch; not production validated)
 
-- `GET /portal/v1/attendance/summary?tenantCode=&shopCode=&date=&page=&pageSize=` — daily employee rows, computed minutes, status, evidenceCount, alertCount.
-- `GET /portal/v1/attendance/activities?tenantCode=&shopCode=&userId=&from=&to=&type=&page=&pageSize=` — immutable CHECK_IN, CHECK_OUT, BREAK_START, BREAK_END, ABSENCE_STARTED, RETURNED, ABSENT_MARKED, AUTO_LOGOUT_PENDING/COMPLETED events.
-- `GET /portal/v1/attendance/presence?tenantCode=&shopCode=&userId=` — lastSeenAt, camera, health, state, episode start, next threshold.
-- `GET /portal/v1/attendance/alerts?tenantCode=&shopCode=&userId=&severity=&status=&from=&to=&page=&pageSize=` — searchable alerts, read/acknowledged/resolved, notification delivery.
-- `GET /portal/v1/attendance/alerts/{alertId}` — incident timeline and evidence refs.
-- `GET /portal/v1/attendance/activities/{activityId}/evidence` — evidence manifest with three images and short clip where captured, explicit missing reason otherwise. Return short-lived authorized media URLs, never raw filesystem paths.
-- `GET /portal/v1/attendance/reports/daily?tenantCode=&shopCode=&date=` — gross/net/break/absence/required/shortfall/overtime; policy version used.
+- `PUT/GET /integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/policy` — versioned policy.
+- `GET .../activities?day=&page=&page_size=` — paged per-person activity.
+- `GET .../presence` — current stored presence; response explicitly says camera coverage is not evaluated by this read.
+- `GET .../daily-summary?day=` — timezone/day-clipped duration report; absence payroll treatment remains unapplied.
+- `GET .../activities/{activity_id}/evidence` — manifest-only response; media access is not implemented.
+- `GET .../alerts?day=&limit=` — absence threshold alerts; notification delivery status is not implemented.
 
-These are proposed contracts, not claims of existing API routes. Publish OpenAPI schemas with request/response examples and exact auth rules once code exists.
+All routes require the server-side `X-CRM-Integration-Key`. In production, configure `SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES` as a JSON list of tenant IDs and permitted shop IDs. Never expose the integration key in browser JavaScript. The current evidence and notification responses state their incomplete status rather than implying media/delivery exists.
 
 ## Suggested response envelope
 

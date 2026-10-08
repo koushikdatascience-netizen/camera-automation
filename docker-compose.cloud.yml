@@ -28,6 +28,8 @@ services:
       SNAPKEY_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-snapkey}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-snapkey_vision}
       SNAPKEY_EDGE_API_TOKEN: ${SNAPKEY_EDGE_API_TOKEN:-}
       SNAPKEY_CRM_INTEGRATION_KEY: ${SNAPKEY_CRM_INTEGRATION_KEY:?set SNAPKEY_CRM_INTEGRATION_KEY}
+      # JSON allow-list, for example: [{"tenant_id":"tenant-a","shop_ids":["shop-1"]}]
+      SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES: ${SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES:?set CRM tenant/shop scopes}
       SNAPKEY_CRM_API_BASE_URL: ${SNAPKEY_CRM_API_BASE_URL:-https://apis.snapkey.in}
       SNAPKEY_CRM_API_TOKEN: ${SNAPKEY_CRM_API_TOKEN:-}
       # Automatic camera attendance posts the current face crop to the CRM
@@ -36,6 +38,9 @@ services:
       # Auto-logout stays disabled until its business rule is explicitly confirmed.
       SNAPKEY_CRM_AUTO_LOGIN_ENABLED: ${SNAPKEY_CRM_AUTO_LOGIN_ENABLED:-1}
       SNAPKEY_CRM_AUTO_LOGOUT_ENABLED: ${SNAPKEY_CRM_AUTO_LOGOUT_ENABLED:-0}
+      # V2 uses a different CRM endpoint; keep off until staging contract approval.
+      CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED: ${CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED:-false}
+      CAMERA_EYE_TOKEN_ENCRYPTION_KEY: ${CAMERA_EYE_TOKEN_ENCRYPTION_KEY:-}
       SNAPKEY_PUBLIC_BASE_URL: ${SNAPKEY_PUBLIC_BASE_URL:-https://camera.snapkey.ai}
       SNAPKEY_LIVEKIT_URL: ${SNAPKEY_LIVEKIT_URL:-wss://livekit.snapkeystudio.com}
       SNAPKEY_LIVEKIT_API_KEY: ${SNAPKEY_LIVEKIT_API_KEY:-}

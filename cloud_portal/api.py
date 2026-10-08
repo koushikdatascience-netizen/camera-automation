@@ -475,14 +475,38 @@ def create_edge_activation_code(tenant_id: str, payload: EdgeActivationCodeReque
     return {"activationCode": code, "expiresAt": expires.isoformat(), "shopCode": principal.shop_id}
 
 
-def _require_crm_integration(request: Request) -> None:
+def _require_crm_integration(request: Request, tenant_id: str, shop_id: str) -> None:
     if not _crm_integration_key_valid(request.headers.get("X-CRM-Integration-Key")):
         raise HTTPException(401, "Invalid CRM integration key")
+    configured=os.getenv("SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES","").strip()
+    if not configured:
+        # Preserve local developer fixtures, but never permit an unscoped key in
+        # production. Scope config is an allow-list attached to the server key.
+        if os.getenv("SNAPKEY_ENV","").lower()=="production":
+            raise HTTPException(503,"CRM integration tenant/shop scopes are not configured")
+        return
+    try:
+        scopes=json.loads(configured)
+    except ValueError as exc:
+        raise HTTPException(503,"CRM integration scope configuration is invalid") from exc
+    if not isinstance(scopes,list):
+        raise HTTPException(503,"CRM integration scope configuration must be a JSON list")
+    allowed=any(
+        isinstance(item,dict)
+        and str(item.get("tenant_id") or "")==tenant_id
+        and shop_id in [str(value) for value in (item.get("shop_ids") or [])]
+        for item in scopes
+    )
+    if not allowed:
+        logger.warning("CRM_INTEGRATION_SCOPE_DENIED tenant_id=%s shop_id=%s",tenant_id,shop_id)
+        raise HTTPException(403,"CRM integration key is not authorized for this tenant/shop")
+    logger.info("CRM_INTEGRATION_ACCESS tenant_id=%s shop_id=%s method=%s path=%s",
+                tenant_id,shop_id,request.method,request.url.path)
 
 
 @app.put("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance-policy")
 def integration_put_attendance_policy(tenant_id: str, shop_id: str, payload: AttendancePolicyRequest, request: Request):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     try:
         ZoneInfo(payload.timezone)
     except Exception as exc:
@@ -499,7 +523,7 @@ def integration_put_attendance_policy(tenant_id: str, shop_id: str, payload: Att
 
 @app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance-policy")
 def integration_get_attendance_policy(tenant_id: str, shop_id: str, request: Request):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     return {"policy":store.attendance_policy(tenant_id,shop_id)}
 
 
@@ -507,7 +531,7 @@ def integration_get_attendance_policy(tenant_id: str, shop_id: str, request: Req
 @app.put("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/policy")
 def integration_put_person_attendance_policy(tenant_id: str, shop_id: str, crm_user_id: str,
                                              payload: PersonAttendancePolicyRequest, request: Request):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     from cloud_portal.person_attendance_rules import PersonAttendancePolicy
     try:
         PersonAttendancePolicy(
@@ -527,12 +551,14 @@ def integration_put_person_attendance_policy(tenant_id: str, shop_id: str, crm_u
     if not hasattr(store, "upsert_person_attendance_policy"):
         raise HTTPException(503, "Person-wise policies require PostgreSQL")
     saved=store.upsert_person_attendance_policy(tenant_id, shop_id, crm_user_id, payload.model_dump())
+    logger.info("V2_ATTENDANCE_POLICY_UPDATED tenant_id=%s shop_id=%s crm_user_id=%s version=%s",
+                tenant_id,shop_id,crm_user_id,saved.get("version"))
     return {"policy": saved}
 
 
 @app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/policy")
 def integration_get_person_attendance_policy(tenant_id: str, shop_id: str, crm_user_id: str, request: Request):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     if not hasattr(store, "person_attendance_policy"):
         raise HTTPException(503, "Person-wise policies require PostgreSQL")
     saved=store.person_attendance_policy(tenant_id, shop_id, crm_user_id)
@@ -552,7 +578,7 @@ def _attendance_day_window(day: date, timezone_name: str) -> tuple[datetime, dat
 def integration_person_attendance_activities(tenant_id: str, shop_id: str, crm_user_id: str,
                                              request: Request, day: date,
                                              page: int = 1, page_size: int = 50):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     if page < 1 or not 1 <= page_size <= 200:
         raise HTTPException(422, "Invalid pagination")
     policy=store.person_attendance_policy(tenant_id,shop_id,crm_user_id)
@@ -566,7 +592,7 @@ def integration_person_attendance_activities(tenant_id: str, shop_id: str, crm_u
 @app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/presence")
 def integration_person_attendance_presence(tenant_id: str, shop_id: str, crm_user_id: str,
                                            request: Request):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     presence=store.get_person_attendance_presence(tenant_id,shop_id,crm_user_id)
     if presence is None:
         raise HTTPException(404,"No presence record")
@@ -577,22 +603,26 @@ def integration_person_attendance_presence(tenant_id: str, shop_id: str, crm_use
 @app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/daily-summary")
 def integration_person_attendance_summary(tenant_id: str, shop_id: str, crm_user_id: str,
                                           request: Request, day: date):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     from cloud_portal.working_time import calculate_working_time
     policy=store.person_attendance_policy(tenant_id,shop_id,crm_user_id)
     zone=(policy or {}).get("timezone") or "Asia/Kolkata"
     start,end=_attendance_day_window(day,zone)
-    activities=store.list_attendance_activity(tenant_id,shop_id,crm_user_id,start,end)
+    # Fetch the prior day as well so a shift begun before local midnight can
+    # contribute its portion of the requested business day.
+    activities=store.list_attendance_activity(tenant_id,shop_id,crm_user_id,
+                                               start-timedelta(days=1),end)
     required=int((policy or {}).get("requiredWorkingMinutes",540))
     return {"userId":crm_user_id,"date":day.isoformat(),"timezone":zone,
-            "summary":calculate_working_time(activities,required_minutes=required),
-            "note":"Provisional: open sessions, cross-day sessions and absence payroll treatment require reconciliation"}
+            "summary":calculate_working_time(activities,required_minutes=required,day=day,
+                                               timezone_name=zone),
+            "note":"Open sessions are provisional; absence and paid-break treatment is not deducted without approved payroll policy"}
 
 
 @app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/activities/{activity_id}/evidence")
 def integration_person_attendance_evidence(tenant_id: str, shop_id: str, crm_user_id: str,
                                            activity_id: str, request: Request):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     activity=store.get_person_attendance_activity(tenant_id,shop_id,crm_user_id,activity_id)
     if activity is None:
         raise HTTPException(404,"Attendance activity not found")
@@ -607,7 +637,7 @@ def integration_person_attendance_evidence(tenant_id: str, shop_id: str, crm_use
 @app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/alerts")
 def integration_person_attendance_alerts(tenant_id: str, shop_id: str, crm_user_id: str,
                                          request: Request, day: date, limit: int = 100):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     if not 1 <= limit <= 200:
         raise HTTPException(422,"Invalid limit")
     if not hasattr(store,"list_v2_absence_alerts"):
@@ -618,7 +648,7 @@ def integration_person_attendance_alerts(tenant_id: str, shop_id: str, crm_user_
 
 @app.get("/integration/v1/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/daily-activity")
 def integration_daily_activity(tenant_id: str, shop_id: str, crm_user_id: str, day: date, request: Request):
-    _require_crm_integration(request)
+    _require_crm_integration(request,tenant_id,shop_id)
     raw_policy=store.attendance_policy(tenant_id,shop_id)
     zone=ZoneInfo(str(raw_policy.get("timezone") or "Asia/Kolkata"))
     start=datetime.combine(day,time.min,tzinfo=zone).astimezone(timezone.utc)
@@ -957,6 +987,12 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
     mapping=store.crm_person_mapping(tenant_id,shop_id,local_person_id)
     if not mapping:
         return
+    if event_type in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT"} and hasattr(store,"person_attendance_policy"):
+        person_policy=store.person_attendance_policy(tenant_id,shop_id,str(mapping["crm_user_id"]))
+        if person_policy and str(person_policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
+            logger.info("CRM_ATTENDANCE_EVENT_SKIPPED person_id=%s event_type=%s reason=manual_mode",
+                        local_person_id,event_type)
+            return
     event_time=datetime.fromisoformat(str(envelope["event_time"]).replace("Z","+00:00"))
     if event_time.tzinfo is None:
         event_time=event_time.replace(tzinfo=timezone.utc)
@@ -1198,6 +1234,11 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
             crm_user_id=str(mapping["crm_user_id"]),seen_at=when,camera_id=camera_id,
             recognition_event_id=event_id,checked_in=None,
         )
+    if hasattr(store,"person_attendance_policy"):
+        person_policy=store.person_attendance_policy(tenant_id,shop_id,str(mapping["crm_user_id"]))
+        if person_policy and str(person_policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
+            logger.info("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s reason=manual_mode",event_id,person_id)
+            return
     # This is duplicate protection, not a recognition debounce: the first valid
     # recognition is sent to CRM immediately, then further successful logins for
     # the same person/day are suppressed.
@@ -1979,7 +2020,9 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
     tenant_id=str(presence["tenant_id"]); shop_id=str(presence["shop_id"])
     person_id=str(presence["local_person_id"]); crm_user_id=str(presence["crm_user_id"])
     try:
-        if require_camera_health and not store.attendance_camera_coverage_healthy(tenant_id,shop_id,now):
+        attendance_camera_id=presence.get("last_camera_id")
+        if require_camera_health and (not attendance_camera_id or not store.attendance_camera_coverage_healthy(
+                tenant_id,shop_id,now,camera_id=attendance_camera_id)):
             logger.warning("AUTO_CHECKOUT_DEFERRED tenant_id=%s shop_id=%s person_id=%s reason=camera_coverage_unhealthy",
                            tenant_id,shop_id,person_id)
             store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
@@ -2047,9 +2090,17 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
     """Feature gated: must not execute external attendance mutations by default."""
     if os.getenv("CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED","false").lower()!="true":
         return
+    policy=row.get("policy_json") or {}
+    if str(policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
+        return
     tenant=str(row["tenant_id"]);shop=str(row["shop_id"]);user=str(row["crm_user_id"])
     started=row["last_seen_at"]
-    if not store.attendance_camera_coverage_healthy(tenant,shop,now):
+    # This endpoint is contractually reserved for a full 60-minute absence.
+    if (now-started).total_seconds() < 60*60:
+        return
+    attendance_camera_id=row.get("last_camera_id")
+    if not attendance_camera_id or not store.attendance_camera_coverage_healthy(
+            tenant,shop,now,camera_id=attendance_camera_id):
         return
     if not store.claim_crm_auto_logout(tenant,shop,user,started):
         return
@@ -2103,7 +2154,9 @@ def _evaluate_v2_person_absences() -> None:
             )
             tenant=str(row["tenant_id"]); shop=str(row["shop_id"])
             user=str(row["crm_user_id"]); seen=row["last_seen_at"]
-            if not store.attendance_camera_coverage_healthy(tenant,shop,now):
+            attendance_camera_id=row.get("last_camera_id")
+            if not attendance_camera_id or not store.attendance_camera_coverage_healthy(
+                    tenant,shop,now,camera_id=attendance_camera_id):
                 continue
             from zoneinfo import ZoneInfo as _ZoneInfo
             business_day=now.astimezone(_ZoneInfo(policy.timezone)).date().isoformat()
