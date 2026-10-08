@@ -118,6 +118,19 @@ class PostgresPortalStore:
                 whatsapp_recipients_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                 updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY(tenant_id,shop_id))""",
+            """CREATE TABLE IF NOT EXISTS crm_face_tokens(
+                tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,
+                encrypted_token TEXT NOT NULL,expires_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(tenant_id,shop_id,crm_user_id))""",
+            """CREATE TABLE IF NOT EXISTS crm_auto_logout_actions(
+                tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,
+                absence_started_at TIMESTAMPTZ NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ,
+                last_error TEXT,
+                PRIMARY KEY(tenant_id,shop_id,crm_user_id,absence_started_at))""",
             """CREATE TABLE IF NOT EXISTS person_attendance_transitions(
                 tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, crm_user_id TEXT NOT NULL,
                 business_date TEXT NOT NULL, absence_started_at TIMESTAMPTZ NOT NULL,
@@ -589,6 +602,61 @@ class PostgresPortalStore:
 
 
 
+
+
+    def save_crm_face_token(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                            encrypted_token: str, expires_at: datetime) -> None:
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO crm_face_tokens
+                (tenant_id,shop_id,crm_user_id,encrypted_token,expires_at,updated_at)
+                VALUES(:tenant,:shop,:user,:token,:expires,:now)
+                ON CONFLICT(tenant_id,shop_id,crm_user_id) DO UPDATE SET
+                encrypted_token=EXCLUDED.encrypted_token,
+                expires_at=EXCLUDED.expires_at,updated_at=EXCLUDED.updated_at"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "token":encrypted_token,"expires":expires_at,"now":self.now()})
+
+    def get_crm_face_token(self, tenant_id: str, shop_id: str,
+                           crm_user_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT encrypted_token,expires_at FROM crm_face_tokens
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id}).mappings().first()
+        return dict(row) if row else None
+
+    def claim_crm_auto_logout(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                              absence_started_at: datetime) -> bool:
+        now=self.now()
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO crm_auto_logout_actions
+                (tenant_id,shop_id,crm_user_id,absence_started_at,status)
+                VALUES(:tenant,:shop,:user,:started,'PENDING')
+                ON CONFLICT DO NOTHING"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "started":absence_started_at})
+            row=conn.execute(text("""UPDATE crm_auto_logout_actions
+                SET status='IN_FLIGHT',attempts=attempts+1,claimed_at=:now
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                AND absence_started_at=:started
+                AND (status='PENDING' OR (status='IN_FLIGHT' AND claimed_at<:stale))
+                AND attempts<5 RETURNING status"""),{
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
+                    "started":absence_started_at,"now":now,
+                    "stale":now-timedelta(minutes=10)}).first()
+        return row is not None
+
+    def complete_crm_auto_logout(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                                 absence_started_at: datetime, success: bool,
+                                 error: str = "") -> None:
+        with self._conn() as conn:
+            conn.execute(text("""UPDATE crm_auto_logout_actions
+                SET status=:status,completed_at=:completed,last_error=:error
+                WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                AND absence_started_at=:started AND status='IN_FLIGHT'"""),{
+                    "status":"SUCCEEDED" if success else "PENDING",
+                    "completed":self.now() if success else None,
+                    "error":error[:200],"tenant":tenant_id,"shop":shop_id,
+                    "user":crm_user_id,"started":absence_started_at})
 
     def list_v2_attendance_presence(self, limit: int = 200) -> list[dict[str, Any]]:
         with self._conn() as conn:
