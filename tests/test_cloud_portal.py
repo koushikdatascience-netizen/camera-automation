@@ -142,7 +142,7 @@ def test_crm_attendance_deployed_payload_and_logout_opt_in(tmp_path, monkeypatch
  })
  calls=[]
  monkeypatch.setattr(api.crm_client,'token','test-token')
- monkeypatch.setattr(api,'_crm_face_login_token_for_user',lambda *_args:('tenant-uuid','face-token'))
+ monkeypatch.setattr(api,'_crm_face_token',lambda *_args:'face-token')
  monkeypatch.setattr(api.crm_client,'login_logout_with_face_token',
                      lambda payload,token: calls.append((payload,token)) or {'ok':True})
  base={'schema_version':'edge.event.v1','tenant_id':'tenant-a','shop_id':'shop1','site_id':'site-1',

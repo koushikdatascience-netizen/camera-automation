@@ -106,13 +106,6 @@ class SnapKeyCrmClient:
             return True
         return False
 
-    @staticmethod
-    def _safe_message(result: Any) -> str:
-        if not isinstance(result,dict):
-            return ""
-        value=str(result.get("message") or result.get("status") or "").strip()
-        return value[:240]
-
     def _request(self, method: str, path: str, *, operation: str,
                  auth_token: str | None = None, service_token: str | None = None,
                  tenant_code: str | None = None,
@@ -175,20 +168,16 @@ class SnapKeyCrmClient:
                              auth_token=auth_token,service_token=service_token,
                              tenant_code=tenant_code,user_id=user_id)
 
-    def start_break(self, user_id: str, break_master_id: str, auth_token: str | None = None,
-                    tenant_code: str | None = None) -> Any:
-        service_token=(self.service_token_for_tenant(tenant_code)
-                       if tenant_code and not auth_token else None)
+    def start_break(self, user_id: str, break_master_id: str, auth_token: str) -> Any:
+        self._token_headers(auth_token)  # Reject empty employee credentials; no service-token fallback.
         return self._request("POST","/api/UserBreak/start-break",operation="start_break",
-            auth_token=auth_token,service_token=service_token,tenant_code=tenant_code,user_id=user_id,
+            auth_token=auth_token,user_id=user_id,
             json={"userId":user_id,"breakMasterId":break_master_id})
 
-    def end_break(self, user_id: str, auth_token: str | None = None,
-                  tenant_code: str | None = None) -> Any:
-        service_token=(self.service_token_for_tenant(tenant_code)
-                       if tenant_code and not auth_token else None)
+    def end_break(self, user_id: str, auth_token: str) -> Any:
+        self._token_headers(auth_token)
         return self._request("POST","/api/UserBreak/end-break",operation="end_break",
-            auth_token=auth_token,service_token=service_token,tenant_code=tenant_code,
+            auth_token=auth_token,
             user_id=user_id,params={"userId":user_id})
 
     def face_embeddings(self, tenant_code: str, *, force_refresh: bool = False) -> Any:
@@ -266,9 +255,9 @@ class SnapKeyCrmClient:
             return {"ok":True,"text":response.text[:1000]}
         crm_user=result.get("user") if isinstance(result,dict) and isinstance(result.get("user"),dict) else {}
         logger.info(
-            "CRM_FACE_AUTH_RESULT tenant_id=%s success=%s crm_user_id=%s token_present=%s message=%s",
+            "CRM_FACE_AUTH_RESULT tenant_id=%s success=%s crm_user_id=%s token_present=%s",
             crm_tenant_id,self.business_success(result),str(crm_user.get("id") or "-"),
-            bool(isinstance(result,dict) and result.get("token")),self._safe_message(result),
+            bool(isinstance(result,dict) and result.get("token")),
         )
         return result
 
@@ -292,6 +281,7 @@ class SnapKeyCrmClient:
                              tenant_code=tenant_code,user_id=user_id,json=payload)
 
     def login_logout_with_face_token(self, payload: dict[str,Any], face_token: str) -> Any:
+        self._token_headers(face_token)
         user_id=str(payload.get("userId") or "").strip()
         action="check_in" if "actualStartTime" in payload else ("check_out" if "actualOffTime" in payload else "unknown")
         logger.info(
@@ -302,14 +292,15 @@ class SnapKeyCrmClient:
         result=self._request("POST","/api/UserRoster/LoginLogout",operation="login_logout_"+action,
                              auth_token=face_token,user_id=user_id,json=payload)
         logger.info(
-            "CRM_ATTENDANCE_RESULT action=%s user_id=%s success=%s message=%s",
-            action,user_id,self.business_success(result),self._safe_message(result),
+            "CRM_ATTENDANCE_RESULT action=%s user_id=%s success=%s",
+            action,user_id,self.business_success(result),
         )
         return result
 
 
     def auto_logout_with_face_token(self, user_id: str, remarks: str, face_token: str) -> Any:
         """CRM's confirmed auto-logout endpoint. Do not log or persist the token here."""
+        self._token_headers(face_token)
         uid=(user_id or "").strip()
         reason=(remarks or "").strip()
         if not uid or not reason:
@@ -317,8 +308,8 @@ class SnapKeyCrmClient:
         result=self._request("POST","/api/UserActivity/auto-logout",
                              operation="auto_logout",auth_token=face_token,
                              user_id=uid,json={"userId":uid,"remarks":reason})
-        logger.info("CRM_AUTO_LOGOUT_RESULT user_id=%s success=%s message=%s",
-                    uid,self.business_success(result),self._safe_message(result))
+        logger.info("CRM_AUTO_LOGOUT_RESULT user_id=%s success=%s",
+                    uid,self.business_success(result))
         return result
 
 

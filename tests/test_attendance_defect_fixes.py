@@ -30,7 +30,7 @@ def test_manual_successful_checkin_updates_presence_for_absence_monitoring(monke
     monkeypatch.setattr(api,"_portal_scope",lambda *_args:None)
     monkeypatch.setattr(api,"_portal_camera_lookup",lambda *_args:{"camera_role":"ENTRANCE_EXIT","camera_zone":"inside"})
     monkeypatch.setattr(api,"_crm_tenant_uuid_for_user",lambda *_args:"crm-tenant")
-    monkeypatch.setattr(api,"_recognition_image_base64",lambda *_args:"ZmFrZQ==")
+    monkeypatch.setattr(api,"_crm_face_token",lambda *_args,**_kwargs:"temporary")
     monkeypatch.setattr(api,"_crm_face_login_succeeded",lambda _result:True)
     monkeypatch.setattr(api,"_crm_mutation_succeeded",lambda _result:True)
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(face_attendance_configured=True,
@@ -163,7 +163,8 @@ def test_same_day_reentry_is_allowed_after_presence_was_checked_out(monkeypatch)
 
     monkeypatch.setattr(api,"store",Store())
     monkeypatch.setattr(api,"_portal_camera_lookup",lambda *_args:{"camera_role":"ENTRANCE_EXIT","camera_zone":"inside"})
-    monkeypatch.setattr(api,"_crm_face_login_identity",lambda *_args:("crm-tenant","enrolled-image"))
+    monkeypatch.setattr(api,"_crm_tenant_uuid_for_user",lambda *_args:"crm-tenant")
+    monkeypatch.setattr(api,"_crm_face_token",lambda *_args:"temporary")
     monkeypatch.setattr(api,"_crm_face_login_succeeded",lambda _result:True)
     monkeypatch.setattr(api,"_crm_mutation_succeeded",lambda _result:True)
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(face_attendance_configured=True,
@@ -261,7 +262,7 @@ def test_confirmed_crm_logout_recovers_local_commit_without_resubmission(monkeyp
 
     monkeypatch.setenv("CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED","true")
     monkeypatch.setattr(api,"store",Store())
-    monkeypatch.setattr(api,"_v2_face_token",lambda *_args:"mock-face-token")
+    monkeypatch.setattr(api,"_crm_face_token",lambda *_args:"mock-face-token")
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(auto_logout_with_face_token=lambda *_args:
         calls.append("crm") or {"success":True}))
     monkeypatch.setattr(api,"_crm_mutation_succeeded",lambda _result:True)
@@ -577,21 +578,6 @@ def test_crm_service_token_scope_rejects_user_outside_verified_tenant_intersecti
         api._assert_crm_service_token_scope("tenant-code","employee-c")
 
 
-def test_face_login_token_is_bound_to_directory_user_and_tenant(monkeypatch):
-    calls=[]
-    monkeypatch.setattr(api,"_crm_face_login_identity",lambda tenant,user:
-                        ("crm-tenant-uuid","redacted-enrolled-image"))
-    monkeypatch.setattr(api,"_crm_face_login_succeeded",lambda result:result.get("success") is True)
-    monkeypatch.setattr(api,"crm_client",SimpleNamespace(login_using_face_tenant=lambda image,tenant:
-        calls.append((image,tenant)) or {"success":True,"token":"user-token",
-                                         "user":{"id":"employee-a","tenantId":tenant}}))
-
-    tenant,token=api._crm_face_login_token_for_user("tenant-code","employee-a")
-
-    assert calls==[("redacted-enrolled-image","crm-tenant-uuid")]
-    assert (tenant,token)==("crm-tenant-uuid","user-token")
-
-
 def test_legacy_checkout_uses_verified_employee_face_token(monkeypatch):
     calls=[]
     class Store:
@@ -603,8 +589,8 @@ def test_legacy_checkout_uses_verified_employee_face_token(monkeypatch):
 
     monkeypatch.setenv("SNAPKEY_CRM_AUTO_LOGOUT_ENABLED","1")
     monkeypatch.setattr(api,"store",Store())
-    monkeypatch.setattr(api,"_crm_face_login_token_for_user",
-                        lambda tenant,user:("crm-tenant-uuid","employee-face-token"))
+    monkeypatch.setattr(api,"_crm_face_token",
+                        lambda tenant,shop,user:"employee-face-token")
     monkeypatch.setattr(api,"_evidence_manifest_for_last_recognition",lambda *_args:{"status":"UNAVAILABLE"})
     monkeypatch.setattr(api,"_notify_cloud_event",lambda _event:None)
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(
@@ -643,7 +629,7 @@ def test_v2_auto_logout_invalidates_token_on_401_without_retry(monkeypatch):
         raise error
     monkeypatch.setenv("CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED","true")
     monkeypatch.setattr(api,"store",Store())
-    monkeypatch.setattr(api,"_v2_face_token",lambda *_args:"revoked-face-token")
+    monkeypatch.setattr(api,"_crm_face_token",lambda *_args:"revoked-face-token")
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(auto_logout_with_face_token=rejected))
     row={"tenant_id":"tenant","shop_id":"shop","crm_user_id":"employee-a",
          "local_person_id":"person","checked_in":True,"on_break":False,
@@ -659,7 +645,7 @@ def test_v2_auto_logout_invalidates_token_on_401_without_retry(monkeypatch):
 
 
 @pytest.mark.parametrize("action",["BREAK_START","BREAK_END"])
-def test_manual_break_uses_scoped_service_credential_after_face_identity_check(monkeypatch,action):
+def test_manual_break_uses_employee_face_token_without_service_scope_check(monkeypatch,action):
     now=datetime.now(timezone.utc)
     event={"id":"recognition-break","event_type":"PERSON_RECOGNIZED","camera_id":"cam",
            "edge_id":"edge","event_time":now.isoformat(),
@@ -678,7 +664,7 @@ def test_manual_break_uses_scoped_service_credential_after_face_identity_check(m
     monkeypatch.setattr(api,"_portal_camera_lookup",lambda *_args:{
         "camera_role":"ENTRANCE_EXIT","camera_zone":"inside"})
     monkeypatch.setattr(api,"_crm_tenant_uuid_for_user",lambda *_args:"crm-tenant-uuid")
-    monkeypatch.setattr(api,"_recognition_image_base64",lambda _payload:"redacted-image")
+    monkeypatch.setattr(api,"_crm_face_token",lambda *_args,**_kwargs:"face-token")
     monkeypatch.setattr(api,"_crm_face_login_succeeded",lambda _result:True)
     monkeypatch.setattr(api,"_assert_crm_service_token_scope",
                         lambda tenant,user=None:calls.append(("scope",tenant,user)))
@@ -698,5 +684,5 @@ def test_manual_break_uses_scoped_service_credential_after_face_identity_check(m
     operation="start" if action=="BREAK_START" else "end"
     crm_call=next(call for call in calls if call[0]==operation)
     assert crm_call[1][0]=="employee-a"
-    assert crm_call[2]=={"tenant_code":"tenant"}
-    assert ("scope","tenant","employee-a") in calls
+    assert crm_call[2]=={"auth_token":"face-token"}
+    assert not any(call[0]=="scope" for call in calls)

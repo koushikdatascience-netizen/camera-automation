@@ -112,7 +112,7 @@ def test_auto_logout_requires_full_sixty_minutes_and_uses_camera_scope(monkeypat
         "mark_crm_auto_logout_reconciliation_required": lambda self, *_args: calls.append("reconcile"),
         "release_crm_auto_logout_for_retry": lambda self, *_args: calls.append("retry"),
     })())
-    monkeypatch.setattr(api, "_v2_face_token", lambda *_args: "mock-token")
+    monkeypatch.setattr(api, "_crm_face_token", lambda *_args: "mock-token")
     monkeypatch.setattr(api.crm_client, "auto_logout_with_face_token", lambda *_args: {"success": True})
     monkeypatch.setattr(api, "_crm_mutation_succeeded", lambda _result: True)
 

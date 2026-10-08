@@ -53,6 +53,7 @@ def test_cached_face_token_is_tenant_user_keyed_encrypted_and_refreshed_when_exp
         def delete_crm_face_token(self,*args): calls.append(("delete",args))
         def save_crm_face_token(self,*args): calls.append(("save",args))
     monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"_crm_tenant_uuid_for_user",lambda *_args:"crm-tenant-uuid")
     monkeypatch.setattr(api,"_crm_face_login_identity",lambda tenant,user:
                         ("crm-tenant-uuid","redacted-enrolled-image") if (tenant,user)==("tenant-code","employee-a")
                         else (_ for _ in ()).throw(AssertionError("wrong tenant/user lookup")))
@@ -60,7 +61,7 @@ def test_cached_face_token_is_tenant_user_keyed_encrypted_and_refreshed_when_exp
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(login_using_face_tenant=lambda image,tenant:
         {"success":True,"token":fresh_token,"user":{"id":"employee-a","tenantId":tenant}}))
 
-    token=api._v2_face_token("tenant-code","shop-a","employee-a")
+    token=api._crm_face_token("tenant-code","shop-a","employee-a")
 
     assert token==fresh_token
     assert calls[0]==("get",("tenant-code","shop-a","employee-a"))
@@ -115,6 +116,7 @@ def test_v2_cache_rejects_another_employees_token_and_authenticates_requested_us
         def delete_crm_face_token(self,*args): calls.append(("delete",args))
         def save_crm_face_token(self,*args): calls.append(("save",args))
     monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"_crm_tenant_uuid_for_user",lambda *_args:"tenant-a-uuid")
     monkeypatch.setattr(api,"_crm_face_login_identity",lambda tenant,user:
                         ("tenant-a-uuid","redacted-image") if user=="employee-a"
                         else (_ for _ in ()).throw(AssertionError("wrong CRM user requested")))
@@ -122,7 +124,7 @@ def test_v2_cache_rejects_another_employees_token_and_authenticates_requested_us
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(login_using_face_tenant=lambda _image,tenant:
         {"success":True,"token":refreshed,"user":{"id":"employee-a","tenantId":tenant}}))
 
-    assert api._v2_face_token("tenant-a","shop-a","employee-a")==refreshed
+    assert api._crm_face_token("tenant-a","shop-a","employee-a")==refreshed
     assert calls[0]==("get",("tenant-a","shop-a","employee-a"))
     assert calls[1]==("delete",("tenant-a","shop-a","employee-a"))
     assert calls[2][0]=="save"

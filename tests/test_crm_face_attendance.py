@@ -149,18 +149,18 @@ def test_tenant_service_token_configuration_rejects_invalid_json_without_echoing
     assert "not-a-json-secret" not in str(error.value)
 
 
-def test_break_mutation_uses_tenant_scoped_service_token_not_face_token(monkeypatch):
+def test_break_mutation_uses_employee_face_token_not_service_token(monkeypatch):
     FakeClient.calls=[]
     monkeypatch.setenv("SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON",
                        '{"tenant-a":"service-a"}')
     monkeypatch.setattr(httpx,"Client",FakeClient)
     client=SnapKeyCrmClient(base_url="https://apis.snapkey.in",token="legacy-token")
 
-    client.start_break("employee-a","break-lunch",tenant_code="tenant-a")
+    client.start_break("employee-a","break-lunch",auth_token="employee-face-token")
 
     call=FakeClient.calls[0]
     assert call["path"]=="/api/UserBreak/start-break"
-    assert call["headers"]["Authorization"]=="Bearer service-a"
+    assert call["headers"]["Authorization"]=="employee-face-token"
     assert call["kwargs"]["json"]=={"userId":"employee-a","breakMasterId":"break-lunch"}
     assert "legacy-token" not in str(call)
 
@@ -174,3 +174,20 @@ def test_tenant_token_map_never_falls_back_to_legacy_token(monkeypatch):
     with pytest.raises(RuntimeError,match="No CRM service token"):
         client.service_token_for_tenant("tenant-b")
     assert client.service_token_for_tenant("tenant-a")=="tenant-a-token"
+
+
+@pytest.mark.parametrize("operation",["login","logout","absence","break-start","break-end"])
+def test_employee_operations_reject_empty_token_without_service_fallback(monkeypatch,operation):
+    FakeClient.calls=[]
+    monkeypatch.setattr(httpx,"Client",FakeClient)
+    client=SnapKeyCrmClient(base_url="https://apis.snapkey.in",token="legacy-token")
+    calls={
+        "login":lambda:client.login_logout_with_face_token({"userId":"employee-a","actualStartTime":"09:00"},""),
+        "logout":lambda:client.login_logout_with_face_token({"userId":"employee-a","actualOffTime":"18:00"},""),
+        "absence":lambda:client.auto_logout_with_face_token("employee-a","absence",""),
+        "break-start":lambda:client.start_break("employee-a","lunch",auth_token=""),
+        "break-end":lambda:client.end_break("employee-a",auth_token=""),
+    }
+    with pytest.raises(ValueError,match="token is required"):
+        calls[operation]()
+    assert FakeClient.calls==[]
