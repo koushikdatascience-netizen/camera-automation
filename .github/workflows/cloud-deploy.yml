@@ -72,8 +72,13 @@ jobs:
             "camera-eye-portal:$GITHUB_SHA"
           healthy=false
           for attempt in {1..60}; do
-            if curl -fsS --max-time 3 http://127.0.0.1:8000/health | python -c 'import json,sys; d=json.load(sys.stdin); assert d.get("status")=="ok" and d.get("service")=="snapkey-portal"'; then
+            response=$(curl -fsS --max-time 3 http://127.0.0.1:8000/health 2>/dev/null || true)
+            if [[ -n "$response" ]] && printf '%s' "$response" | python -c 'import json,sys; d=json.load(sys.stdin); assert d.get("status")=="ok" and d.get("service")=="snapkey-portal"' 2>/dev/null; then
               healthy=true
+              break
+            fi
+            if ! docker inspect -f '{{.State.Running}}' camera-eye-ci-smoke 2>/dev/null | grep -qx true; then
+              echo "Smoke container exited before becoming healthy"
               break
             fi
             sleep 2
