@@ -1,10 +1,16 @@
-﻿# SnapKey Vision AI PyInstaller spec.
+# SnapKey Vision AI PyInstaller spec.
 # Keep this build in ONEDIR mode because AI/CV dependencies are large.
 
+from pathlib import Path
+
+import insightface
+import certifi
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 block_cipher = None
+INSIGHTFACE_OBJECTS = Path(insightface.__file__).parent / "data" / "objects"
+SCISSORS_MODEL = Path("../../kaggle-model/scissors_yolo11m_960.pt")
 
 datas = [
     ("../../camera_service/web/setup.html", "camera_service/web"),
@@ -13,8 +19,12 @@ datas = [
     ("../../assets/brand", "assets/brand"),
     ("../../config.example.yaml", "."),
     ("../../yolo11m.pt", "."),
-    ("../../kaggle-model/scissors_yolo11m_960.pt", "kaggle-model"),
+    ("../../yolo26n.pt", "."),
+    (str(INSIGHTFACE_OBJECTS / "meanshape_68.pkl"), "objects"),
+    (certifi.where(), "certifi"),
 ]
+if SCISSORS_MODEL.exists():
+    datas.append((str(SCISSORS_MODEL), "kaggle-model"))
 binaries = []
 hiddenimports = [
     "camera_service.api",
@@ -31,7 +41,7 @@ hiddenimports = [
     "uvicorn.lifespan.on",
 ]
 
-for package_name in ("insightface", "onnxruntime", "ultralytics", "torch"):
+for package_name in ("insightface", "onnxruntime", "openvino", "ultralytics", "torch"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
     datas += package_datas
     binaries += package_binaries
@@ -95,7 +105,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,
     icon="../../assets/brand/app.ico",
 )
 

@@ -36,15 +36,65 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS tenants(id TEXT PRIMARY KEY, name TEXT, created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS sites(id TEXT NOT NULL, tenant_id TEXT NOT NULL, name TEXT, created_at TEXT NOT NULL, PRIMARY KEY(id, tenant_id));
                 CREATE TABLE IF NOT EXISTS edge_machines(id TEXT NOT NULL, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, last_seen_at TEXT NOT NULL, PRIMARY KEY(id, tenant_id, site_id));
-                CREATE TABLE IF NOT EXISTS edge_events(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, received_at TEXT NOT NULL, payload_json TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS edge_heartbeats(tenant_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, received_at TEXT NOT NULL, status_json TEXT NOT NULL, PRIMARY KEY(tenant_id,site_id,edge_id));
+                CREATE TABLE IF NOT EXISTS edge_events(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, received_at TEXT NOT NULL, payload_json TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS edge_activation_codes(code_hash TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,created_by TEXT,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,consumed_at TEXT,consumed_machine_code TEXT);
+                CREATE TABLE IF NOT EXISTS camera_configs(tenant_id TEXT NOT NULL, company_code TEXT, shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL, camera_id TEXT NOT NULL, name TEXT NOT NULL, source_type TEXT NOT NULL, source TEXT NOT NULL, camera_role TEXT NOT NULL, camera_zone TEXT, crowd_threshold INTEGER NOT NULL DEFAULT 10, enabled INTEGER NOT NULL DEFAULT 1, features_json TEXT NOT NULL, settings_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(tenant_id,shop_id,edge_id,camera_id));
+                CREATE TABLE IF NOT EXISTS edge_commands(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,edge_id TEXT NOT NULL,command_type TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL, result_json TEXT,created_at TEXT NOT NULL,claimed_at TEXT,completed_at TEXT);
+                CREATE TABLE IF NOT EXISTS portal_sessions(session_id TEXT PRIMARY KEY,token_hash TEXT UNIQUE NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,user_id TEXT,display_name TEXT,role TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS portal_users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,display_name TEXT NOT NULL,tenant_id TEXT NOT NULL,company_code TEXT,shop_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'OWNER',enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS cloud_personnel(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,employee_code TEXT NOT NULL,full_name TEXT NOT NULL,role TEXT NOT NULL,phone TEXT,email TEXT,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(tenant_id,shop_id,employee_code));
+                CREATE TABLE IF NOT EXISTS cloud_face_profiles(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,embedding_json TEXT NOT NULL,quality REAL NOT NULL,image_path TEXT,created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS idx_cloud_personnel_scope ON cloud_personnel(tenant_id,shop_id,active);
+                CREATE INDEX IF NOT EXISTS idx_cloud_faces_person ON cloud_face_profiles(tenant_id,shop_id,person_id);
+                CREATE TABLE IF NOT EXISTS crm_person_mappings(tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,local_person_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,employee_code TEXT,break_master_id TEXT,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(tenant_id,shop_id,local_person_id));
                 CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id, site_id, event_time);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_type ON edge_events(tenant_id, event_type, event_time);
                 """
             )
+            self._ensure_column(conn, "edge_events", "company_code", "TEXT")
+            self._ensure_column(conn, "edge_events", "shop_id", "TEXT")
+            self._ensure_column(conn, "edge_machines", "company_code", "TEXT")
+            self._ensure_column(conn, "edge_machines", "shop_id", "TEXT")
+            self._ensure_column(conn, "edge_heartbeats", "company_code", "TEXT")
+            self._ensure_column(conn, "edge_heartbeats", "shop_id", "TEXT")
+
+    @staticmethod
+    def _ensure_column(conn, table: str, column: str, definition: str) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @staticmethod
     def now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def create_edge_activation_code(self, item: dict[str, Any]) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute("""INSERT INTO edge_activation_codes(code_hash,tenant_id,company_code,shop_id,created_by,created_at,expires_at)
+                VALUES(?,?,?,?,?,?,?)""", (item["code_hash"], item["tenant_id"], item.get("company_code"),
+                item["shop_id"], item.get("created_by"), item["created_at"], item["expires_at"]))
+
+    def consume_edge_activation_code(self, code_hash: str, machine_code: str) -> dict[str, Any] | None:
+        now = self.now()
+        with self._lock, self._conn() as conn:
+            row = conn.execute("""SELECT tenant_id,company_code,shop_id,expires_at FROM edge_activation_codes
+                WHERE code_hash=? AND consumed_at IS NULL AND expires_at>?""", (code_hash, now)).fetchone()
+            if not row:
+                return None
+            conn.execute("UPDATE edge_activation_codes SET consumed_at=?,consumed_machine_code=? WHERE code_hash=?",
+                         (now, machine_code, code_hash))
+            return dict(row)
+
+    def resolve_edge_credential(self, token_hash: str):
+        return None
+
+    def provision_edge_credential(self, token_hash: str, tenant_id: str, company_code: str | None,
+                                  shop_id: str, site_id: str, edge_id: str) -> None:
+        raise RuntimeError("Scoped edge credentials require PostgreSQL")
+
+    def revoke_edge_credentials(self, tenant_id: str, shop_id: str, edge_id: str) -> int:
+        return 0
 
     def ingest_event(self, envelope: dict[str, Any]) -> dict[str, Any]:
         tenant_id = str(envelope["tenant_id"])
@@ -56,11 +106,13 @@ class PortalStore:
             conn.execute("INSERT OR IGNORE INTO tenants(id,name,created_at) VALUES(?,?,?)", (tenant_id, tenant_id, now))
             conn.execute("INSERT OR IGNORE INTO sites(id,tenant_id,name,created_at) VALUES(?,?,?,?)", (site_id, tenant_id, site_id, now))
             conn.execute("INSERT OR REPLACE INTO edge_machines(id,tenant_id,site_id,last_seen_at) VALUES(?,?,?,?)", (edge_id, tenant_id, site_id, now))
-            conn.execute(
-                "INSERT OR REPLACE INTO edge_events(id,tenant_id,site_id,edge_id,store_id,camera_id,event_type,event_time,received_at,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            inserted = conn.execute(
+                "INSERT OR IGNORE INTO edge_events(id,tenant_id,company_code,shop_id,site_id,edge_id,store_id,camera_id,event_type,event_time,received_at,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     event_id,
                     tenant_id,
+                    envelope.get("company_code"),
+                    envelope.get("shop_id") or site_id,
                     site_id,
                     edge_id,
                     envelope.get("store_id"),
@@ -70,8 +122,8 @@ class PortalStore:
                     now,
                     json.dumps(envelope),
                 ),
-            )
-        return {"ok": True, "event_id": event_id, "tenant_id": tenant_id, "site_id": site_id}
+            ).rowcount > 0
+        return {"ok": True, "event_id": event_id, "tenant_id": tenant_id, "site_id": site_id, "inserted": bool(inserted)}
 
     def list_events(self, tenant_id: str, site_id: str | None = None, event_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         query = "SELECT * FROM edge_events WHERE tenant_id=?"
@@ -88,14 +140,231 @@ class PortalStore:
             rows = conn.execute(query, args).fetchall()
             return [dict(row) | {"payload": json.loads(row["payload_json"])} for row in rows]
 
-    def tenant_summary(self, tenant_id: str) -> dict[str, Any]:
+    def tenant_summary(self, tenant_id: str, shop_id: str | None = None) -> dict[str, Any]:
         with self._conn() as conn:
-            sites = conn.execute("SELECT COUNT(*) AS count FROM sites WHERE tenant_id=?", (tenant_id,)).fetchone()["count"]
-            edges = conn.execute("SELECT COUNT(*) AS count FROM edge_machines WHERE tenant_id=?", (tenant_id,)).fetchone()["count"]
-            events = conn.execute("SELECT event_type, COUNT(*) AS count FROM edge_events WHERE tenant_id=? GROUP BY event_type", (tenant_id,)).fetchall()
-            return {
-                "tenant_id": tenant_id,
-                "sites": sites,
-                "edges": edges,
-                "events": {row["event_type"]: row["count"] for row in events},
-            }
+            if shop_id:
+                edges = conn.execute("SELECT COUNT(*) AS count FROM edge_machines WHERE tenant_id=? AND shop_id=?", (tenant_id, shop_id)).fetchone()["count"]
+                sites = conn.execute("SELECT COUNT(DISTINCT site_id) AS count FROM edge_machines WHERE tenant_id=? AND shop_id=?", (tenant_id, shop_id)).fetchone()["count"]
+                events = conn.execute("SELECT event_type, COUNT(*) AS count FROM edge_events WHERE tenant_id=? AND shop_id=? GROUP BY event_type", (tenant_id, shop_id)).fetchall()
+            else:
+                sites = conn.execute("SELECT COUNT(*) AS count FROM sites WHERE tenant_id=?", (tenant_id,)).fetchone()["count"]
+                edges = conn.execute("SELECT COUNT(*) AS count FROM edge_machines WHERE tenant_id=?", (tenant_id,)).fetchone()["count"]
+                events = conn.execute("SELECT event_type, COUNT(*) AS count FROM edge_events WHERE tenant_id=? GROUP BY event_type", (tenant_id,)).fetchall()
+            return {"tenant_id": tenant_id, "sites": sites, "edges": edges, "events": {row["event_type"]: row["count"] for row in events}}
+
+
+    def create_cloud_person(self,item):
+        now=self.now()
+        with self._lock,self._conn() as c:
+            c.execute("INSERT INTO cloud_personnel(id,tenant_id,shop_id,employee_code,full_name,role,phone,email,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?,?)",
+                (item["id"],item["tenant_id"],item["shop_id"],item["employee_code"],item["full_name"],item["role"],item.get("phone"),item.get("email"),now,now))
+        return self.get_cloud_person(item["tenant_id"],item["shop_id"],item["id"])
+    def list_cloud_people(self,tenant_id,shop_id):
+        with self._conn() as c:
+            rows=c.execute("""SELECT p.*,COUNT(f.id) face_count FROM cloud_personnel p LEFT JOIN cloud_face_profiles f ON f.person_id=p.id
+                WHERE p.tenant_id=? AND p.shop_id=? GROUP BY p.id ORDER BY p.full_name""",(tenant_id,shop_id)).fetchall()
+        return [dict(r) for r in rows]
+    def get_cloud_person(self,tenant_id,shop_id,person_id):
+        with self._conn() as c:
+            r=c.execute("SELECT * FROM cloud_personnel WHERE tenant_id=? AND shop_id=? AND id=?",(tenant_id,shop_id,person_id)).fetchone()
+        return dict(r) if r else None
+    def update_cloud_person(self,tenant_id,shop_id,person_id,changes):
+        allowed={k:v for k,v in changes.items() if k in {"full_name","role","phone","email","active"} and v is not None}
+        if "active" in allowed: allowed["active"]=int(bool(allowed["active"]))
+        if allowed:
+            allowed["updated_at"]=self.now(); sql="UPDATE cloud_personnel SET "+",".join(f"{k}=?" for k in allowed)+" WHERE tenant_id=? AND shop_id=? AND id=?"
+            with self._lock,self._conn() as c: c.execute(sql,tuple(allowed.values())+(tenant_id,shop_id,person_id))
+        return self.get_cloud_person(tenant_id,shop_id,person_id)
+    def add_cloud_face(self,item):
+        with self._lock,self._conn() as c:
+            c.execute("INSERT INTO cloud_face_profiles(id,person_id,tenant_id,shop_id,embedding_json,quality,image_path,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (item["id"],item["person_id"],item["tenant_id"],item["shop_id"],json.dumps(item["embedding"]),item["quality"],item.get("image_path"),self.now()))
+        return {"id":item["id"],"person_id":item["person_id"],"quality":item["quality"],"image_path":item.get("image_path")}
+    def list_cloud_faces(self,tenant_id,shop_id,person_id,include_embedding=False):
+        cols="id,person_id,quality,image_path,created_at"+(",embedding_json" if include_embedding else "")
+        with self._conn() as c: rows=c.execute(f"SELECT {cols} FROM cloud_face_profiles WHERE tenant_id=? AND shop_id=? AND person_id=? ORDER BY created_at DESC",(tenant_id,shop_id,person_id)).fetchall()
+        out=[]
+        for r in rows:
+            item=dict(r)
+            if include_embedding: item["embedding"]=json.loads(item.pop("embedding_json"))
+            out.append(item)
+        return out
+    def delete_cloud_face(self,tenant_id,shop_id,person_id,face_id):
+        with self._lock,self._conn() as c: return c.execute("DELETE FROM cloud_face_profiles WHERE tenant_id=? AND shop_id=? AND person_id=? AND id=?",(tenant_id,shop_id,person_id,face_id)).rowcount>0
+
+    def record_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        tenant_id = str(payload["tenant_id"])
+        site_id = str(payload["site_id"])
+        edge_id = str(payload["edge_id"])
+        company_code = payload.get("company_code")
+        shop_id = str(payload.get("shop_id") or site_id)
+        now = self.now()
+        with self._lock, self._conn() as conn:
+            conn.execute("INSERT OR IGNORE INTO tenants(id,name,created_at) VALUES(?,?,?)", (tenant_id, tenant_id, now))
+            conn.execute("INSERT OR IGNORE INTO sites(id,tenant_id,name,created_at) VALUES(?,?,?,?)", (site_id, tenant_id, site_id, now))
+            conn.execute("""INSERT INTO edge_machines(id,tenant_id,site_id,last_seen_at,company_code,shop_id)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(id,tenant_id,site_id) DO UPDATE SET
+                last_seen_at=excluded.last_seen_at,company_code=excluded.company_code,shop_id=excluded.shop_id""",
+                (edge_id, tenant_id, site_id, now, company_code, shop_id))
+            conn.execute("""INSERT INTO edge_heartbeats(tenant_id,site_id,edge_id,received_at,status_json,company_code,shop_id)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(tenant_id,site_id,edge_id) DO UPDATE SET
+                received_at=excluded.received_at,status_json=excluded.status_json,
+                company_code=excluded.company_code,shop_id=excluded.shop_id""",
+                (tenant_id, site_id, edge_id, now, json.dumps(payload.get("status") or {}), company_code, shop_id))
+        return {"ok": True, "tenant_id": tenant_id, "site_id": site_id, "edge_id": edge_id, "received_at": now}
+
+    def list_edges(self, tenant_id: str, shop_id: str | None = None) -> list[dict[str, Any]]:
+        query = """SELECT m.id AS edge_id,m.tenant_id,m.company_code,m.shop_id,m.site_id,m.last_seen_at,
+                          h.received_at,h.status_json
+                   FROM edge_machines m
+                   LEFT JOIN edge_heartbeats h ON h.tenant_id=m.tenant_id AND h.site_id=m.site_id AND h.edge_id=m.id
+                   WHERE m.tenant_id=?"""
+        args: list[Any] = [tenant_id]
+        if shop_id:
+            query += " AND m.shop_id=?"
+            args.append(shop_id)
+        query += " ORDER BY m.last_seen_at DESC"
+        with self._conn() as conn:
+            rows = conn.execute(query, args).fetchall()
+        result = []
+        for row in rows:
+            data = dict(row)
+            data["status"] = json.loads(data.pop("status_json") or "{}")
+            result.append(data)
+        return result
+
+
+    def upsert_camera(self, camera: dict[str, Any]) -> dict[str, Any]:
+        now = self.now()
+        values = (
+            camera["tenant_id"], camera.get("company_code"), camera["shop_id"], camera["site_id"],
+            camera["edge_id"], camera["camera_id"], camera["name"], camera.get("source_type", "rtsp"),
+            camera["source"], camera.get("camera_role", "GENERAL"), camera.get("camera_zone"),
+            int(camera.get("crowd_threshold", 10)), 1 if camera.get("enabled", True) else 0,
+            json.dumps(camera.get("features") or {}), json.dumps(camera.get("settings") or {}), now, now,
+        )
+        with self._lock, self._conn() as conn:
+            conn.execute("""INSERT INTO camera_configs(
+                tenant_id,company_code,shop_id,site_id,edge_id,camera_id,name,source_type,source,camera_role,
+                camera_zone,crowd_threshold,enabled,features_json,settings_json,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(tenant_id,shop_id,edge_id,camera_id) DO UPDATE SET
+                company_code=excluded.company_code,site_id=excluded.site_id,name=excluded.name,
+                source_type=excluded.source_type,source=excluded.source,camera_role=excluded.camera_role,
+                camera_zone=excluded.camera_zone,crowd_threshold=excluded.crowd_threshold,enabled=excluded.enabled,
+                features_json=excluded.features_json,settings_json=excluded.settings_json,updated_at=excluded.updated_at""", values)
+        return self.get_camera(camera["tenant_id"], camera["shop_id"], camera["edge_id"], camera["camera_id"])
+
+    def get_camera(self, tenant_id: str, shop_id: str, edge_id: str, camera_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute("""SELECT * FROM camera_configs WHERE tenant_id=? AND shop_id=? AND edge_id=? AND camera_id=?""",
+                               (tenant_id, shop_id, edge_id, camera_id)).fetchone()
+        return self._camera_row(row) if row else None
+
+    def list_cameras(self, tenant_id: str, shop_id: str | None = None, edge_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM camera_configs WHERE tenant_id=?"
+        args: list[Any] = [tenant_id]
+        if shop_id:
+            query += " AND shop_id=?"; args.append(shop_id)
+        if edge_id:
+            query += " AND edge_id=?"; args.append(edge_id)
+        query += " ORDER BY name,camera_id"
+        with self._conn() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [self._camera_row(row) for row in rows]
+
+    def delete_camera(self, tenant_id: str, shop_id: str, edge_id: str, camera_id: str) -> bool:
+        with self._lock, self._conn() as conn:
+            result = conn.execute("""DELETE FROM camera_configs WHERE tenant_id=? AND shop_id=? AND edge_id=? AND camera_id=?""",
+                                  (tenant_id, shop_id, edge_id, camera_id))
+        return bool(result.rowcount)
+
+    @staticmethod
+    def _camera_row(row) -> dict[str, Any]:
+        data = dict(row)
+        data["enabled"] = bool(data["enabled"])
+        data["features"] = json.loads(data.pop("features_json") or "{}")
+        data["settings"] = json.loads(data.pop("settings_json") or "{}")
+        return data
+
+
+    def create_edge_command(self, command: dict[str, Any]) -> dict[str, Any]:
+        import uuid
+        command_id=str(uuid.uuid4()); now=self.now()
+        with self._lock,self._conn() as conn:
+            conn.execute("INSERT INTO edge_commands(id,tenant_id,shop_id,edge_id,command_type,request_json,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (command_id,command["tenant_id"],command["shop_id"],command["edge_id"],command["command_type"],json.dumps(command.get("request") or {}),"PENDING",now))
+        return {"id":command_id,"status":"PENDING"}
+
+    def claim_edge_commands(self, tenant_id: str, shop_id: str, edge_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        with self._lock,self._conn() as conn:
+            rows=conn.execute("""SELECT * FROM edge_commands WHERE tenant_id=? AND shop_id=? AND edge_id=? AND status='PENDING'
+                ORDER BY created_at LIMIT ?""",(tenant_id,shop_id,edge_id,max(1,min(20,int(limit))))).fetchall()
+            result=[]
+            for row in rows:
+                conn.execute("UPDATE edge_commands SET status='CLAIMED',claimed_at=? WHERE id=? AND status='PENDING'",(self.now(),row["id"]))
+                result.append({"id":row["id"],"command_type":row["command_type"],"request":json.loads(row["request_json"])})
+            return result
+
+    def complete_edge_command(self, command_id: str, tenant_id: str, shop_id: str, edge_id: str, status: str, result: dict[str, Any]) -> bool:
+        with self._lock,self._conn() as conn:
+            out=conn.execute("""UPDATE edge_commands SET status=?,result_json=?,completed_at=? WHERE id=? AND tenant_id=? AND shop_id=? AND edge_id=? AND status='CLAIMED'""",
+                (status,json.dumps(result),self.now(),command_id,tenant_id,shop_id,edge_id))
+        return bool(out.rowcount)
+
+    def get_edge_command(self, command_id: str, tenant_id: str, shop_id: str | None = None) -> dict[str, Any] | None:
+        clauses=["id=?","tenant_id=?"]
+        params=[command_id, tenant_id]
+        if shop_id:
+            clauses.append("shop_id=?")
+            params.append(shop_id)
+        with self._conn() as conn:
+            row=conn.execute("SELECT * FROM edge_commands WHERE "+" AND ".join(clauses),tuple(params)).fetchone()
+        if not row: return None
+        data=dict(row); data["result"]=json.loads(data.pop("result_json")) if data.get("result_json") else None
+        data.pop("request_json",None)
+        return data
+
+
+    def create_portal_user(self, user: dict[str, Any]) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute("""INSERT INTO portal_users(id,email,password_hash,display_name,tenant_id,company_code,shop_id,role,enabled,created_at)
+                VALUES(?,?,?,?,?,?,?,?,1,?)""",(user["id"],user["email"],user["password_hash"],user["display_name"],
+                user["tenant_id"],user.get("company_code"),user["shop_id"],user["role"],user["created_at"]))
+
+    def portal_user_by_email(self, email: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute("SELECT * FROM portal_users WHERE lower(email)=lower(?) AND enabled=1",(email,)).fetchone()
+        return dict(row) if row else None
+
+    def create_portal_session(self, session: dict[str, Any]) -> None:
+        with self._lock,self._conn() as conn:
+            conn.execute("""INSERT INTO portal_sessions(session_id,token_hash,tenant_id,company_code,shop_id,user_id,display_name,role,created_at,expires_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",(session["session_id"],session["token_hash"],session["tenant_id"],session.get("company_code"),
+                session["shop_id"],session.get("user_id"),session.get("display_name"),session["role"],session["created_at"],session["expires_at"]))
+
+    def portal_session_by_hash(self, token_hash: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute("SELECT * FROM portal_sessions WHERE token_hash=?",(token_hash,)).fetchone()
+        return dict(row) if row else None
+    def upsert_crm_person_mapping(self, mapping: dict[str, Any]) -> dict[str, Any]:
+        now=self.now()
+        with self._lock,self._conn() as conn:
+            conn.execute("""INSERT INTO crm_person_mappings(tenant_id,shop_id,local_person_id,crm_user_id,employee_code,break_master_id,enabled,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,1,?,?) ON CONFLICT(tenant_id,shop_id,local_person_id) DO UPDATE SET
+                crm_user_id=excluded.crm_user_id,employee_code=excluded.employee_code,break_master_id=excluded.break_master_id,enabled=1,updated_at=excluded.updated_at""",
+                (mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"],mapping["crm_user_id"],mapping.get("employee_code"),mapping.get("break_master_id"),now,now))
+        return self.crm_person_mapping(mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"])
+
+    def crm_person_mapping(self, tenant_id: str, shop_id: str, local_person_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute("SELECT * FROM crm_person_mappings WHERE tenant_id=? AND shop_id=? AND local_person_id=? AND enabled=1",(tenant_id,shop_id,local_person_id)).fetchone()
+        return dict(row) if row else None
+
+    def list_crm_person_mappings(self, tenant_id: str, shop_id: str) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows=conn.execute("SELECT * FROM crm_person_mappings WHERE tenant_id=? AND shop_id=? AND enabled=1 ORDER BY employee_code,local_person_id",(tenant_id,shop_id)).fetchall()
+        return [dict(row) for row in rows]
+

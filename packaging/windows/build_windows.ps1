@@ -83,8 +83,10 @@ try {
         $InternalDir = Join-Path $AppDistDir "_internal"
         $RequiredFiles = @(
             (Join-Path $InternalDir "yolo11m.pt"),
-            (Join-Path $InternalDir "kaggle-model\scissors_yolo11m_960.pt"),
             (Join-Path $InternalDir "config.example.yaml")
+        )
+        $OptionalFiles = @(
+            (Join-Path $InternalDir "kaggle-model\scissors_yolo11m_960.pt")
         )
 
         foreach ($RequiredFile in $RequiredFiles) {
@@ -93,31 +95,37 @@ try {
                 exit 1
             }
         }
-        Write-Host "Verified bundled yolo11m.pt, scissors model, and default config."
+        foreach ($OptionalFile in $OptionalFiles) {
+            if (-not (Test-Path $OptionalFile)) {
+                Write-Warning "Optional packaged file missing: $OptionalFile"
+            }
+        }
+        Write-Host "Verified bundled yolo11m.pt and default config."
 
-        # Create start/stop scripts inside the installable app folder
+        # Create start/stop/open scripts inside the installable app folder
         $StartScriptContent = @"
 @echo off
 SETLOCAL
 
-REM SnapKey Vision AI Start Script
-REM This script starts the SnapKey Vision AI application
+REM Madhushala Camera AI Start Script
 
 SET APP_DIR=%~dp0
 SET APP_NAME=SnapKeyVisionAI.exe
-SET AUTO_OPEN_BROWSER=1
+SET AUTO_OPEN_BROWSER=0
 SET PORT=8091
+SET CAMERA_AUTOMATION_HOME=%ProgramData%\MadhushalaCameraAI
 
-echo Starting SnapKey Vision AI...
+echo Starting Madhushala Camera AI in background...
 echo Application Directory: %APP_DIR%
 
 cd /d "%APP_DIR%"
 
 if exist "%APP_NAME%" (
-    start "" "%APP_NAME%"
-    echo SnapKey Vision AI started successfully.
-    echo Opening browser to setup page...
-    timeout /t 2 /nobreak >nul
+    tasklist /FI "IMAGENAME eq %APP_NAME%" | find /I "%APP_NAME%" >nul
+    if errorlevel 1 (
+        start "" /min "%APP_NAME%" --background
+        timeout /t 3 /nobreak >nul
+    )
     start "" "http://127.0.0.1:8091/setup"
 ) else (
     echo Error: %APP_NAME% not found in %APP_DIR%
@@ -127,28 +135,54 @@ if exist "%APP_NAME%" (
 ENDLOCAL
 "@
 
-        $StopScriptContent = @"
+$StopScriptContent = @"
 @echo off
 SETLOCAL
 
-REM SnapKey Vision AI Stop Script
-REM This script stops the SnapKey Vision AI application
+REM Madhushala Camera AI Stop Script
 
-echo Stopping SnapKey Vision AI...
+echo Stopping Madhushala Camera AI...
 
 taskkill /f /im SnapKeyVisionAI.exe >nul 2>&1
 
-echo SnapKey Vision AI stopped.
-pause
+echo Madhushala Camera AI stopped.
+
+ENDLOCAL
+"@
+
+        $OpenScriptContent = @"
+@echo off
+SETLOCAL
+
+REM Open Madhushala Camera AI local dashboard.
+
+SET APP_DIR=%~dp0
+SET APP_NAME=SnapKeyVisionAI.exe
+SET AUTO_OPEN_BROWSER=0
+SET PORT=8091
+SET CAMERA_AUTOMATION_HOME=%ProgramData%\MadhushalaCameraAI
+
+cd /d "%APP_DIR%"
+
+tasklist /FI "IMAGENAME eq %APP_NAME%" | find /I "%APP_NAME%" >nul
+if errorlevel 1 (
+    start "" /min "%APP_NAME%" --background
+    timeout /t 3 /nobreak >nul
+)
+
+start "" "http://127.0.0.1:8091/setup"
 
 ENDLOCAL
 "@
 
         # Write start/stop scripts
+        $StartScriptContent | Out-File -FilePath (Join-Path $AppDistDir "START_MADHUSHALA_CAMERA_AI.bat") -Encoding ascii
+        $StopScriptContent | Out-File -FilePath (Join-Path $AppDistDir "STOP_MADHUSHALA_CAMERA_AI.bat") -Encoding ascii
+        $OpenScriptContent | Out-File -FilePath (Join-Path $AppDistDir "OPEN_MADHUSHALA_CAMERA_AI.bat") -Encoding ascii
         $StartScriptContent | Out-File -FilePath (Join-Path $AppDistDir "START_SNAPKEY_VISION_AI.bat") -Encoding ascii
         $StopScriptContent | Out-File -FilePath (Join-Path $AppDistDir "STOP_SNAPKEY_VISION_AI.bat") -Encoding ascii
 
-        Write-Host "Created START_SNAPKEY_VISION_AI.bat and STOP_SNAPKEY_VISION_AI.bat in $AppDistDir"
+        Write-Host "Created Madhushala Camera AI start/stop/open scripts in $AppDistDir"
 
         # Create .env.example file if it doesn't exist
         if (-not (Test-Path ".env.example")) {

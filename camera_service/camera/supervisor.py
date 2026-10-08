@@ -1,12 +1,115 @@
+from __future__ import annotations
+
 import threading
 from camera_service.camera.worker import CameraWorker
+
+
 class CameraSupervisor:
-    def __init__(self,config,store,face,attendance): self.config=config; self.store=store; self.face=face; self.attendance=attendance; self.workers={}; self.threads={}
+    """Keeps enabled persisted/cloud cameras running independently of the browser."""
+
+    def __init__(self, config, store, face, attendance, camera_manager=None):
+        self.config = config
+        self.store = store
+        self.face = face
+        self.attendance = attendance
+        self.camera_manager = camera_manager
+        self.workers = {}
+        self.threads = {}
+        self._lock = threading.RLock()
+
+    def _desired_cameras(self):
+        if self.camera_manager is not None:
+            return [camera for camera in self.camera_manager.list_cameras() if camera.enabled]
+        return [camera for camera in self.config.cameras if camera.enabled]
+
+    def _start_camera_locked(self, camera):
+        current = self.threads.get(camera.camera_id)
+        if current and current.is_alive():
+            return False
+        worker = CameraWorker(
+            self.config, camera, self.store, self.face, self.attendance,
+            status_callback=self._status_callback,
+        )
+        thread = threading.Thread(
+            target=worker.run, name=f"camera-{camera.camera_id}", daemon=True
+        )
+        self.workers[camera.camera_id] = worker
+        self.threads[camera.camera_id] = thread
+        thread.start()
+        return True
+
+    def _status_callback(self, camera_id, **changes):
+        if self.camera_manager is None:
+            return
+        try:
+            self.camera_manager.update_camera_status(camera_id, **changes)
+        except Exception:
+            pass
+
     def start(self):
-        for cam in self.config.cameras:
-            if not cam.enabled: continue
-            w=CameraWorker(self.config,cam,self.store,self.face,self.attendance); t=threading.Thread(target=w.run,name=f'camera-{cam.camera_id}',daemon=True); self.workers[cam.camera_id]=w; self.threads[cam.camera_id]=t; t.start()
+        self.reconcile()
+
+    def reconcile(self):
+        """Start enabled saved cameras, restart changed ones, stop disabled/deleted ones."""
+        with self._lock:
+            desired = {camera.camera_id: camera for camera in self._desired_cameras()}
+            for camera_id in list(self.workers):
+                if camera_id not in desired:
+                    self._stop_camera_locked(camera_id)
+            for camera_id, camera in desired.items():
+                worker = self.workers.get(camera_id)
+                thread = self.threads.get(camera_id)
+                changed = worker is not None and worker.camera.model_dump() != camera.model_dump()
+                if changed:
+                    self._stop_camera_locked(camera_id)
+                    worker = None
+                    thread = None
+                if worker is None or thread is None or not thread.is_alive():
+                    self._start_camera_locked(camera)
+
+    def start_camera(self, camera_id):
+        if self.camera_manager is None:
+            return False
+        camera = self.camera_manager.get_camera(camera_id)
+        if not camera or not camera.enabled:
+            return False
+        with self._lock:
+            return self._start_camera_locked(camera)
+
+    def stop_camera(self, camera_id):
+        with self._lock:
+            return self._stop_camera_locked(camera_id)
+
+    def restart_camera(self, camera_id):
+        with self._lock:
+            self._stop_camera_locked(camera_id)
+            if self.camera_manager is None:
+                return False
+            camera = self.camera_manager.get_camera(camera_id)
+            return bool(camera and camera.enabled and self._start_camera_locked(camera))
+
+    def _stop_camera_locked(self, camera_id):
+        worker = self.workers.pop(camera_id, None)
+        thread = self.threads.pop(camera_id, None)
+        if worker:
+            worker.stop()
+        if thread and thread.is_alive():
+            thread.join(timeout=3)
+        return bool(worker or thread)
+
     def shutdown(self):
-        for w in self.workers.values(): w.stop()
-        for t in self.threads.values(): t.join(timeout=3)
-    def is_running(self): return any(t.is_alive() for t in self.threads.values()) if self.threads else True
+        with self._lock:
+            for camera_id in list(self.workers):
+                self._stop_camera_locked(camera_id)
+
+    def is_running(self):
+        return any(thread.is_alive() for thread in self.threads.values()) if self.threads else True
+
+    def status(self):
+        with self._lock:
+            return {
+                camera_id: {
+                    "running": bool(self.threads.get(camera_id) and self.threads[camera_id].is_alive())
+                }
+                for camera_id in set(self.workers) | set(self.threads)
+            }

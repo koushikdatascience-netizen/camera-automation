@@ -3,13 +3,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import cv2, numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query, Form
-from camera_service.config import load_config
+from camera_service.config import load_config, save_edge_activation
 from camera_service.models import PersonnelCreate, PersonnelPatch
 from camera_service.storage import SQLiteStore
 from camera_service.face_service import FaceService
 from camera_service.attendance_engine import AttendanceEngine
 from camera_service.camera.supervisor import CameraSupervisor
 from camera_service.camera_manager import CameraManager, CameraConfig, CameraStatus, CameraState
+from camera_service.camera.onvif import probe_onvif, select_profile, OnvifUnavailable
 from camera_service.alert_dispatcher import AlertDispatcher
 from camera_service.cloud_client import CloudSyncClient
 from camera_service.licensing import LicenseManager
@@ -20,10 +21,12 @@ from camera_service.object_security.alerts import ObjectSecurityAlerter
 from camera_service.object_security.confirmation import TemporalConfirmation
 from camera_service.object_security.roi import apply_roi, map_box_from_offset
 from camera_service.object_security.tiling import suppress_duplicates, tiles_for_shape
+from camera_service.person_model_registry import PersonModelRegistry
 from typing import Optional
 from pydantic import BaseModel
 import json
 import os
+import requests
 import shutil
 import tempfile
 import webbrowser
@@ -33,7 +36,14 @@ import socket
 import sys
 from pathlib import Path
 
-config=load_config(); store=SQLiteStore(config.database_path); face_service=None; attendance_engine=AttendanceEngine(store,config.store_id); supervisor=None
+config=load_config()
+person_model_registry=PersonModelRegistry(config)
+try:
+    person_model_selection=person_model_registry.resolve()
+    config.yolo_model=person_model_selection["path"]
+except Exception as exc:
+    person_model_selection={"runtime":"PYTORCH","path":config.yolo_model,"reason":"legacy_fallback","error":str(exc),"hardware":person_model_registry.hardware}
+store=SQLiteStore(config.database_path); face_service=None; attendance_engine=AttendanceEngine(store,config.store_id); supervisor=None
 camera_manager=CameraManager(config.database_path)
 object_security_registry=ObjectSecurityModelRegistry(config.object_security.model_storage_dir)
 object_security_detector=ObjectSecurityDetector()
@@ -41,7 +51,7 @@ object_security_alerter=ObjectSecurityAlerter()
 cloud_client=CloudSyncClient(config.cloud_sync)
 alert_dispatcher=AlertDispatcher(config.alerts)
 license_manager=LicenseManager(config.edge)
-sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,license_manager)
+sync_worker=None
 
 def _seed_packaged_object_security_model():
     if not getattr(sys, "frozen", False):
@@ -72,7 +82,12 @@ def _camera_needs_face(camera) -> bool:
 def _should_initialize_face_service() -> bool:
     if config.features.face_recognition or config.features.attendance or config.features.unknown_enabled:
         return True
-    return any(_camera_needs_face(camera) for camera in config.cameras if getattr(camera,'enabled',False))
+    configured = [camera for camera in config.cameras if getattr(camera, 'enabled', False)]
+    try:
+        persisted = [camera for camera in camera_manager.list_cameras() if getattr(camera, 'enabled', False)]
+    except Exception:
+        persisted = []
+    return any(_camera_needs_face(camera) for camera in configured + persisted)
 
 def get_face_service():
     global face_service
@@ -82,7 +97,8 @@ def get_face_service():
 
 if _should_initialize_face_service():
     face_service=get_face_service()
-supervisor=CameraSupervisor(config,store,face_service,attendance_engine)
+supervisor=CameraSupervisor(config,store,face_service,attendance_engine,camera_manager=camera_manager)
+sync_worker=EdgeSyncWorker(store,cloud_client,config.edge,config.cloud_sync,license_manager,camera_manager=camera_manager,camera_supervisor=supervisor)
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
@@ -98,9 +114,14 @@ def get_store(): return store
 def _camera_feature_names(features) -> set[str]:
     data = features.model_dump() if hasattr(features, "model_dump") else dict(features or {})
     enabled = {name for name, value in data.items() if value}
+    # Normalize compatibility aliases to the canonical commercial feature names.
+    # A camera may persist both fields for backward compatibility, but licensing
+    # must not require the same capability twice under two different names.
     if "unknown_person_detection" in enabled:
+        enabled.discard("unknown_person_detection")
         enabled.add("unknown_detection")
     if "shoplifting_detection" in enabled:
+        enabled.discard("shoplifting_detection")
         enabled.add("shoplifting")
     return enabled
 
@@ -330,6 +351,18 @@ def health():
     return {
         'status':'ok',
         'store_id':config.store_id,
+        'runtime': {
+            'profile': config.runtime.profile,
+            'inference_backend': os.environ.get('SNAPKEY_INFERENCE_BACKEND', 'AUTO'),
+            'model': config.yolo_model,
+            'person_model_runtime': person_model_selection.get('runtime'),
+            'person_model_reason': person_model_selection.get('reason'),
+            'person_model_diagnostic_disabled': person_model_selection.get('diagnostic_disabled', []),
+            'person_model_hardware': person_model_selection.get('hardware'),
+            'tracking_fps_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_FPS'),
+            'tracking_imgsz_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_IMGSZ'),
+            'tracking_quality_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_QUALITY'),
+        },
         'cameras':len(camera_manager.list_cameras()),
         'online_cameras':sum(1 for status in statuses if status and status.online),
         'object_security_enabled':config.object_security.enabled or config.features.object_security,
@@ -357,6 +390,14 @@ def edge_status():
         'cloud_sync_enabled': cloud_client.enabled(),
         'cloud_sync_allowed': cloud_client.enabled() and license_status.active,
         'cloud_sync_worker': sync_worker.status(),
+        'runtime': {
+            'profile': config.runtime.profile,
+            'inference_backend': os.environ.get('SNAPKEY_INFERENCE_BACKEND', 'AUTO'),
+            'model': config.yolo_model,
+            'tracking_fps_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_FPS'),
+            'tracking_imgsz_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_IMGSZ'),
+            'tracking_quality_cap': os.environ.get('SNAPKEY_PROFILE_TRACKING_QUALITY'),
+        },
         'queue': store.event_queue_status(),
         'alert_recipients': alert_dispatcher.preview_recipients(),
         'evidence': config.evidence.model_dump(),
@@ -379,10 +420,62 @@ class LicenseInstallRequest(BaseModel):
     license: dict
     signature: str
 
+class EdgeActivationRequest(BaseModel):
+    company_code: str = ""
+    shop_code: str = ""
+    activation_code: str
+
 @app.post('/api/v1/license/install')
 def install_license(request: LicenseInstallRequest):
     try:
         status = license_manager.install_signed_license(request.license, request.signature)
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
+@app.post('/api/v1/activate')
+def activate_edge(request: EdgeActivationRequest):
+    global config, cloud_client, license_manager, sync_worker
+    machine_code = license_manager.machine_code()
+    cloud_url = "https://camera.snapkey.ai"
+    try:
+        response = requests.post(
+            cloud_url + "/edge/v1/activate",
+            json={
+                "company_code": request.company_code.strip(),
+                "shop_code": request.shop_code.strip(),
+                "activation_code": request.activation_code.strip(),
+                "machine_code": machine_code,
+                "device_name": socket.gethostname(),
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        activation = response.json()
+        config_path = save_edge_activation(activation)
+        config = load_config()
+        cloud_client.config = config.cloud_sync
+        license_manager.edge = config.edge
+        sync_worker.edge_config = config.edge
+        sync_worker.sync_config = config.cloud_sync
+        license_status = license_manager.install_signed_license(activation["license"], activation["signature"])
+        sync_result = sync_worker.run_once()
+        return {
+            "ok": True,
+            "message": activation.get("message", "Activated successfully"),
+            "config_path": str(config_path),
+            "edge": {
+                "tenant_id": config.edge.tenant_id,
+                "company_code": config.edge.company_code,
+                "shop_id": config.edge.shop_id,
+                "site_id": config.edge.site_id,
+                "edge_id": config.edge.edge_id,
+            },
+            "license": license_status.model_dump(),
+            "sync": sync_result.model_dump(),
+        }
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        raise HTTPException(400, detail)
     except Exception as exc:
         raise HTTPException(400, str(exc))
     return status.model_dump()
@@ -413,26 +506,55 @@ def alert_preview():
 # Setup UI Route
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
-import os
 
-# Mount static files. check_dir=False keeps fresh/source-only installs from
-# failing at import time if no static assets are currently present.
+
+def _web_asset_dir() -> Path:
+    """Resolve setup UI assets in source and PyInstaller ONEDIR builds."""
+    candidates: list[Path] = []
+
+    if getattr(sys, "frozen", False):
+        executable_dir = Path(sys.executable).resolve().parent
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "camera_service" / "web")
+        candidates.extend([
+            executable_dir / "_internal" / "camera_service" / "web",
+            executable_dir / "camera_service" / "web",
+        ])
+
+    candidates.append(Path(__file__).resolve().parent / "web")
+
+    for candidate in candidates:
+        if (candidate / "setup.html").is_file():
+            return candidate
+
+    # Return the primary candidate so the /setup diagnostic reports the
+    # exact path that was attempted if all candidates are unexpectedly absent.
+    return candidates[0]
+
+
+WEB_ASSET_DIR = _web_asset_dir()
+WEB_STATIC_DIR = WEB_ASSET_DIR / "static"
+
+# check_dir=False keeps source-only installs from failing at import time when
+# optional static assets are absent. Frozen builds resolve through sys._MEIPASS.
 app.mount(
     "/static",
-    StaticFiles(
-        directory=os.path.join(os.path.dirname(__file__), "web", "static"),
-        check_dir=False,
-    ),
+    StaticFiles(directory=str(WEB_STATIC_DIR), check_dir=False),
     name="static",
 )
 
+
 @app.get("/setup", response_class=HTMLResponse)
 async def setup_ui():
+    setup_path = WEB_ASSET_DIR / "setup.html"
     try:
-        with open(os.path.join(os.path.dirname(__file__), "web", "setup.html"), "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read(), status_code=200)
+        return HTMLResponse(content=setup_path.read_text(encoding="utf-8"), status_code=200)
     except FileNotFoundError:
-        return HTMLResponse(content="<h1>Setup UI not found</h1>", status_code=404)
+        return HTMLResponse(
+            content=f"<h1>Setup UI not found</h1><p>Expected: {setup_path}</p>",
+            status_code=404,
+        )
 
 # Camera CRUD APIs
 class CameraCreate(BaseModel):
@@ -449,6 +571,27 @@ class CameraCreate(BaseModel):
     tracking_quality: int = 65
     tracking_mode: str = "detect"
     features: dict = {}
+
+class OnvifProbeRequest(BaseModel):
+    host: str
+    port: int = 80
+    username: str = ""
+    password: str = ""
+    purpose: str = "ai"
+
+
+@app.post('/api/v1/cameras/onvif/probe')
+def probe_camera_onvif(request: OnvifProbeRequest):
+    """Probe ONVIF on the edge LAN and recommend a stream profile."""
+    try:
+        result = probe_onvif(request.host.strip(), request.port, request.username, request.password)
+        result["recommended_profile"] = select_profile(result.get("profiles") or [], request.purpose)
+        return result
+    except OnvifUnavailable as exc:
+        raise HTTPException(501, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"ONVIF camera probe failed: {exc}")
+
 
 @app.post('/api/v1/cameras')
 def create_camera(camera_data: CameraCreate):
@@ -687,6 +830,28 @@ def face_image(person_id:str,face_id:str,s=Depends(get_store)):
 def delete_face(person_id:str,face_id:str,s=Depends(get_store)):
     if not s.delete_face(person_id,face_id): raise HTTPException(404,'Face not found')
     return {'deleted':True}
+
+class BreakActionRequest(BaseModel):
+    camera_id: str = "manual"
+    break_master_id: str | None = None
+
+@app.post('/api/v1/personnel/{person_id}/break/start')
+def start_person_break(person_id: str, body: BreakActionRequest, s=Depends(get_store)):
+    if not s.get_person(person_id):
+        raise HTTPException(404, 'Person not found')
+    try:
+        return attendance_engine.start_break(person_id, body.camera_id, break_master_id=body.break_master_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+@app.post('/api/v1/personnel/{person_id}/break/end')
+def end_person_break(person_id: str, body: BreakActionRequest, s=Depends(get_store)):
+    if not s.get_person(person_id):
+        raise HTTPException(404, 'Person not found')
+    try:
+        return attendance_engine.end_break(person_id, body.camera_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
 
 # Attendance APIs
 @app.get('/api/v1/attendance')
