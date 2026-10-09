@@ -115,3 +115,61 @@ def test_attendance_camera_stop_blocks_candidates_and_actions(tmp_path):
     manager.update_camera('entrance', {'attendance_active': False})
     with pytest.raises(ValueError, match='stopped'):
         station.apply('entrance', candidate['person_id'], candidate['token'], 'CHECK_IN', 'OUT', 'stopped', now)
+
+def test_manual_cycle_receives_finished_recognition_evidence(tmp_path, monkeypatch):
+    """Real SQLite, images and VP8 encoding; synthetic frames and deterministic clock."""
+    import json, cv2, numpy as np
+    from types import SimpleNamespace
+    from camera_service.camera_manager import CameraManager
+    import camera_service.camera_manager as module
+    station, now=station_fixture(tmp_path);store=station.engine.store
+    manager=CameraManager.__new__(CameraManager);manager.db_path=store.path
+    clock=SimpleNamespace(value=100.,monotonic=lambda:clock.value,time=lambda:clock.value)
+    monkeypatch.setattr(module,'time',clock)
+    class InlineThread:
+        def __init__(self,target,args,**kwargs):self.target,self.args=target,args
+        def start(self):self.target(*self.args)
+    monkeypatch.setattr(module.threading,'Thread',InlineThread)
+    frame=np.zeros((64,64,3),dtype=np.uint8)
+    stream={'security_clip':{'alert_id':'unrelated-security'}}
+    for index,action in enumerate(['CHECK_IN','START_BREAK','END_BREAK','CHECK_OUT']):
+        clock.value=100.+index*10;now+=timedelta(seconds=1)
+        ev=station.engine.identities[('entrance','1')]
+        station.engine.on_identity(ev.model_copy(update={'timestamp':now}))
+        photo=manager._save_event_snapshot(frame,'entrance','initial')
+        parent=store.add_person_event(station.candidate('entrance',now)['person_id'],'shop',
+            'entrance','PERSON_RECOGNIZED',now,{'snapshot_paths':[photo],'evidence_pending':True,'evidence_status':'PENDING_CAPTURE'})
+        manager._begin_attendance_evidence(stream,parent,'entrance',photo)
+        candidate=station.candidate('entrance',now)
+        result=station.apply('entrance',candidate['person_id'],candidate['token'],action,candidate['state'],str(index),now,evidence_path=photo)
+        for delta in (.6,1.2,2.,3.2):
+            clock.value=100.+index*10+delta;frame[:]=int(delta*50)
+            manager._record_attendance_evidence_frame(stream,frame,store)
+        metadata=json.loads(next(e for e in store.person_events() if e['id']==result['event_id'])['metadata_json'])
+        assert metadata['evidence_parent_event_id']==parent
+        assert metadata['evidence_status']=='COMPLETE' and metadata['evidence_pending'] is False
+        assert len(set(metadata['snapshot_paths']))==3
+        assert all(cv2.imread(path) is not None for path in metadata['snapshot_paths'])
+        capture=cv2.VideoCapture(metadata['clip_path'])
+        assert capture.isOpened() and capture.read()[0] and capture.get(cv2.CAP_PROP_FRAME_COUNT)>=3
+        capture.release()
+        queued=next(e for e in store.queued_events(100) if e['id']==result['event_id'])
+        assert json.loads(queued['payload_json'])['metadata']['evidence_status']=='COMPLETE'
+    assert stream['security_clip']['alert_id']=='unrelated-security'
+
+
+def test_interrupted_capture_remains_partial(tmp_path):
+    import json
+    from camera_service.camera_manager import CameraManager
+    station,now=station_fixture(tmp_path);store=station.engine.store
+    parent=store.add_person_event(station.candidate('entrance',now)['person_id'],'shop',
+        'entrance','PERSON_RECOGNIZED',now,{'evidence_pending':True})
+    candidate=station.candidate('entrance',now)
+    result=station.apply('entrance',candidate['person_id'],candidate['token'],'CHECK_IN','OUT','interrupted',now)
+    manager=CameraManager.__new__(CameraManager);stream={}
+    manager._begin_attendance_evidence(stream,parent,'entrance',None)
+    manager._finish_attendance_evidence(stream,store)
+    metadata=json.loads(next(e for e in store.person_events() if e['id']==result['event_id'])['metadata_json'])
+    assert metadata['evidence_pending'] is False and metadata['evidence_status']!='COMPLETE'
+    assert metadata['evidence_missing']['clip']=='no_frames'
+    assert 'camera_stopped' in metadata['evidence_missing']['snapshots']

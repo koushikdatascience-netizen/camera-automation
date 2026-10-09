@@ -46,13 +46,13 @@ class CloudSyncClient:
         if not path.is_file():
             raise FileNotFoundError(f"event evidence not found: {path}")
         suffix=path.suffix.lower()
-        content_type={".jpg":"image/jpeg",".jpeg":"image/jpeg",".png":"image/png",".webp":"image/webp",".mp4":"video/mp4"}.get(suffix,"application/octet-stream")
+        content_type={".jpg":"image/jpeg",".jpeg":"image/jpeg",".png":"image/png",".webp":"image/webp",".mp4":"video/mp4",".webm":"video/webm"}.get(suffix,"application/octet-stream")
         with path.open("rb") as stream:
             response = requests.post(
                 self.config.base_url.rstrip("/") + f"/edge/v1/events/{event_id}/evidence",
                 files={"file": (path.name, stream, content_type)},
                 headers={"Authorization": f"Bearer {self.config.api_token}"},
-                timeout=max(float(self.config.timeout_seconds), 60.0 if content_type=="video/mp4" else 30.0),
+                timeout=max(float(self.config.timeout_seconds), 60.0 if content_type.startswith("video/") else 30.0),
             )
         response.raise_for_status()
         return response.json()

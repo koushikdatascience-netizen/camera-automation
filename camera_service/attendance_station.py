@@ -188,7 +188,10 @@ class AttendanceStation:
                 "attendance_action_evidence": True,
                 "snapshot_paths": list(dict.fromkeys([p for p in [action_snapshot, *(evidence.get('snapshot_paths') or [])] if p]))[:3],
                 "clip_path": evidence.get('clip_path'),
-                "evidence_missing": {"clip": "recognition_clip_not_available"} if not evidence.get('clip_path') else {},
+                "evidence_parent_event_id": recognized["id"] if recognized else None,
+                "evidence_pending": bool(evidence.get("evidence_pending")),
+                "evidence_status": evidence.get("evidence_status", "PARTIAL" if action_snapshot else "UNAVAILABLE"),
+                "evidence_missing": dict(evidence.get("evidence_missing") or {}) if evidence.get("evidence_pending") or evidence.get("clip_path") else {"clip": "recognition_clip_not_available"},
                 "crm_confirmed_break": action in {"START_BREAK", "END_BREAK"},
                 **store.attendance_sync_metadata(
                     c, person_id, session_id, "MANUAL",

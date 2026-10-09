@@ -333,6 +333,12 @@ class SQLiteStore:
                 payload=json.loads(queued["payload_json"])
                 payload["metadata"]={**(payload.get("metadata") or {}),**metadata}
                 c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),event_id))
+            evidence_keys=('snapshot_paths','snapshot_path','clip_path','evidence_pending','evidence_status','evidence_missing')
+            for linked in c.execute("SELECT id,metadata_json FROM person_events WHERE "
+                                    "json_extract(metadata_json,'$.evidence_parent_event_id')=?",(event_id,)).fetchall():
+                linked_metadata=json.loads(linked['metadata_json'])
+                linked_metadata.update({key:metadata[key] for key in evidence_keys if key in metadata})
+                c.execute("UPDATE person_events SET metadata_json=? WHERE id=?",(json.dumps(linked_metadata),linked['id']))
             for linked in c.execute("SELECT id,payload_json FROM edge_event_queue WHERE status='PENDING' "
                                     "AND json_extract(payload_json,'$.metadata.evidence_parent_event_id')=?",(event_id,)).fetchall():
                 payload=json.loads(linked['payload_json'])

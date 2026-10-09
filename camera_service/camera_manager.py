@@ -851,7 +851,7 @@ class CameraManager:
         try:
             root = Path(self.db_path).parent / "evidence" / camera_id
             root.mkdir(parents=True, exist_ok=True)
-            path = root / f"{prefix}_{int(time.time() * 1000)}.jpg"
+            path = root / f"{prefix}_{uuid.uuid4().hex}.jpg"
             if not cv2.imwrite(str(path), frame):
                 return None
             return str(path)
@@ -892,11 +892,12 @@ class CameraManager:
         if stream_state is None:
             return
         snapshots=[first_snapshot] if first_snapshot and Path(first_snapshot).is_file() else []
-        clip_started=self._begin_evidence_clip(stream_state,event_id,camera_id,"attendance",
+        clip_state={"evidence_buffer":list(stream_state.get("evidence_buffer") or [])}
+        clip_started=self._begin_evidence_clip(clip_state,event_id,camera_id,"attendance",
                                                 post_duration=3.0,prebuffer_count=6)
         task={"event_id":event_id,"camera_id":camera_id,"started_at":time.monotonic(),
               "last_snapshot_at":time.monotonic(),"snapshot_paths":snapshots,
-              "clip_started":clip_started,"clip_missing_reason":None if clip_started else "camera_clip_capture_busy"}
+              "clip_state":clip_state,"clip_started":clip_started,"clip_missing_reason":None if clip_started else "camera_clip_capture_busy"}
         stream_state.setdefault("attendance_evidence_tasks",{})[event_id]=task
         if not snapshots:
             task["snapshot_missing_reason"]="initial_snapshot_unavailable"
@@ -912,6 +913,9 @@ class CameraManager:
                 if path:
                     task["snapshot_paths"].append(path)
                 task["last_snapshot_at"]=now
+            clip_state=task.get("clip_state")
+            if clip_state and clip_state.get("security_clip"):
+                self._record_security_clip_frame(clip_state,frame,store,finalize=False)
             if now-task["started_at"]<3.0:
                 continue
             missing={}
@@ -919,11 +923,12 @@ class CameraManager:
                 missing["snapshots"]=task.get("snapshot_missing_reason") or f"capture_incomplete_{len(task['snapshot_paths'])}_of_3"
             if task.get("clip_missing_reason"):
                 missing["clip"]=task["clip_missing_reason"]
-            if task.get("clip_started") and (stream_state.get("security_clip") or {}).get("alert_id")==event_id:
-                self._finalize_security_clip(stream_state,store)
             if store is not None and hasattr(store,"update_person_event_evidence"):
                 store.update_person_event_evidence(event_id,snapshot_paths=task["snapshot_paths"],
                     evidence_missing=missing,evidence_pending=bool(task.get("clip_started")))
+            clip_state=task.get("clip_state",stream_state)
+            if task.get("clip_started") and (clip_state.get("security_clip") or {}).get("alert_id")==event_id:
+                self._finalize_security_clip(clip_state,store)
             tasks.pop(event_id,None)
 
     def _finish_attendance_evidence(self, stream_state: dict | None, store=None,
@@ -939,14 +944,15 @@ class CameraManager:
                 missing["clip"]=task["clip_missing_reason"]
             elif task.get("clip_started"):
                 missing["clip"]=f"{reason}_before_clip_complete"
-            if task.get("clip_started") and (stream_state.get("security_clip") or {}).get("alert_id")==event_id:
-                self._finalize_security_clip(stream_state,store)
             if store is not None and hasattr(store,"update_person_event_evidence"):
                 store.update_person_event_evidence(event_id,snapshot_paths=task["snapshot_paths"],
                     evidence_missing=missing,evidence_pending=bool(task.get("clip_started")))
+            clip_state=task.get("clip_state",stream_state)
+            if task.get("clip_started") and (clip_state.get("security_clip") or {}).get("alert_id")==event_id:
+                self._finalize_security_clip(clip_state,store)
             tasks.pop(event_id,None)
 
-    def _record_security_clip_frame(self, stream_state: dict | None, frame, store=None):
+    def _record_security_clip_frame(self, stream_state: dict | None, frame, store=None, finalize=True):
         if stream_state is None:
             return
         now = time.monotonic()
@@ -964,7 +970,7 @@ class CameraManager:
             if ok:
                 clip["frames"].append(encoded.tobytes())
                 clip["last_sample_at"] = now
-        if now - clip["started_at"] >= clip["post_duration"]:
+        if finalize and now - clip["started_at"] >= clip["post_duration"]:
             self._finalize_security_clip(stream_state, store)
 
     def _finalize_security_clip(self, stream_state: dict | None, store=None):
@@ -994,9 +1000,9 @@ class CameraManager:
             root = Path(self.db_path).parent / "evidence" / clip["camera_id"]
             root.mkdir(parents=True, exist_ok=True)
             prefix = {"unknown":"unknown_clip","attendance":"attendance_clip"}.get(clip.get("event_kind"),"security_clip")
-            path = root / f"{prefix}_{int(time.time() * 1000)}.mp4"
+            path = root / f"{prefix}_{uuid.uuid4().hex}.webm"
             h, w = frames[0].shape[:2]
-            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 3.0, (w, h))
+            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"VP80"), 3.0, (w, h))
             if not writer.isOpened():
                 if clip.get("event_kind")=="attendance" and store is not None:
                     store.update_person_event_evidence(clip["alert_id"],evidence_missing={"clip":"video_writer_unavailable"},evidence_pending=False)
@@ -1006,6 +1012,13 @@ class CameraManager:
                     frame = cv2.resize(frame, (w, h))
                 writer.write(frame)
             writer.release()
+            verification=cv2.VideoCapture(str(path))
+            try:
+                playable=verification.isOpened() and verification.read()[0]
+            finally:
+                verification.release()
+            if not playable:
+                raise ValueError("encoded_clip_not_playable")
             if store is not None:
                 if clip.get("event_kind") == "unknown":
                     store.update_unknown_clip(clip["alert_id"], str(path))

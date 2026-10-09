@@ -1430,7 +1430,7 @@ def security_alert_snapshot(alert_id:str,s=Depends(get_store)):
 def security_alert_clip(alert_id:str,s=Depends(get_store)):
     alert=s.security_alert(alert_id)
     if not alert or not alert.get('clip_path'): raise HTTPException(404,'Clip not found')
-    return _saved_evidence(alert.get('clip_path'),s,media_type='video/mp4')
+    return _saved_evidence(alert.get('clip_path'),s,media_type='video/webm' if Path(str(alert.get('clip_path'))).suffix.lower()=='.webm' else 'video/mp4')
 
 @app.post('/api/v1/security-alerts/{alert_id}/acknowledge')
 def acknowledge_security_alert(alert_id:str,s=Depends(get_store)):
@@ -1460,7 +1460,7 @@ def unknown_clip(incident_id:str,s=Depends(get_store)):
     incident=s.unknown(incident_id)
     if not incident or not incident.get('clip_path'):
         raise HTTPException(404,'Clip not found')
-    return _saved_evidence(incident.get('clip_path'),s,media_type='video/mp4')
+    return _saved_evidence(incident.get('clip_path'),s,media_type='video/webm' if Path(str(incident.get('clip_path'))).suffix.lower()=='.webm' else 'video/mp4')
 
 @app.get('/api/v1/unknown-incidents/{incident_id}')
 def unknown(incident_id:str,s=Depends(get_store)):
