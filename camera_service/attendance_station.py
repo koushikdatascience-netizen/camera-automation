@@ -190,7 +190,10 @@ class AttendanceStation:
                 "clip_path": evidence.get('clip_path'),
                 "evidence_missing": {"clip": "recognition_clip_not_available"} if not evidence.get('clip_path') else {},
                 "crm_confirmed_break": action in {"START_BREAK", "END_BREAK"},
-                **store.attendance_sync_metadata(c, person_id, session_id, "MANUAL"),
+                **store.attendance_sync_metadata(
+                    c, person_id, session_id, "MANUAL",
+                    legacy_session_root=bool(session) and action != "CHECK_IN",
+                ),
                 "recognition_event_id": recognized['id'] if recognized else f"{camera_id}:{ev.track_id}:{ev.timestamp.isoformat()}",
             }
             c.execute(

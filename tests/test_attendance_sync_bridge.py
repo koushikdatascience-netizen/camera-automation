@@ -99,6 +99,19 @@ def test_manual_evidence_preserves_fresh_media_without_reusing_old_clip(bridge,a
         assert metadata['evidence_missing']['clip']=='recognition_clip_not_available'
 
 
+def test_pre_bridge_open_session_can_start_manual_chain(bridge):
+    with bridge.local._conn() as conn:
+        conn.execute("UPDATE attendance_sessions SET entry_confirmed=1 WHERE person_id=?",
+                     (bridge.person['id'],))
+    result=bridge.apply('START_BREAK','legacy-break')
+    assert result['applied']
+    row=next(row for row in bridge.local.queued_events() if row['event_type']=='BREAK_START')
+    metadata=json.loads(row['payload_json'])['metadata']
+    assert metadata['predecessor_event_id'] is None
+    assert metadata['legacy_session_root'] is True
+    assert bridge.ingest(bridge.envelope())['attendance_sync']['status']=='SUCCEEDED'
+
+
 def test_recognition_event_is_never_attendance_predecessor(bridge):
     bridge.local.add_person_event(
         bridge.person['id'],'shop','camera','PERSON_RECOGNIZED',bridge.now,

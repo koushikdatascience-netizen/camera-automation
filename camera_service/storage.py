@@ -221,15 +221,18 @@ class SQLiteStore:
     def open_session(self,person_id,store_id):
         with self._conn() as c:
             r=c.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? AND status='OPEN' ORDER BY arrival_time DESC LIMIT 1",(person_id,store_id)).fetchone(); return dict(r) if r else None
-    def attendance_sync_metadata(self, conn, person_id, session_id, mode):
+    def attendance_sync_metadata(self, conn, person_id, session_id, mode, legacy_session_root=False):
         previous = conn.execute("""SELECT id FROM edge_event_queue
             WHERE json_extract(payload_json,'$.person_id')=?
             AND event_type IN ('ATTENDANCE_ENTRY','ATTENDANCE_EXIT','BREAK_START','BREAK_END')
             AND json_extract(payload_json,'$.metadata.attendance_sync_bridge')=1
             ORDER BY rowid DESC LIMIT 1""", (person_id,)).fetchone()
-        return {"attendance_sync_bridge": True, "attendance_session_id": session_id,
-                "attendance_mode": mode, "attendance_source": "MANUAL" if mode == "MANUAL" else "RECOGNITION",
-                "predecessor_event_id": previous["id"] if previous else None}
+        metadata = {"attendance_sync_bridge": True, "attendance_session_id": session_id,
+                    "attendance_mode": mode, "attendance_source": "MANUAL" if mode == "MANUAL" else "RECOGNITION",
+                    "predecessor_event_id": previous["id"] if previous else None}
+        if legacy_session_root and not previous:
+            metadata["legacy_session_root"] = True
+        return metadata
     def create_arrival(self,person_id,store_id,ts,camera,confidence,snapshot_path=None,confirmed=False):
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")

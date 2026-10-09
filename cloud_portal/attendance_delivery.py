@@ -123,7 +123,10 @@ class AttendanceDeliveryStore:
                     or (envelope['event_type']=='ATTENDANCE_ENTRY' and p['session_id']==args['session'])):
                     raise ValueError('Attendance session pairing conflict')
             elif envelope['event_type']!='ATTENDANCE_ENTRY':
-                raise ValueError('Attendance session requires a check-in predecessor')
+                legacy_root = (metadata.get('legacy_session_root') is True
+                               and metadata.get('attendance_source') == 'MANUAL')
+                if not legacy_root:
+                    raise ValueError('Attendance session requires a check-in predecessor')
             busy = self._delivery_execute(conn, """SELECT event_id FROM edge_attendance_delivery
                 WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person
                 AND event_id<>:id AND status IN ('CLAIMED','CRM_CONFIRMED','RECONCILIATION_REQUIRED')""", args).fetchone()
