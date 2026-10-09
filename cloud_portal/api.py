@@ -1888,12 +1888,23 @@ def portal_personnel(tenant_id: str, principal: PortalPrincipal = Depends(requir
     for edge in store.list_edges(tenant_id,shop_id=principal.shop_id):
         for person in (edge.get("status") or {}).get("personnel") or []:
             edge_people.setdefault(str(person.get("person_id") or ""),[]).append(str(edge.get("edge_id") or ""))
+    # The CRM-managed directory must never present local/demo identities as CRM
+    # employees. Keep those database rows for historical attendance and evidence.
+    mappings={str(m["local_person_id"]):m for m in
+              store.list_crm_person_mappings(tenant_id,principal.shop_id)}
     items=[]
     for person in store.list_cloud_people(tenant_id,principal.shop_id):
-        pid=str(person["id"]); item=dict(person)
-        item["person_id"]=pid; item["edge_ids"]=sorted(set(edge_people.get(pid,[])))
-        item["edge_synced"]=bool(item["edge_ids"]); item["face_enrolled"]=int(item.get("face_count") or 0)>0
-        item["crm_user_id"]=pid
+        pid=str(person["id"])
+        mapping=mappings.get(pid)
+        if not mapping or not str(mapping.get("crm_user_id") or "").strip():
+            continue
+        item=dict(person)
+        item["person_id"]=pid
+        item["edge_ids"]=sorted(set(edge_people.get(pid,[])))
+        item["edge_synced"]=bool(item["edge_ids"])
+        item["face_enrolled"]=int(item.get("face_count") or 0)>0
+        item["crm_user_id"]=str(mapping["crm_user_id"])
+        item["crm_mapped"]=True
         items.append(item)
     return {"items":items}
 
