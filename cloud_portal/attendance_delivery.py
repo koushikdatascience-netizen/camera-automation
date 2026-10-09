@@ -37,7 +37,8 @@ class AttendanceDeliveryStore:
                 event_type TEXT NOT NULL,
                 status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                 claimed_at TEXT, next_attempt_at TEXT, error_code TEXT, updated_at TEXT NOT NULL)""")
-            for column in ('event_type','reconciled_by','reconciliation_note','reconciled_at'):
+            for column in ('event_type','effective_predecessor_id','registration_reason',
+                           'reconciled_by','reconciliation_note','reconciled_at'):
                 definition="TEXT NOT NULL DEFAULT ''" if column=='event_type' else 'TEXT'
                 if hasattr(self,'engine'):
                     self._delivery_execute(conn,f'ALTER TABLE edge_attendance_delivery ADD COLUMN IF NOT EXISTS {column} {definition}')
@@ -46,33 +47,133 @@ class AttendanceDeliveryStore:
             self._delivery_execute(conn,"""UPDATE edge_attendance_delivery SET event_type=COALESCE(
                 (SELECT event_type FROM edge_events WHERE id=edge_attendance_delivery.event_id),'')
                 WHERE event_type=''""")
+            self._delivery_execute(conn,"""UPDATE edge_attendance_delivery
+                SET effective_predecessor_id=predecessor_id
+                WHERE effective_predecessor_id IS NULL AND predecessor_id IS NOT NULL""")
             self._delivery_execute(conn, """CREATE INDEX IF NOT EXISTS idx_attendance_delivery_person
                 ON edge_attendance_delivery(tenant_id,shop_id,person_id,status)""")
             self._delivery_execute(conn, """CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_delivery_session_action
                 ON edge_attendance_delivery(tenant_id,shop_id,person_id,session_id,event_type)
                 WHERE event_type IN ('ATTENDANCE_ENTRY','ATTENDANCE_EXIT')""")
+            self._delivery_execute(conn, "DROP INDEX IF EXISTS idx_attendance_delivery_chain")
             self._delivery_execute(conn, """CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_delivery_chain
-                ON edge_attendance_delivery(tenant_id,shop_id,person_id,predecessor_id)
-                WHERE predecessor_id IS NOT NULL""")
+                ON edge_attendance_delivery(tenant_id,shop_id,person_id,effective_predecessor_id)
+                WHERE effective_predecessor_id IS NOT NULL""")
+
+    def _attendance_identity(self, envelope):
+        payload = attendance_payload(envelope)
+        metadata = payload.get("metadata") or {}
+        identity = {key: envelope.get(key) for key in
+                    ("tenant_id", "shop_id", "edge_id", "camera_id", "event_id", "event_type", "event_time")}
+        identity.update(person_id=payload.get("person_id"),
+                        session_id=metadata.get("attendance_session_id"),
+                        predecessor=metadata.get("predecessor_event_id"),
+                        source=metadata.get("attendance_source"))
+        if not all(identity.get(key) for key in
+                   ("tenant_id", "shop_id", "edge_id", "event_id", "event_type",
+                    "person_id", "session_id", "source")):
+            raise ValueError("Attendance identity, source, and session are required")
+        if identity["source"] not in {"MANUAL", "RECOGNITION"}:
+            raise ValueError("Invalid attendance source")
+        return identity
+
+    def _event_envelope(self, tenant, shop, event_id):
+        event = self.get_event(str(tenant), str(shop), str(event_id))
+        if not event:
+            return None
+        value = event.get("payload")
+        return value if isinstance(value, dict) else None
+
+    def register_attendance_delivery(self, envelope, *, initial_status="MAPPING_REQUIRED",
+                                     recovery_reason=None):
+        """Register an immutable cloud receipt before CRM mapping or dispatch.
+
+        Historical attendance predecessors that exist in edge_events but have no
+        receipt are quarantined. Their CRM outcome is unknown, so registration must
+        never replay them automatically.
+        """
+        if initial_status not in {"MAPPING_REQUIRED", "RECONCILIATION_REQUIRED"}:
+            raise ValueError("Invalid initial attendance delivery status")
+        identity = self._attendance_identity(envelope)
+        metadata = attendance_payload(envelope).get("metadata") or {}
+        original_predecessor = identity["predecessor"]
+        effective_predecessor = original_predecessor
+        registration_reason = recovery_reason
+
+        if original_predecessor:
+            if str(original_predecessor) == str(identity["event_id"]):
+                raise ValueError("Attendance event cannot precede itself")
+            predecessor_envelope = self._event_envelope(
+                identity["tenant_id"], identity["shop_id"], original_predecessor)
+            if predecessor_envelope:
+                predecessor_type = str(predecessor_envelope.get("event_type") or "")
+                predecessor_payload = attendance_payload(predecessor_envelope)
+                predecessor_person = str(predecessor_payload.get("person_id") or "")
+                if predecessor_person and predecessor_person != str(identity["person_id"]):
+                    raise ValueError("Attendance predecessor person conflict")
+                if (identity["event_type"] == "ATTENDANCE_ENTRY"
+                        and predecessor_type == "PERSON_RECOGNIZED"):
+                    effective_predecessor = None
+                    registration_reason = "IGNORED_NON_ATTENDANCE_PREDECESSOR"
+                elif predecessor_type in {"ATTENDANCE_ENTRY", "ATTENDANCE_EXIT",
+                                           "BREAK_START", "BREAK_END"}:
+                    if not self.attendance_delivery_receipt(
+                            identity["tenant_id"], identity["shop_id"], original_predecessor):
+                        self.register_attendance_delivery(
+                            predecessor_envelope,
+                            initial_status="RECONCILIATION_REQUIRED",
+                            recovery_reason="HISTORICAL_RECEIPT_MISSING",
+                        )
+
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        now = datetime.now(timezone.utc).isoformat()
+        args = dict(id=identity["event_id"], tenant=identity["tenant_id"],
+                    shop=identity["shop_id"], edge=identity["edge_id"],
+                    person=identity["person_id"], session=identity["session_id"],
+                    predecessor=original_predecessor, effective=effective_predecessor,
+                    digest=digest, type=identity["event_type"], status=initial_status,
+                    reason=registration_reason, now=now)
+        with self._delivery_conn() as conn:
+            duplicate = self._delivery_execute(conn, """SELECT event_id FROM edge_attendance_delivery
+                WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person AND event_id<>:id
+                AND ((session_id=:session AND event_type=:type
+                      AND :type IN ('ATTENDANCE_ENTRY','ATTENDANCE_EXIT'))
+                     OR (effective_predecessor_id=:effective AND :effective IS NOT NULL))
+                LIMIT 1""", args).fetchone()
+            if duplicate:
+                raise ValueError('Attendance action already has a delivery identity')
+            self._delivery_execute(conn, """INSERT INTO edge_attendance_delivery(
+                event_id,tenant_id,shop_id,edge_id,person_id,crm_user_id,session_id,
+                predecessor_id,effective_predecessor_id,identity_hash,event_type,status,
+                registration_reason,updated_at)
+                VALUES(:id,:tenant,:shop,:edge,:person,'',:session,:predecessor,:effective,
+                       :digest,:type,:status,:reason,:now)
+                ON CONFLICT(event_id) DO NOTHING""", args)
+            row = self._delivery_execute(conn,
+                "SELECT * FROM edge_attendance_delivery WHERE event_id=:id", args).fetchone()
+            row = dict(row._mapping) if hasattr(row, "_mapping") else dict(row)
+            legacy_identity = dict(identity, crm_user_id=str(row.get("crm_user_id") or ""))
+            legacy_digest = hashlib.sha256(json.dumps(legacy_identity, sort_keys=True).encode()).hexdigest()
+            if row["identity_hash"] not in {digest, legacy_digest}:
+                raise ValueError("Attendance event identity conflict")
+            if effective_predecessor != original_predecessor:
+                self._delivery_execute(conn, """UPDATE edge_attendance_delivery SET
+                    effective_predecessor_id=:effective,registration_reason=:reason,updated_at=:now
+                    WHERE event_id=:id""", args)
+                row["effective_predecessor_id"] = effective_predecessor
+                row["registration_reason"] = registration_reason
+            return row
 
     def claim_attendance_delivery(self, envelope, crm_user_id, now=None):
         now = now or datetime.now(timezone.utc)
         payload = attendance_payload(envelope)
         metadata = payload.get("metadata") or {}
-        identity = {key: envelope.get(key) for key in
-                    ("tenant_id", "shop_id", "edge_id", "camera_id", "event_id", "event_type", "event_time")}
-        identity.update(person_id=payload.get("person_id"), crm_user_id=str(crm_user_id),
-                        session_id=metadata.get("attendance_session_id"),
-                        predecessor=metadata.get("predecessor_event_id"),
-                        source=metadata.get("attendance_source"))
-        if not all(identity.get(key) for key in
-                   ("tenant_id", "shop_id", "edge_id", "person_id", "session_id")):
-            raise ValueError("Attendance identity and session are required")
-        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        identity = self._attendance_identity(envelope)
+        registered = self.register_attendance_delivery(envelope)
         args = dict(id=identity["event_id"], tenant=identity["tenant_id"], shop=identity["shop_id"],
                     edge=identity["edge_id"], person=identity["person_id"], user=str(crm_user_id),
-                    session=identity["session_id"], predecessor=identity["predecessor"],
-                    digest=digest, type=envelope['event_type'], now=now.isoformat())
+                    session=identity["session_id"], predecessor=registered.get("effective_predecessor_id"),
+                    type=envelope['event_type'], now=now.isoformat())
         with self._delivery_conn() as conn:
             if hasattr(self, "engine"):
                 lock = int.from_bytes(hashlib.sha256(
@@ -81,19 +182,21 @@ class AttendanceDeliveryStore:
             duplicate = self._delivery_execute(conn, """SELECT event_id FROM edge_attendance_delivery
                 WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person AND event_id<>:id
                 AND ((session_id=:session AND event_type=:type AND :type IN ('ATTENDANCE_ENTRY','ATTENDANCE_EXIT'))
-                     OR (predecessor_id=:predecessor AND :predecessor IS NOT NULL)) LIMIT 1""",args).fetchone()
+                     OR (effective_predecessor_id=:predecessor AND :predecessor IS NOT NULL)) LIMIT 1""",args).fetchone()
             if duplicate:
                 raise ValueError('Attendance action already has a delivery identity')
-            self._delivery_execute(conn, """INSERT INTO edge_attendance_delivery(
-                event_id,tenant_id,shop_id,edge_id,person_id,crm_user_id,session_id,
-                predecessor_id,identity_hash,event_type,status,updated_at)
-                VALUES(:id,:tenant,:shop,:edge,:person,:user,:session,:predecessor,:digest,:type,'RETRY',:now)
-                ON CONFLICT(event_id) DO NOTHING""", args)
             row = self._delivery_execute(conn,
                 "SELECT * FROM edge_attendance_delivery WHERE event_id=:id", args).fetchone()
             row = dict(row._mapping) if hasattr(row, "_mapping") else dict(row)
-            if row["identity_hash"] != digest:
-                raise ValueError("Attendance event identity conflict")
+            if row.get("crm_user_id") and str(row["crm_user_id"]) != str(crm_user_id):
+                raise ValueError("Attendance event identity conflict: CRM user")
+            if not row.get("crm_user_id"):
+                self._delivery_execute(conn, """UPDATE edge_attendance_delivery SET
+                    crm_user_id=:user,status=CASE WHEN status='MAPPING_REQUIRED' THEN 'RETRY' ELSE status END,
+                    updated_at=:now WHERE event_id=:id""", args)
+                row["crm_user_id"] = str(crm_user_id)
+                if row["status"] == "MAPPING_REQUIRED":
+                    row["status"] = "RETRY"
             status = row["status"]
             if status == "CLAIMED" and row["claimed_at"] < (now-timedelta(minutes=5)).isoformat():
                 self._delivery_execute(conn, """UPDATE edge_attendance_delivery SET
@@ -141,7 +244,8 @@ class AttendanceDeliveryStore:
             return status, True
 
     def set_attendance_delivery(self, envelope, status, error_code=None, retry_seconds=0):
-        if status not in {"SUCCEEDED", "CRM_CONFIRMED", "RETRY", "RECONCILIATION_REQUIRED"}:
+        if status not in {"SUCCEEDED", "CRM_CONFIRMED", "RETRY", "MAPPING_REQUIRED",
+                          "RECONCILIATION_REQUIRED"}:
             raise ValueError("Invalid attendance delivery status")
         now = datetime.now(timezone.utc)
         with self._delivery_conn() as conn:

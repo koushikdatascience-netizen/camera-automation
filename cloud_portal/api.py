@@ -1350,15 +1350,28 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
         raise
 
 
-def _synchronize_attendance_bridge(envelope):
+def _synchronize_attendance_bridge(envelope, *, historical_missing_receipt=False):
     from cloud_portal.attendance_delivery import attendance_payload
     payload=attendance_payload(envelope)
     metadata=payload.get('metadata') or {}
     tenant,shop=str(envelope['tenant_id']),str(envelope.get('shop_id') or '')
     person=str(payload.get('person_id') or '')
+    try:
+        receipt=store.register_attendance_delivery(
+            envelope,
+            initial_status=('RECONCILIATION_REQUIRED' if historical_missing_receipt
+                            else 'MAPPING_REQUIRED'),
+            recovery_reason=('HISTORICAL_RECEIPT_MISSING' if historical_missing_receipt else None),
+        )
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
     mapping=store.crm_person_mapping(tenant,shop,person)
     if not mapping:
-        return {'status':'MAPPING_REQUIRED'}
+        if receipt.get('status') in {'CRM_CONFIRMED','RECONCILIATION_REQUIRED'}:
+            return {'status':receipt['status'],'error_code':'CRM_MAPPING_REQUIRED',
+                    'attempts':int(receipt.get('attempts') or 0)}
+        store.set_attendance_delivery(envelope,'MAPPING_REQUIRED','CRM_MAPPING_REQUIRED')
+        return {'status':'MAPPING_REQUIRED','attempts':int(receipt.get('attempts') or 0)}
     if metadata.get('attendance_source') not in {'MANUAL','RECOGNITION'}:
         raise HTTPException(400,'Invalid attendance source')
     try:
@@ -1398,6 +1411,10 @@ def _synchronize_attendance_bridge(envelope):
         # Never persist exception text: upstream errors can contain credentials.
         attempted=getattr(exc,'attendance_mutation_attempted',False)
         upstream=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
+        known_code=str(exc) if str(exc) in {
+            'CRM rejected attendance event','EMPLOYEE_MANUAL_MODE','AUTO_LOGIN_DISABLED',
+            'EXPLICIT_CHECKOUT_REQUIRED','CONFIRMED_BREAK_REQUIRED','CRM_BREAK_MAPPING_REQUIRED',
+        } else type(exc).__name__
         definitive_rejection=(isinstance(exc,RuntimeError) and str(exc)=='CRM rejected attendance event')
         safe_failure=(definitive_rejection or upstream in {400,401,403,404,409,422,429}
                       or isinstance(exc,(httpx.ConnectError,httpx.ConnectTimeout)))
@@ -1405,8 +1422,8 @@ def _synchronize_attendance_bridge(envelope):
         failure='RECONCILIATION_REQUIRED' if uncertain else 'RETRY'
         # A confirmed remote mutation must only retry local finalization.
         if status=='CRM_CONFIRMED': failure='CRM_CONFIRMED'
-        store.set_attendance_delivery(envelope,failure,type(exc).__name__,retry_seconds=5)
-        return {'status':failure,'error_code':type(exc).__name__}
+        store.set_attendance_delivery(envelope,failure,known_code,retry_seconds=5)
+        return {'status':failure,'error_code':known_code}
 
 
 def _attendance_session_id(person_id: str, when: datetime, action_id: str | None = None) -> str:
@@ -1761,6 +1778,8 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
         raise HTTPException(403,'Attendance synchronization requires a scoped edge credential')
     result=store.ingest_event(envelope)
     if bridge and envelope.get('event_type') in {'ATTENDANCE_ENTRY','ATTENDANCE_EXIT','BREAK_START','BREAK_END'}:
+        receipt_before=store.attendance_delivery_receipt(
+            str(envelope['tenant_id']),str(envelope.get('shop_id') or ''),str(envelope['event_id']))
         original=store.get_event(str(envelope['tenant_id']),str(envelope.get('shop_id') or ''),str(envelope['event_id']))
         if not original:
             raise HTTPException(409,'Event identity conflicts with an existing scope')
@@ -1773,7 +1792,8 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
             or any((saved_payload.get('metadata') or {}).get(k)!=(retry_payload.get('metadata') or {}).get(k)
                    for k in ('attendance_session_id','attendance_source','predecessor_event_id'))):
             raise HTTPException(409,'Attendance event identity conflict')
-        result['attendance_sync']=_synchronize_attendance_bridge(saved)
+        result['attendance_sync']=_synchronize_attendance_bridge(
+            saved,historical_missing_receipt=(not result.get('inserted',True) and receipt_before is None))
         return result
     # Edge delivery is at-least-once. Only the first successful insert may create a
     # downstream CRM mutation; retries of the same event_id are acknowledged without
@@ -1813,6 +1833,43 @@ def attendance_sync_receipt(tenant_id: str,event_id: str,
     return receipt
 
 
+@app.get('/portal/v1/tenants/{tenant_id}/attendance-sync/{event_id}/readiness')
+def attendance_sync_readiness(tenant_id: str,event_id: str,
+                              principal: PortalPrincipal=Depends(require_portal_session)):
+    """Return credential-free dispatch blockers for one scoped attendance event."""
+    from cloud_portal.attendance_delivery import attendance_payload
+    _portal_scope(tenant_id,principal)
+    _portal_admin(principal)
+    saved=store.get_event(tenant_id,principal.shop_id,event_id)
+    if not saved: raise HTTPException(404,'Attendance event not found')
+    envelope=saved['payload']; payload=attendance_payload(envelope)
+    metadata=payload.get('metadata') or {}
+    person=str(payload.get('person_id') or '')
+    mapping=store.crm_person_mapping(tenant_id,principal.shop_id,person) if person else None
+    policy=(store.person_attendance_policy(tenant_id,principal.shop_id,str(mapping['crm_user_id']))
+            if mapping and hasattr(store,'person_attendance_policy') else {}) or {}
+    event_type=str(envelope.get('event_type') or '')
+    source=str(metadata.get('attendance_source') or '')
+    blockers=[]
+    if not mapping: blockers.append('CRM_MAPPING_REQUIRED')
+    if not getattr(crm_client,'face_attendance_configured',False):
+        blockers.append('CRM_FACE_AUTH_NOT_CONFIGURED')
+    if not os.getenv('CAMERA_EYE_TOKEN_ENCRYPTION_KEY','').strip():
+        blockers.append('TOKEN_ENCRYPTION_KEY_REQUIRED')
+    auto_login_enabled=os.getenv('SNAPKEY_CRM_AUTO_LOGIN_ENABLED',
+        os.getenv('SNAPKEY_CRM_ATTENDANCE_ENABLED','0')).strip()=='1'
+    if event_type=='ATTENDANCE_ENTRY' and source=='RECOGNITION' and not auto_login_enabled:
+        blockers.append('AUTO_LOGIN_DISABLED')
+    if (event_type in {'ATTENDANCE_ENTRY','ATTENDANCE_EXIT'} and source!='MANUAL'
+            and str(policy.get('attendanceMode') or 'AUTO').upper()=='MANUAL'):
+        blockers.append('EMPLOYEE_MANUAL_MODE')
+    if event_type=='BREAK_START' and mapping and not mapping.get('break_master_id'):
+        blockers.append('CRM_BREAK_MAPPING_REQUIRED')
+    return {'event_id':event_id,'event_type':event_type,'attendance_source':source,
+            'ready':not blockers,'blockers':blockers,
+            'receipt':store.attendance_delivery_receipt(tenant_id,principal.shop_id,event_id)}
+
+
 @app.post('/portal/v1/tenants/{tenant_id}/attendance-sync/{event_id}/reconcile')
 def reconcile_attendance_sync(tenant_id: str,event_id: str,request: AttendanceSyncReconciliation,
                               principal: PortalPrincipal=Depends(require_portal_session)):
@@ -1821,7 +1878,11 @@ def reconcile_attendance_sync(tenant_id: str,event_id: str,request: AttendanceSy
     if not store.reconcile_attendance_delivery(tenant_id,principal.shop_id,event_id,
             request.crm_applied,str(principal.user_id),request.justification):
         raise HTTPException(409,'Delivery is not awaiting reconciliation in this shop')
-    return {'ok':True,'status':'CRM_CONFIRMED' if request.crm_applied else 'RETRY'}
+    saved=store.get_event(tenant_id,principal.shop_id,event_id)
+    if not saved:
+        raise HTTPException(409,'The immutable source event is unavailable')
+    result=_synchronize_attendance_bridge(saved['payload'])
+    return {'ok':True,**result}
 
 
 @app.delete("/portal/v1/tenants/{tenant_id}/edges/{edge_id}")

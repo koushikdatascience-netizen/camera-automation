@@ -36,7 +36,8 @@ def bridge(tmp_path, monkeypatch):
     portal.upsert_crm_person_mapping(dict(tenant_id='tenant',shop_id='shop',
         local_person_id=person['id'],crm_user_id='crm-user',break_master_id='lunch'))
     calls=[]
-    crm=SimpleNamespace(login_logout_with_face_token=lambda body,token: calls.append(('attendance',body,token)) or {'success':True},
+    crm=SimpleNamespace(face_attendance_configured=True,
+        login_logout_with_face_token=lambda body,token: calls.append(('attendance',body,token)) or {'success':True},
         business_success=SnapKeyCrmClient.business_success,
         start_break=lambda user,break_id,auth_token: calls.append(('start',user,auth_token)) or {'success':True},
         end_break=lambda user,auth_token: calls.append(('end',user,auth_token)) or {'success':True})
@@ -123,6 +124,37 @@ def test_recognition_event_is_never_attendance_predecessor(bridge):
     assert bridge.ingest(bridge.envelope(1))['attendance_sync']['status']=='SUCCEEDED'
 
 
+def test_cloud_repairs_deployed_auto_entry_with_recognition_predecessor(bridge,monkeypatch):
+    """A pre-fix edge may have persisted PERSON_RECOGNIZED as the predecessor."""
+    monkeypatch.setenv('SNAPKEY_CRM_AUTO_LOGIN_ENABLED','1')
+    recognized={
+        'schema_version':'edge.event.v1','tenant_id':'tenant','company_code':'company',
+        'shop_id':'shop','site_id':'site','edge_id':'edge','camera_id':'camera',
+        'event_id':'recognition-old','event_type':'PERSON_RECOGNIZED',
+        'event_time':bridge.now.isoformat(),'payload':{
+            'event_id':'recognition-old','person_id':bridge.person['id'],
+            'event_type':'PERSON_RECOGNIZED','event_time':bridge.now.isoformat(),
+            'metadata':{'attendance_sync_bridge':True}},
+    }
+    bridge.portal.ingest_event(recognized)
+    entry=copy.deepcopy(recognized)
+    entry.update(event_id='entry-old',event_type='ATTENDANCE_ENTRY')
+    entry['payload']={
+        'event_id':'entry-old','person_id':bridge.person['id'],'event_type':'ATTENDANCE_ENTRY',
+        'event_time':bridge.now.isoformat(),'metadata':{
+            'attendance_sync_bridge':True,'attendance_source':'RECOGNITION',
+            'attendance_mode':'AUTO','attendance_session_id':'session-old',
+            'predecessor_event_id':'recognition-old'},
+    }
+    result=bridge.ingest(entry)
+    assert result['attendance_sync']['status']=='SUCCEEDED'
+    receipt=bridge.portal.attendance_delivery_receipt('tenant','shop','entry-old')
+    assert receipt['predecessor_id']=='recognition-old'
+    assert receipt['effective_predecessor_id'] is None
+    assert receipt['registration_reason']=='IGNORED_NON_ATTENDANCE_PREDECESSOR'
+    assert len(bridge.calls)==1
+
+
 def test_existing_explicit_break_routes_use_the_same_session_queue(bridge):
     checked_in=bridge.apply('CHECK_IN','in')
     bridge.station.engine.start_break(bridge.person['id'],'camera',bridge.now)
@@ -151,6 +183,64 @@ def test_out_of_order_delivery_waits_for_predecessor(bridge):
     assert bridge.calls==[]
     assert bridge.ingest(bridge.envelope())['attendance_sync']['status']=='SUCCEEDED'
     assert bridge.ingest(bridge.envelope(1))['attendance_sync']['status']=='SUCCEEDED'
+
+
+def test_ingested_break_registers_before_mapping_and_delivers_after_mapping(bridge):
+    bridge.apply('CHECK_IN','in'); bridge.ingest(bridge.envelope())
+    bridge.apply('START_BREAK','break')
+    event=bridge.envelope(1)
+    with bridge.portal._conn() as conn:
+        conn.execute("DELETE FROM crm_person_mappings WHERE tenant_id=? AND shop_id=?",
+                     ('tenant','shop'))
+    result=bridge.ingest(event)
+    assert result['attendance_sync']=={'status':'MAPPING_REQUIRED','attempts':0}
+    receipt=bridge.portal.attendance_delivery_receipt('tenant','shop',event['event_id'])
+    assert receipt['status']=='MAPPING_REQUIRED' and receipt['attempts']==0
+    assert len(bridge.calls)==1  # check-in only
+    bridge.portal.upsert_crm_person_mapping(dict(tenant_id='tenant',shop_id='shop',
+        local_person_id=bridge.person['id'],crm_user_id='crm-user',break_master_id='lunch'))
+    assert bridge.ingest(event)['attendance_sync']['status']=='SUCCEEDED'
+    assert [call[0] for call in bridge.calls]==['attendance','start']
+
+
+def test_missing_historical_break_predecessor_is_quarantined_until_operator_review(bridge):
+    bridge.apply('CHECK_IN','in'); bridge.apply('START_BREAK','start'); bridge.apply('END_BREAK','end')
+    entry,start,end=(bridge.envelope(i) for i in range(3))
+    bridge.ingest(entry)
+    # Reproduce production: immutable BREAK_START exists, but its delivery receipt does not.
+    bridge.portal.ingest_event(start)
+    result=bridge.ingest(end)
+    assert result['attendance_sync']['status']=='WAITING_PREDECESSOR'
+    start_receipt=bridge.portal.attendance_delivery_receipt('tenant','shop',start['event_id'])
+    assert start_receipt['status']=='RECONCILIATION_REQUIRED'
+    assert start_receipt['registration_reason']=='HISTORICAL_RECEIPT_MISSING'
+    assert start_receipt['attempts']==0
+    assert [call[0] for call in bridge.calls]==['attendance']
+
+    admin=api.PortalPrincipal('session','tenant','company','shop','admin','Admin','OWNER')
+    review=api.AttendanceSyncReconciliation(
+        crm_applied=False,justification='CRM roster verified: break start was not applied')
+    assert api.reconcile_attendance_sync('tenant',start['event_id'],review,admin)['status']=='SUCCEEDED'
+    assert [call[0] for call in bridge.calls]==['attendance','start']
+    assert bridge.ingest(end)['attendance_sync']['status']=='SUCCEEDED'
+    assert [call[0] for call in bridge.calls]==['attendance','start','end']
+
+
+def test_duplicate_break_start_ingestion_recovers_interrupted_registration_safely(bridge):
+    """A persisted event with no receipt may have been interrupted before registration."""
+    bridge.apply('CHECK_IN','in'); bridge.apply('START_BREAK','start')
+    entry,start=(bridge.envelope(i) for i in range(2))
+    assert bridge.ingest(entry)['attendance_sync']['status']=='SUCCEEDED'
+    # Simulate a process interruption after immutable ingestion, before receipt creation.
+    bridge.portal.ingest_event(start)
+
+    recovered=bridge.ingest(start)
+    receipt=bridge.portal.attendance_delivery_receipt('tenant','shop',start['event_id'])
+    assert recovered['attendance_sync']['status']=='RECONCILIATION_REQUIRED'
+    assert receipt['status']=='RECONCILIATION_REQUIRED'
+    assert receipt['registration_reason']=='HISTORICAL_RECEIPT_MISSING'
+    assert receipt['attempts']==0
+    assert [call[0] for call in bridge.calls]==['attendance']
 
 
 def retry_now(bridge):
@@ -182,6 +272,7 @@ def test_timeout_requires_reconciliation_and_does_not_replay(bridge):
 
 def test_reconciliation_requires_scoped_admin_and_does_not_repeat_confirmed_crm(bridge):
     bridge.apply('CHECK_IN','in'); event=bridge.envelope()
+    bridge.portal.ingest_event(event)
     bridge.portal.claim_attendance_delivery(event,'crm-user')
     bridge.portal.set_attendance_delivery(event,'RECONCILIATION_REQUIRED')
     admin=api.PortalPrincipal('session','tenant','company','shop','admin','Admin','OWNER')
@@ -192,7 +283,7 @@ def test_reconciliation_requires_scoped_admin_and_does_not_repeat_confirmed_crm(
     assert error.value.status_code==403
     other=api.PortalPrincipal('session','tenant','company','other-shop','admin','Admin','OWNER')
     with pytest.raises(HTTPException): api.reconcile_attendance_sync('tenant',event['event_id'],request,other)
-    assert api.reconcile_attendance_sync('tenant',event['event_id'],request,admin)['status']=='CRM_CONFIRMED'
+    assert api.reconcile_attendance_sync('tenant',event['event_id'],request,admin)['status']=='SUCCEEDED'
     receipt=api.attendance_sync_receipt('tenant',event['event_id'],admin)
     assert receipt['reconciled_by']=='admin'
     assert bridge.ingest(event)['attendance_sync']['status']=='SUCCEEDED'
@@ -233,6 +324,38 @@ def test_missing_mapping_cannot_use_client_supplied_crm_identity(bridge):
     event['payload']['crm_user_id']='crm-user'
     assert bridge.ingest(event)['attendance_sync']['status']=='MAPPING_REQUIRED'
     assert bridge.calls==[]
+    receipt=bridge.portal.attendance_delivery_receipt('tenant','shop',event['event_id'])
+    assert receipt['status']=='MAPPING_REQUIRED' and receipt['attempts']==0
+
+
+def test_confirmed_reconciliation_never_falls_back_to_dispatch_when_mapping_is_temporarily_missing(bridge):
+    bridge.apply('CHECK_IN','in'); event=bridge.envelope()
+    bridge.portal.ingest_event(event)
+    bridge.portal.claim_attendance_delivery(event,'crm-user')
+    bridge.portal.set_attendance_delivery(event,'RECONCILIATION_REQUIRED')
+    with bridge.portal._conn() as conn:
+        conn.execute("DELETE FROM crm_person_mappings WHERE tenant_id=? AND shop_id=?",('tenant','shop'))
+    admin=api.PortalPrincipal('session','tenant','company','shop','admin','Admin','OWNER')
+    request=api.AttendanceSyncReconciliation(
+        crm_applied=True,justification='Verified matching check-in in CRM before recovery')
+    result=api.reconcile_attendance_sync('tenant',event['event_id'],request,admin)
+    assert result['status']=='CRM_CONFIRMED' and result['error_code']=='CRM_MAPPING_REQUIRED'
+    assert bridge.calls==[]
+    bridge.portal.upsert_crm_person_mapping(dict(tenant_id='tenant',shop_id='shop',
+        local_person_id=bridge.person['id'],crm_user_id='crm-user',break_master_id='lunch'))
+    assert bridge.ingest(event)['attendance_sync']['status']=='SUCCEEDED'
+    assert bridge.calls==[]
+
+
+def test_scoped_readiness_reports_flags_and_break_mapping_without_secrets(bridge,monkeypatch):
+    bridge.apply('CHECK_IN','in'); event=bridge.envelope()
+    bridge.portal.ingest_event(event)
+    admin=api.PortalPrincipal('session','tenant','company','shop','admin','Admin','OWNER')
+    monkeypatch.delenv('CAMERA_EYE_TOKEN_ENCRYPTION_KEY',raising=False)
+    result=api.attendance_sync_readiness('tenant',event['event_id'],admin)
+    assert result['ready'] is False
+    assert result['blockers']==['TOKEN_ENCRYPTION_KEY_REQUIRED']
+    assert set(result)=={'event_id','event_type','attendance_source','ready','blockers','receipt'}
 
 
 def test_multiworker_claim_and_interrupted_claim(bridge):
