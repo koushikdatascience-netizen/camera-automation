@@ -241,20 +241,21 @@ def test_event_evidence_is_shop_scoped_and_cannot_escape_root(tmp_path, monkeypa
     assert client.get('/portal/v1/tenants/tenant-b/events/event/evidence',headers=auth).status_code==403
 
 
-def test_crossing_uses_current_snapshot_not_old_recognition():
+def test_recognition_uses_current_snapshot_for_initial_arrival(monkeypatch):
     from camera_service.attendance_engine import AttendanceEngine
-    from camera_service.models import IdentitySeen, LineCrossingEvent
+    from camera_service.models import IdentitySeen
+    monkeypatch.setenv('CAMERA_EYE_ATTENDANCE_MODE', 'AUTO')
     calls=[]
     class Store:
         def create_arrival(self, *args, **kwargs):
-            calls.append(args);return {'id':'session'},True
+            calls.append((args, kwargs))
+            return {'id':'session'},True
     engine=AttendanceEngine(Store(),'store')
     now=datetime.now(timezone.utc)
     engine.on_identity(IdentitySeen(store_id='store',camera_id='cam',track_id='1',person_id='person',timestamp=now,
-        confidence=.9,bbox=(0,0,10,10),snapshot_path='old.jpg'))
-    engine.on_crossing(LineCrossingEvent(store_id='store',camera_id='cam',track_id='1',direction='ENTRY',timestamp=now,
-        bbox=(0,0,10,10),snapshot_path='crossing.jpg'))
-    assert calls[-1][-1]=='crossing.jpg'
+        confidence=.9,bbox=(0,0,10,10),snapshot_path='recognition.jpg'))
+    assert calls[-1][0][-1]=='recognition.jpg'
+    assert calls[-1][1]['confirmed'] is True
 
 
 def test_cloud_event_sync_strips_local_evidence_paths_without_losing_event(tmp_path):
