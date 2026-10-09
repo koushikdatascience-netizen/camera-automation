@@ -761,7 +761,8 @@
     if(document.getElementById('attendance-workspace')&&window.AttendanceWorkspace){
       const scope=requireScope(['tenant_id']);
       document.querySelectorAll('.attendance-content > .attendance-card:not(#attendance-station),.attendance-heading button').forEach(node=>node.hidden=true);
-      window.AttendanceWorkspace.mount(document.getElementById('attendance-workspace'),{base:'/portal/v2/tenants/'+encodeURIComponent(scope.tenant_id)+'/attendance',peopleEndpoint:'/portal/v2/tenants/'+encodeURIComponent(scope.tenant_id)+'/attendance/personnel',fetcher:authFetch}).load();return;
+      const host=document.getElementById('attendance-workspace');const mounted=!!host._attendance;const workspace=window.AttendanceWorkspace.mount(host,{base:'/portal/v2/tenants/'+encodeURIComponent(scope.tenant_id)+'/attendance',peopleEndpoint:'/portal/v2/tenants/'+encodeURIComponent(scope.tenant_id)+'/attendance/personnel',fetcher:authFetch});if(mounted)workspace.load();
+      if(location.hash==='#policy')document.querySelector('#attendance-workspace .aw-policy')?.setAttribute('open','');return;
     }
     if(!document.getElementById("attendance-records-body"))return;
     const scope=requireScope(["tenant_id"]); const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance");
@@ -914,6 +915,8 @@
     }catch(_){if(button)button.textContent="Browser sound unavailable";}
   }
   async function loadAlerts(){
+    const workspace=document.getElementById('alerts-workspace');
+    if(workspace&&window.AlertsWorkspace){const scope=requireScope(['tenant_id']);const mounted=!!workspace._alerts;const instance=window.AlertsWorkspace.mount(workspace,{base:'/portal/v2/tenants/'+encodeURIComponent(scope.tenant_id)+'/alerts',fetcher:authFetch});if(mounted)instance.load();return;}
     const body=document.getElementById('alerts-body'); if(!body)return;
     const scope=requireScope(['tenant_id']);
     const response=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/events?limit=500&alerts_only=true');
@@ -944,6 +947,10 @@
     refresh();setInterval(refresh,15000);
   }
   document.querySelectorAll('.nav-menu').forEach(nav=>{
+    if(!nav.querySelector('a[href="/portal/attendance.html#policy"]')){
+      const policyLink=document.createElement('a');policyLink.className='nav-item';policyLink.href='/portal/attendance.html#policy';policyLink.innerHTML='⚙ <span>Attendance Policy</span>';
+      const attendance=nav.querySelector('a[href="/portal/attendance.html"]');attendance?.insertAdjacentElement('afterend',policyLink);
+    }
     if(!nav.querySelector('a[href="/portal/system-status.html"]')){
       const link=document.createElement('a');link.className='nav-item';link.href='/portal/system-status.html';link.innerHTML='⚡ <span>System Status</span>';
       const overview=nav.querySelector('a[href="/portal"]');overview?.insertAdjacentElement('afterend',link);

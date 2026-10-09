@@ -2920,6 +2920,8 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
     policy=row.get("policy_json") or {}
     if not policy.get("absenceMonitoringEnabled",True):
         return
+    if not policy.get("absenceAutoLogoutEnabled",True):
+        return
     if not row.get("checked_in") or row.get("on_break"):
         return
     tenant=str(row["tenant_id"]);shop=str(row["shop_id"]);user=str(row["crm_user_id"])
@@ -3320,6 +3322,14 @@ def edge_heartbeat(payload: dict[str, Any], background_tasks: BackgroundTasks,
 
 from camera_service.attendance_workspace_api import install_cloud as _install_attendance_workspace
 _install_attendance_workspace(app,lambda:store,require_portal_session,_portal_scope,_portal_admin,_resolve_attendance_event_media)
+
+from camera_service.alerts_workspace import install as _install_alert_workspace,cloud_alerts as _cloud_alerts
+def _alert_workspace_scope(principal,request):
+    tenant=request.path_params['tenant_id'];_portal_scope(tenant,principal)
+    if principal.role.upper() not in {'OWNER','ADMIN','SUPERADMIN','MANAGER','OPERATOR'}:raise HTTPException(403,'Alert access required')
+    return tenant,principal.shop_id,str(principal.user_id or principal.session_id),principal.role.upper() in {'OWNER','ADMIN','SUPERADMIN','MANAGER'}
+_install_alert_workspace(app,lambda:store,_alert_workspace_scope,
+    lambda t,s:_cloud_alerts(store,t,s,_resolve_attendance_event_media),'/portal/v2/tenants/{tenant_id}/alerts',require_portal_session)
 
 
 @app.post('/portal/v2/tenants/{tenant_id}/attendance-station/action')

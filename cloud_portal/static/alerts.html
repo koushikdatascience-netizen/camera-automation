@@ -23,9 +23,11 @@
     <header class="header"><div class="header-date"></div><div class="profile-info"><strong>Camera Eye User</strong><span>User</span></div></header>
     <section class="content">
       <div class="page-title"><h1>Alerts</h1><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-light" id="enable-alert-sound" type="button">Enable sound & notifications</button><button class="btn btn-light" id="refresh-alerts" type="button">Refresh</button></div></div>
-      <div class="table-wrapper"><table class="attendance-table"><thead><tr><th>Time</th><th>Camera</th><th>Type</th><th>Person / Object</th><th>Evidence</th></tr></thead><tbody id="alerts-body"><tr><td colspan="5">Loading alerts...</td></tr></tbody></table></div>
+      <div id="alerts-workspace"></div>
     </section>
   </main>
   <script src="/static/js/main.js"></script>
+  <link rel="stylesheet" href="/attendance-assets/workspace.css">
+  <script src="/attendance-assets/alerts.js"></script>
 </body>
 </html>

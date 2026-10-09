@@ -8,6 +8,8 @@ from typing import Optional
 class SQLiteStore:
     def __init__(self, path: str):
         self.path=path; Path(path).parent.mkdir(parents=True, exist_ok=True); self._lock=threading.RLock(); self._init()
+        from camera_service.alerts_workspace import initialize
+        initialize(self)
     @contextmanager
     def _conn(self):
         c=sqlite3.connect(self.path, timeout=30, check_same_thread=False); c.row_factory=sqlite3.Row
@@ -277,6 +279,14 @@ class SQLiteStore:
         from camera_service.attendance_workspace_api import local_policy
         from camera_service.attendance_workspace import policy_snapshot
         return policy_snapshot(local_policy(self,store_id,person_id))
+    def effective_attendance_mode(self,person_id,store_id,default='AUTO'):
+        with self._conn() as conn:
+            rows=conn.execute("SELECT person_id,policy_json FROM attendance_workspace_policies WHERE store_id=? AND person_id IN (?, '') ORDER BY person_id",(store_id,person_id)).fetchall()
+            person=conn.execute('SELECT attendance_mode FROM personnel WHERE id=?',(person_id,)).fetchone()
+        configured={row['person_id']:json.loads(row['policy_json']) for row in rows}
+        if person_id in configured and configured[person_id].get('attendance_mode') in {'AUTO','MANUAL'}:return configured[person_id]['attendance_mode']
+        if '' in configured and configured[''].get('attendance_mode') in {'AUTO','MANUAL'}:return configured['']['attendance_mode']
+        return (person['attendance_mode'] if person else None) or default
     def attendance_sync_metadata(self, conn, person_id, session_id, mode, legacy_session_root=False):
         previous = conn.execute("""SELECT id FROM edge_event_queue
             WHERE json_extract(payload_json,'$.person_id')=?

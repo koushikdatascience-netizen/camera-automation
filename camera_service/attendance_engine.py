@@ -19,9 +19,12 @@ class AttendanceEngine:
         """
         import os
         mode = os.environ.get("CAMERA_EYE_ATTENDANCE_MODE", "AUTO").strip().upper()
-        person = self.store.get_person(ev.person_id)
-        if person and person.get("attendance_mode") in {"AUTO", "MANUAL"}:
-            mode = person["attendance_mode"]
+        if hasattr(self.store,'effective_attendance_mode'):
+            mode=self.store.effective_attendance_mode(ev.person_id,self.store_id,mode)
+        else:
+            person = self.store.get_person(ev.person_id)
+            if person and person.get("attendance_mode") in {"AUTO", "MANUAL"}:
+                mode = person["attendance_mode"]
         with self._lock:
             self.identities[(ev.camera_id, ev.track_id)] = ev
             p = self.presence.get(ev.person_id) or Presence(person_id=ev.person_id, first_seen_today=ev.timestamp)

@@ -26,6 +26,8 @@ class PostgresPortalStore(AttendanceDeliveryStore):
             pool_recycle=int(os.getenv("SNAPKEY_DB_POOL_RECYCLE_SECONDS", "1800")),
         )
         self._init()
+        from camera_service.alerts_workspace import initialize
+        initialize(self)
         self.initialize_attendance_delivery()
 
     @contextmanager
@@ -1055,7 +1057,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
             "emails":json.dumps(policy.get("email_recipients") or []),
             "whatsapp":json.dumps(policy.get("whatsapp_recipients") or []),
             "updated_at":now,
-            "rules":json.dumps({k:policy[k] for k in ('shift_start_time','late_grace_minutes','scheduled_weekdays','overtime_enabled') if k in policy}),
+            "rules":json.dumps({k:policy[k] for k in ('shift_start_time','late_grace_minutes','scheduled_weekdays','overtime_enabled','attendance_mode','attendanceMode','absence_monitoring_enabled','absenceMonitoringEnabled','mark_absent_after_minutes','markAbsentAfterMinutes') if k in policy}),
         }
         with self._conn() as conn:
             conn.execute(text("""INSERT INTO attendance_policies(

@@ -14,11 +14,14 @@ LIMIT=100000
 
 
 class WorkspacePolicy(BaseModel):
+    attendance_mode:str=Field(default='AUTO',pattern='^(AUTO|MANUAL)$')
     grace_period_minutes:int=Field(default=15,ge=1,le=1440)
     allowed_break_minutes:int=Field(default=60,ge=0,le=1440)
     total_working_minutes:int=Field(default=480,ge=1,le=1440)
     max_logoff_time:str=Field(default='21:30',pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
-    absence_auto_logout_enabled:bool=False
+    absence_auto_logout_enabled:bool=True
+    absence_monitoring_enabled:bool=True
+    mark_absent_after_minutes:int=Field(default=60,ge=60,le=1440)
     timezone:str='Asia/Kolkata'
     email_recipients:list[str]=Field(default_factory=list,max_length=50)
     whatsapp_recipients:list[str]=Field(default_factory=list,max_length=50)
@@ -118,9 +121,16 @@ def install_local(app,get_store,get_config):
 
     @app.get('/api/v2/attendance/policy')
     def policy(person_id:str=''):
-        if person_id and not get_store().get_person(person_id):raise HTTPException(404,'Employee not found')
-        value=local_policy(get_store(),get_config().store_id,person_id)
-        return {'policy':value,'snapshot':policy_snapshot(value),'person_id':person_id,'scope':'LOCAL_ONLY'}
+        store=get_store();shop=get_config().store_id
+        if person_id and not store.get_person(person_id):raise HTTPException(404,'Employee not found')
+        value=local_policy(store,shop,person_id)
+        with store._conn() as conn:
+            saved=conn.execute('SELECT person_id,policy_json,updated_at FROM attendance_workspace_policies WHERE store_id=? AND person_id IN (?,\'\') ORDER BY person_id',(shop,person_id)).fetchall()
+        employee_values=next((_json(row['policy_json']) for row in saved if person_id and row['person_id']==person_id),{})
+        shop_values=next((_json(row['policy_json']) for row in saved if row['person_id']==''),{})
+        sources={key:'EMPLOYEE' if key in employee_values else 'SHOP' if key in shop_values else 'SYSTEM' for key in value}
+        updated=max((row['updated_at'] for row in saved),default=None)
+        return {'policy':value,'snapshot':policy_snapshot(value),'sources':sources,'updated_at':updated,'person_id':person_id,'scope':'LOCAL_ONLY','can_edit':True}
 
     @app.put('/api/v2/attendance/policy')
     def save_policy(body:WorkspacePolicy,person_id:str=''):
@@ -129,7 +139,8 @@ def install_local(app,get_store,get_config):
         value=body.model_dump();validate_policy(value)
         with store._lock,store._conn() as conn:
             conn.execute('INSERT INTO attendance_workspace_policies(store_id,person_id,policy_json,updated_at) VALUES(?,?,?,?) ON CONFLICT(store_id,person_id) DO UPDATE SET policy_json=excluded.policy_json,updated_at=excluded.updated_at',(shop,person_id,json.dumps(value),store.now()))
-        return {'policy':value,'snapshot':policy_snapshot(value),'scope':'LOCAL_ONLY','auto_logout_execution_enabled':False}
+            if person_id:conn.execute('UPDATE personnel SET attendance_mode=?,updated_at=? WHERE id=?',(value['attendance_mode'],store.now(),person_id))
+        return {'policy':value,'snapshot':policy_snapshot(value),'scope':'LOCAL_ONLY','updated_at':store.now(),'auto_logout_execution_enabled':False}
 
     def media(event_id,kind,index):
         store=get_store();config=get_config()
@@ -319,14 +330,26 @@ def install_cloud(app,get_store,require_session,scope,admin,resolve_media):
         scope(tenant_id,principal)
         if principal.role.upper() not in {'OWNER','ADMIN','SUPERADMIN','MANAGER','OPERATOR'}:raise HTTPException(403,'Attendance policy access required')
         if not hasattr(get_store(),'attendance_policy'):raise HTTPException(503,'PostgreSQL policy storage required')
-        store=get_store();value=store.attendance_policy(tenant_id,principal.shop_id)
+        store=get_store();shop_policy=store.attendance_policy(tenant_id,principal.shop_id)
+        resolved_sources={k:'SHOP' for k in shop_policy}
+        value=dict(shop_policy)
         if person_id:
             mapping=store.crm_person_mapping(tenant_id,principal.shop_id,person_id)
             if not mapping:raise HTTPException(404,'Scoped CRM employee mapping required')
             override=store.person_attendance_policy(tenant_id,principal.shop_id,str(mapping['crm_user_id'])) or {}
-            values=resolve_attendance_policy(override,value).values
-            value={**value,**override,**{alias:values[key] for key,alias in {'gracePeriodMinutes':'grace_period_minutes','allowedBreakMinutes':'allowed_break_minutes','requiredWorkingMinutes':'total_working_minutes','maxLogoffTime':'max_logoff_time','absenceAutoLogoutEnabled':'absence_auto_logout_enabled'}.items()}}
-        return {'policy':value,'can_edit':principal.role.upper() in {'OWNER','ADMIN','SUPERADMIN'},'person_id':person_id}
+            resolved=resolve_attendance_policy(override,shop_policy);values=resolved.values;resolved_sources=resolved.sources
+            for field,alias in {'gracePeriodMinutes':'grace_period_minutes','allowedBreakMinutes':'allowed_break_minutes','requiredWorkingMinutes':'total_working_minutes','maxLogoffTime':'max_logoff_time','absenceAutoLogoutEnabled':'absence_auto_logout_enabled','attendanceMode':'attendance_mode','absenceMonitoringEnabled':'absence_monitoring_enabled','markAbsentAfterMinutes':'mark_absent_after_minutes'}.items():value[alias]=values[field]
+            value.update({k:v for k,v in override.items() if k in {'shift_start_time','late_grace_minutes','scheduled_weekdays','overtime_enabled','email_recipients','whatsapp_recipients'}})
+            value['version']=override.get('version',shop_policy.get('version'));value['updatedAt']=override.get('updatedAt',shop_policy.get('updated_at'))
+        else:
+            value.update({k:v for k,v in shop_policy.items() if k in {'attendance_mode','attendanceMode','absence_monitoring_enabled','absenceMonitoringEnabled','mark_absent_after_minutes','markAbsentAfterMinutes'}})
+            value['attendance_mode']=value.get('attendanceMode',value.get('attendance_mode','AUTO'))
+            value['absence_monitoring_enabled']=value.get('absenceMonitoringEnabled',value.get('absence_monitoring_enabled',True))
+            value['mark_absent_after_minutes']=value.get('markAbsentAfterMinutes',value.get('mark_absent_after_minutes',60))
+        for camel,snake in {'attendanceMode':'attendance_mode','absenceMonitoringEnabled':'absence_monitoring_enabled','markAbsentAfterMinutes':'mark_absent_after_minutes'}.items():
+            resolved_sources.setdefault(snake,'SHOP' if camel in shop_policy else 'SYSTEM')
+        return {'policy':value,'sources':resolved_sources,'updated_at':value.get('updatedAt') or value.get('updated_at'),
+            'can_edit':principal.role.upper() in {'OWNER','ADMIN','SUPERADMIN'},'person_id':person_id}
 
     @app.put('/portal/v2/tenants/{tenant_id}/attendance/policy')
     def save_policy(tenant_id:str,body:WorkspacePolicy,person_id:str='',principal=Depends(require_session)):
@@ -338,9 +361,13 @@ def install_cloud(app,get_store,require_session,scope,admin,resolve_media):
             mapping=store.crm_person_mapping(tenant_id,principal.shop_id,person_id)
             if not mapping:raise HTTPException(404,'Scoped CRM employee mapping required')
             existing=store.person_attendance_policy(tenant_id,principal.shop_id,str(mapping['crm_user_id'])) or {}
-            aliases={'grace_period_minutes':'gracePeriodMinutes','allowed_break_minutes':'allowedBreakMinutes','total_working_minutes':'requiredWorkingMinutes','max_logoff_time':'maxLogoffTime','absence_auto_logout_enabled':'absenceAutoLogoutEnabled'}
+            aliases={'grace_period_minutes':'gracePeriodMinutes','allowed_break_minutes':'allowedBreakMinutes','total_working_minutes':'requiredWorkingMinutes','max_logoff_time':'maxLogoffTime','absence_auto_logout_enabled':'absenceAutoLogoutEnabled','attendance_mode':'attendanceMode','absence_monitoring_enabled':'absenceMonitoringEnabled','mark_absent_after_minutes':'markAbsentAfterMinutes','late_grace_minutes':'late_grace_minutes'}
             saved=store.upsert_person_attendance_policy(tenant_id,principal.shop_id,str(mapping['crm_user_id']),{**existing,**{aliases.get(k,k):v for k,v in value.items()}})
-        else:saved=store.upsert_attendance_policy(tenant_id,principal.shop_id,value)
+        else:
+            saved=store.upsert_attendance_policy(tenant_id,principal.shop_id,value)
+            saved.update({'attendance_mode':saved.get('attendanceMode',saved.get('attendance_mode','MANUAL')),
+                'absence_monitoring_enabled':saved.get('absenceMonitoringEnabled',saved.get('absence_monitoring_enabled',True)),
+                'mark_absent_after_minutes':saved.get('markAbsentAfterMinutes',saved.get('mark_absent_after_minutes',60))})
         return {'policy':saved,'execution_flags_changed':False}
 
     @app.get('/portal/v2/tenants/{tenant_id}/attendance/events/{event_id}/notifications')

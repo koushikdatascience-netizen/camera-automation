@@ -21,6 +21,7 @@ def test_shop_overrides_system_when_user_missing():
     assert result.sources["requiredWorkingMinutes"] == "SHOP"
     assert result.values["outOfCameraGraceMinutes"] == 5
     assert result.sources["outOfCameraGraceMinutes"] == "SYSTEM"
+    assert result.values['absenceAutoLogoutEnabled'] is True
 
 
 def test_explicit_false_and_zero_are_not_discarded():

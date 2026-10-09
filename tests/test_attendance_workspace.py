@@ -148,6 +148,19 @@ def test_checkout_ends_break_restart_keeps_state_and_events(station):
     assert len(st.engine.store.person_events())==3  # No fabricated BREAK_OUT.
 
 
+def test_shop_attendance_mode_overrides_legacy_person_column(tmp_path):
+    store=SQLiteStore(str(tmp_path/'shop-mode.db'))
+    person=store.create_person(PersonnelCreate(employee_code='SHOP-MODE',full_name='Shop Mode',role=PersonnelRole.WORKER))
+    with store._conn() as conn:
+        conn.execute("UPDATE personnel SET attendance_mode='AUTO' WHERE id=?",(person['id'],))
+        conn.execute("INSERT INTO attendance_workspace_policies VALUES(?,?,?,?)",
+                     ('shop','',json.dumps({'attendance_mode':'MANUAL'}),store.now()))
+    event=IdentitySeen(store_id='shop',camera_id='entrance',track_id='track',person_id=person['id'],
+        timestamp=NOW,confidence=.99,bbox=(0,0,100,100))
+    AttendanceEngine(store,'shop').on_identity(event)
+    assert not store.open_session(person['id'],'shop')['entry_confirmed']
+
+
 def test_concurrent_manual_and_auto_login_have_one_confirmed_session(station):
     st,now,p,event=station
     def auto():return st.engine.store.create_arrival(p['id'],'shop',now,'entrance',.95,confirmed=True)

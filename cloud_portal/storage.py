@@ -16,6 +16,8 @@ class PortalStore(AttendanceDeliveryStore):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._init()
+        from camera_service.alerts_workspace import initialize
+        initialize(self)
         self.initialize_attendance_delivery()
 
     @contextmanager

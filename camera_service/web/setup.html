@@ -622,6 +622,9 @@
                 <a href="#" class="active" data-section="overview">Overview</a>
                 <a href="#" data-section="live">Live View</a>
                 <a href="#" data-section="cameras">Camera Setup</a>
+                <a href="#" data-section="attendance">Attendance</a>
+                <a href="#" data-section="attendancePolicy">Attendance Policy</a>
+                <a href="#" data-section="alerts">Alerts</a>
                 <a href="#" data-section="system">System Status</a>
             </nav>
         </div>
@@ -1190,6 +1193,12 @@
         </div>
 
         <!-- Security Alerts Section -->
+        <section id="alerts-section" class="main-content">
+            <div class="section-header"><h2 class="section-title">Alerts</h2></div>
+            <div id="alerts-workspace"></div>
+        </section>
+
+        <!-- Security Alerts Section -->
         <div id="security-section" class="main-content">
             <div class="section-header">
                 <h2 class="section-title">Security Alerts</h2>
@@ -1262,7 +1271,9 @@
             attendance: document.getElementById('attendance-section'),
             objectSecurity: document.getElementById('object-security-section'),
             security: document.getElementById('security-section'),
-            unknown: document.getElementById('unknown-section')
+            unknown: document.getElementById('unknown-section'),
+            alerts: document.getElementById('alerts-section'),
+            attendancePolicy: document.getElementById('attendance-section')
         };
 
         const navLinks = document.querySelectorAll('nav a');
@@ -1357,6 +1368,13 @@
                     break;
                 case 'attendance':
                     loadAttendance();
+                    break;
+                case 'attendancePolicy':
+                    loadAttendance();
+                    setTimeout(()=>{const editor=document.querySelector('#attendance-section .aw-policy');if(editor){editor.open=true;editor.scrollIntoView({behavior:'smooth'});}},300);
+                    break;
+                case 'alerts':
+                    if(window.AlertsWorkspace){const host=document.getElementById('alerts-workspace');const mounted=!!host._alerts;const alerts=window.AlertsWorkspace.mount(host,{base:'/api/v2/alerts'});if(mounted)alerts.load();}
                     break;
                 case 'objectSecurity':
                     loadObjectSecurity();
@@ -3193,5 +3211,6 @@
     </script>
     <link rel="stylesheet" href="/attendance-assets/workspace.css">
     <script src="/attendance-assets/workspace.js"></script>
+    <script src="/attendance-assets/alerts.js"></script>
 </body>
 </html>

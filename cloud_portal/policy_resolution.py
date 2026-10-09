@@ -22,6 +22,9 @@ SYSTEM_DEFAULTS: dict[str, Any] = {
     "attendanceMode": "AUTO",
     "dayEndAutoLogoutEnabled": True,
     "timezone": "Asia/Kolkata",
+    "attendance_mode": "AUTO",
+    "absence_monitoring_enabled": True,
+    "mark_absent_after_minutes": 60,
 }
 SHOP_ALIASES = {
     "gracePeriodMinutes": "grace_period_minutes",
@@ -29,12 +32,18 @@ SHOP_ALIASES = {
     "requiredWorkingMinutes": "total_working_minutes",
     "maxLogoffTime": "max_logoff_time",
     "absenceAutoLogoutEnabled": "absence_auto_logout_enabled",
+    "attendanceMode": "attendance_mode",
+    "absenceMonitoringEnabled": "absence_monitoring_enabled",
+    "markAbsentAfterMinutes": "mark_absent_after_minutes",
 }
 # Shop grace maps to general grace; the V2 out-of-camera threshold is
 # independent unless a shop-specific field is explicitly provided.
 USER_ALIASES = {
     "requiredWorkingMinutes": "requiredWorkingMinutes",
     "outOfCameraGraceMinutes": "outOfCameraGraceMinutes",
+    "attendanceMode": "attendanceMode",
+    "absenceMonitoringEnabled": "absenceMonitoringEnabled",
+    "markAbsentAfterMinutes": "markAbsentAfterMinutes",
 }
 
 @dataclass(frozen=True)

@@ -92,6 +92,14 @@ def test_pg_policy_permissions_scope_and_additive_upgrade(pg_workspace,monkeypat
         value.update(shift_start_time='09:00',scheduled_weekdays=[0,1,2,3,4],late_grace_minutes=10)
         assert client.put('/portal/v2/tenants/tenant/attendance/policy',json=value).status_code==200
         assert pg_workspace.attendance_policy('tenant','shop')['shift_start_time']=='09:00'
+        person_policy=client.get('/portal/v2/tenants/tenant/attendance/policy?person_id=person').json()
+        person_policy['policy'].update(attendance_mode='MANUAL',absence_monitoring_enabled=False)
+        saved=client.put('/portal/v2/tenants/tenant/attendance/policy?person_id=person',json=person_policy['policy'])
+        assert saved.status_code==200
+        effective=client.get('/portal/v2/tenants/tenant/attendance/policy?person_id=person').json()
+        assert effective['policy']['attendance_mode']=='MANUAL'
+        assert effective['policy']['absence_monitoring_enabled'] is False
+        assert effective['sources']['attendanceMode']=='USER'
         assert client.get('/portal/v2/tenants/other/attendance/workspace').status_code==403
         assert client.get('/portal/v2/tenants/tenant/attendance/workspace?shop_id=other').status_code==403
         api.app.dependency_overrides[api.require_portal_session]=lambda:manager

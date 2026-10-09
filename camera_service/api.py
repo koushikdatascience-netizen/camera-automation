@@ -1506,3 +1506,7 @@ def ack(incident_id:str,s=Depends(get_store)):
 
 from camera_service.attendance_workspace_api import install_local as _install_attendance_workspace
 _install_attendance_workspace(app,lambda:store,lambda:config)
+
+from camera_service.alerts_workspace import install as _install_alert_workspace,local_alerts as _local_alerts
+_install_alert_workspace(app,lambda:store,lambda p,r:('LOCAL',config.store_id,'LOCAL_OPERATOR',True),
+    lambda t,s:_local_alerts(store,s,_public_incident),'/api/v2/alerts')
