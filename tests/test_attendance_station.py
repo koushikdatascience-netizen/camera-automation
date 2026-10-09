@@ -6,6 +6,12 @@ from camera_service.storage import SQLiteStore
 from camera_service.models import IdentitySeen, PersonnelCreate, PersonnelRole
 
 
+@pytest.fixture(autouse=True)
+def manual_attendance_mode(monkeypatch):
+    # This suite verifies operator-confirmed attendance, not AUTO check-in.
+    monkeypatch.setenv('CAMERA_EYE_ATTENDANCE_MODE', 'MANUAL')
+
+
 def station_fixture(tmp_path):
     store = SQLiteStore(str(tmp_path / 'station.db'))
     person = store.create_person(PersonnelCreate(employee_code='E1', full_name='Alice', role=PersonnelRole.WORKER))
