@@ -696,13 +696,22 @@
       const initials=String(person.full_name||"?").split(/\s+/).slice(0,2).map(x=>x[0]||"").join("").toUpperCase();
       const face=person.face_enrolled?"✓ Enrolled":"Face required";
       const sync=person.edge_synced?"✓ Edge synced":"Sync pending";
-      const crm=person.crm_mapping?"✓ CRM mapped":"CRM not mapped";
-      return "<tr><td><div class='avatar'>"+escapeHtml(initials)+"</div></td>"+
+      const crm=person.crm_mapped?"✓ CRM mapped":"CRM not mapped";
+      return "<tr><td><div class='avatar'>"+escapeHtml(initials)+"</div>"+
+        (person.enrollment_preview_url?"<img data-enrollment-preview='"+escapeHtml(person.enrollment_preview_url)+"' width='48' height='48' alt='CRM enrollment preview'>":"")+"</td>"+
         "<td><strong>"+escapeHtml(person.full_name||"")+"</strong><br><small>"+face+" · "+sync+" · "+crm+"</small></td>"+
         "<td>"+escapeHtml(person.employee_code||"")+"</td><td>"+escapeHtml(person.role||"")+"</td>"+
         "<td>"+(person.active?"Active":"Inactive")+"</td><td>"+escapeHtml(String(person.created_at||"").slice(0,10))+"</td>"+
         "<td><span>"+(person.face_enrolled?"Face ready":"Face not registered")+"</span></td></tr>";
     }).join("");
+    body.querySelectorAll('[data-enrollment-preview]').forEach(async img=>{
+      try {
+        const response=await authFetch(img.dataset.enrollmentPreview);
+        if(!response.ok) throw new Error('Preview unavailable');
+        const url=URL.createObjectURL(await response.blob());
+        img.onload=()=>URL.revokeObjectURL(url);img.onerror=()=>URL.revokeObjectURL(url);img.src=url;
+      } catch (_) {img.remove();}
+    });
   }
 
   async function loadPersonnel(){
@@ -712,6 +721,14 @@
     const data=await response.json();
     if(!response.ok) throw new Error(data.detail||"Unable to load personnel.");
     renderPersonnel(data.items||[]);
+    const diagnostics=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/personnel-diagnostics');
+    if(diagnostics.ok){
+      const details=document.createElement('details');details.id='personnel-sync-diagnostics';
+      const summary=document.createElement('summary');summary.textContent='Personnel synchronization diagnostics';
+      const pre=document.createElement('pre');pre.textContent=JSON.stringify(await diagnostics.json(),null,2);
+      details.append(summary,pre);document.getElementById('personnel-sync-diagnostics')?.remove();
+      document.getElementById('personnel-table-body').closest('table').after(details);
+    }
   }
 
   function wirePersonnelPage(){

@@ -5,6 +5,10 @@ import cv2, numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query, Form, Request
 from fastapi.responses import JSONResponse
 from urllib.parse import urlsplit
+import secrets
+import hmac
+import json
+_preview_capability=secrets.token_urlsafe(32)
 from camera_service.config import load_config, save_edge_activation
 from camera_service.models import PersonnelCreate, PersonnelPatch
 from camera_service.storage import SQLiteStore
@@ -232,7 +236,10 @@ async def protect_local_origin(request: Request, call_next):
     origin = request.headers.get("origin")
     if origin and origin != str(request.base_url).rstrip('/'):
         return JSONResponse({"detail": "Cross-origin local API access is denied"}, status_code=403)
-    return await call_next(request)
+    response=await call_next(request)
+    if request.url.path=='/setup':
+        response.set_cookie('camera_eye_preview',_preview_capability,httponly=True,samesite='strict')
+    return response
 
 def get_store(): return store
 
@@ -1042,11 +1049,37 @@ def list_people(s=Depends(get_store)):
         faces = s.list_faces(person['id'])
         primary_face = faces[0] if faces else None
         items.append({
-            **person,
+            **{k:v for k,v in person.items() if k!='crm_sync_json'},
             'face_count': len(faces),
-            'primary_face_url': _face_image_url(person['id'], primary_face['id']) if primary_face and primary_face.get('image_path') else None,
+            'primary_face_url': (_face_image_url(person['id'], primary_face['id']) if primary_face and primary_face.get('image_path')
+                else f"/api/v1/personnel/{person['id']}/enrollment-image" if json.loads(person.get('crm_sync_json') or '{}').get('crm_user_id') else None),
+            'sync_diagnostic': _personnel_diagnostic(person,faces),
         })
     return {'items':items}
+
+def _personnel_diagnostic(person,faces):
+    from camera_service.face_service import enrollment_model_key
+    metadata=json.loads(person.get('crm_sync_json') or '{}')
+    compatibility='UNVERIFIED'
+    if metadata.get('enrollment_model_key'):
+        try: compatibility='COMPATIBLE' if enrollment_model_key()==metadata['enrollment_model_key'] else 'INCOMPATIBLE'
+        except ValueError: compatibility='MODEL_UNAVAILABLE'
+    return {'crm_user_id':metadata.get('crm_user_id'),'tenant_id':metadata.get('tenant_id'),
+        'shop_id':metadata.get('shop_id'),'edge_face_count':len(faces),'model_compatibility':compatibility}
+
+@app.get('/api/v1/personnel/{person_id}/enrollment-image')
+def local_enrollment_preview(person_id: str, request: Request, s=Depends(get_store)):
+    if not hmac.compare_digest(request.cookies.get('camera_eye_preview',''),_preview_capability):
+        raise HTTPException(401,'Open the local operator portal to authenticate preview access')
+    person=s.get_person(person_id)
+    metadata=json.loads((person or {}).get('crm_sync_json') or '{}')
+    if not person or not person.get('active') or not metadata.get('crm_user_id'):
+        raise HTTPException(404,'Enrollment preview unavailable')
+    if str(metadata.get('tenant_id'))!=str(config.edge.tenant_id) or str(metadata.get('shop_id'))!=str(config.edge.shop_id or config.edge.site_id):
+        raise HTTPException(403,'Enrollment preview scope mismatch')
+    try: data=cloud_client.enrollment_preview(person_id)
+    except Exception: raise HTTPException(502,'Cloud enrollment preview unavailable') from None
+    return Response(data,media_type='image/jpeg',headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Cross-Origin-Resource-Policy':'same-origin'})
 
 @app.get('/api/v1/personnel/{person_id}')
 def get_person(person_id:str,s=Depends(get_store)):

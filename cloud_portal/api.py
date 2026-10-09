@@ -20,7 +20,7 @@ import numpy as np
 from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -1240,11 +1240,17 @@ def edge_personnel_config(principal: EdgePrincipal = Depends(require_edge_token)
     items=[]
     for person in store.list_cloud_people(principal.tenant_id,principal.shop_id):
         faces=store.list_cloud_faces(principal.tenant_id,principal.shop_id,str(person["id"]),include_embedding=True)
+        faces=[f for f in faces if not str(f['id']).startswith('crm-image:') or f.get('model_key')]
+        model_keys={f['model_key'] for f in faces if str(f['id']).startswith('crm-image:')}
+        if len(model_keys)>1: raise HTTPException(503,'CRM enrollment model refresh is incomplete')
         mapping=store.crm_person_mapping(principal.tenant_id,principal.shop_id,str(person['id']))
         policy=(store.person_attendance_policy(principal.tenant_id,principal.shop_id,str(mapping['crm_user_id']))
                 if mapping and hasattr(store,'person_attendance_policy') else {}) or {}
         items.append({"person_id":str(person["id"]),"employee_code":person["employee_code"],"full_name":person["full_name"],
             "attendance_mode":str(policy.get('attendanceMode') or 'AUTO').upper() if mapping else 'MANUAL',
+            "crm_user_id":str(mapping['crm_user_id']) if mapping else None,
+            "tenant_id":principal.tenant_id,"shop_id":principal.shop_id,
+            "enrollment_model_key":next(iter(model_keys),None),
             "role":person["role"],"phone":person.get("phone"),"email":person.get("email"),"active":bool(person["active"]),
             "faces":[{"face_id":str(f["id"]),"embedding":f["embedding"],"quality":float(f["quality"])} for f in faces]})
     return {"tenant_id":principal.tenant_id,"shop_id":principal.shop_id,"items":items}
@@ -1458,7 +1464,7 @@ def _v2_auto_logout_action_id(tenant: str,shop: str,user: str,started: datetime)
     identity=f"{tenant}|{shop}|{user}|{started.isoformat()}"
     return "auto-logout-"+hashlib.sha256(identity.encode()).hexdigest()[:32]
 
-def _crm_face_login_identity(tenant_code: str, crm_user_id: str) -> tuple[str, str]:
+def _crm_face_login_identity(tenant_code: str, crm_user_id: str, shop_id: str | None=None) -> tuple[str, str]:
     """Return CRM tenant UUID and the user's enrolled face image from the cached directory.
 
     loginUsingFaceTenant must receive the enrolled Base64 image returned by CRM's
@@ -1468,10 +1474,19 @@ def _crm_face_login_identity(tenant_code: str, crm_user_id: str) -> tuple[str, s
     raw=crm_client.face_embeddings(tenant_code,allow_stale=False)
     users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
     target=str(crm_user_id or "").strip()
+    matches=[u for u in users if isinstance(u,dict) and str(u.get('id') or '').strip()==target]
+    tenants={str(u.get('tenantId') or '').strip().lower() for u in users if isinstance(u,dict)}
+    if not matches: raise RuntimeError('CRM face directory did not return the requested CRM user')
+    if len(matches)!=1 or len(tenants)!=1 or '' in tenants:
+        raise RuntimeError("CRM directory identity is ambiguous or tenant scope is inconsistent")
     for user in users:
         if not isinstance(user,dict) or str(user.get("id") or "").strip()!=target:
             continue
         crm_tenant_id=str(user.get("tenantId") or "").strip()
+        if (user.get('isActive') is False or
+            (shop_id and user.get('shopId') and str(user['shopId'])!=str(shop_id)) or
+            (user.get('tenantCode') and str(user['tenantCode']).strip().casefold()!=tenant_code.strip().casefold())):
+            raise RuntimeError("CRM directory tenant or active identity mismatch")
         if not crm_tenant_id:
             raise RuntimeError("CRM face directory user is missing tenantId")
 
@@ -1482,7 +1497,7 @@ def _crm_face_login_identity(tenant_code: str, crm_user_id: str) -> tuple[str, s
                 continue
             if image.startswith("data:") and "," in image:
                 image=image.split(",",1)[1].strip()
-            if image:
+            if image and _decode_crm_face_image(source) is not None:
                 logger.info(
                     "CRM_FACE_LOGIN_IDENTITY_RESOLVED tenant_code=%s crm_user_id=%s crm_tenant_id=%s enrolled_image_present=true",
                     tenant_code,target,crm_tenant_id,
@@ -1523,17 +1538,24 @@ def _validated_crm_face_login_token(response: Any, crm_user_id: str,
     return token
 
 
-def _crm_tenant_uuid_for_user(tenant_code: str, crm_user_id: str) -> str:
+def _crm_tenant_uuid_for_user(tenant_code: str, crm_user_id: str, shop_id: str | None=None) -> str:
     """Resolve CRM's tenant UUID from the authoritative face directory."""
     raw=crm_client.face_embeddings(tenant_code,allow_stale=False)
     users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
     target=str(crm_user_id or "").strip()
+    matches=[u for u in users if isinstance(u,dict) and str(u.get('id') or '').strip()==target]
+    tenants={str(u.get('tenantId') or '').strip().lower() for u in users if isinstance(u,dict)}
+    if not matches: raise RuntimeError('CRM face directory did not return tenantId for the requested CRM user')
+    if len(matches)!=1 or len(tenants)!=1 or '' in tenants:
+        raise RuntimeError('CRM directory identity is ambiguous or tenant scope is inconsistent')
     for user in users:
         if not isinstance(user,dict):
             continue
         candidate_user=str(user.get("id") or "").strip()
         candidate_tenant=str(user.get("tenantId") or "").strip()
         if candidate_user==target and candidate_tenant:
+            if shop_id and user.get('shopId') and str(user['shopId'])!=str(shop_id):
+                raise RuntimeError('CRM directory shop mismatch')
             if user.get("isActive",True) is not True:
                 raise RuntimeError("CRM employee is inactive")
             if user.get("tenantCode") and str(user["tenantCode"]).strip().casefold()!=tenant_code.strip().casefold():
@@ -1972,7 +1994,7 @@ def _decode_crm_face_image(source: str) -> bytes | None:
     """Decode data-URL or raw Base64 CRM face images; remote paths remain display-only."""
     import base64
     value = source.strip()
-    if not value:
+    if not value or len(value)>12*1024*1024:
         return None
     if value.startswith("data:image/"):
         if "," not in value:
@@ -2028,6 +2050,8 @@ def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
     if not isinstance(users,list) or any(not isinstance(u,dict) or not str(u.get("id") or "").strip() for u in users):
         raise HTTPException(502,"CRM personnel response is not an authoritative user list")
     tenant_uuids={str(u.get("tenantId") or "").strip().lower() for u in users}
+    if len({str(u['id']).strip() for u in users}) != len(users):
+        raise HTTPException(502,"Duplicate CRM user identity; reconciliation required")
     if users and ("" in tenant_uuids or len(tenant_uuids)!=1):
         raise HTTPException(502,"CRM personnel tenant identity is missing or inconsistent")
     for user in users:
@@ -2057,8 +2081,16 @@ def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
 
         # Preserve an existing Camera Eye id for historical attendance/events when the
         # employee code matches, but always update it from the current CRM identity.
-        existing_person=next((p for p in store.list_cloud_people(tenant_id,shop_id)
+        mapped=[m for m in store.list_crm_person_mappings(tenant_id,shop_id)
+                if str(m['crm_user_id'])==crm_user_id]
+        if len(mapped)>1:
+            raise HTTPException(502,"Ambiguous CRM identity mapping; reconciliation required")
+        existing_person=(store.get_cloud_person(tenant_id,shop_id,mapped[0]['local_person_id']) if mapped else None)
+        code_person=next((p for p in store.list_cloud_people(tenant_id,shop_id)
                               if str(p.get("employee_code") or "").strip().lower()==employee_code.strip().lower()),None)
+        if existing_person and code_person and existing_person['id']!=code_person['id']:
+            raise HTTPException(502,"CRM employee code collision; reconciliation required")
+        existing_person=existing_person or code_person
         if existing_person:
             previous_mapping=store.crm_person_mapping(tenant_id,shop_id,str(existing_person["id"]))
             if previous_mapping and str(previous_mapping["crm_user_id"])!=crm_user_id:
@@ -2099,6 +2131,8 @@ def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
             if cached:
                 try:
                     validated_embedding(cached["embedding"])
+                    if cached.get('model_key')!=model_key:
+                        store.set_cloud_face_model_key(tenant_id,shop_id,local_person_id,face_id,model_key)
                     _crm_enrollment_metrics["cache_hits"]+=1
                     continue
                 except ValueError:
@@ -2117,6 +2151,7 @@ def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
                 store.add_cloud_face({"id":face_id,"person_id":local_person_id,
                     "tenant_id":tenant_id,"shop_id":shop_id,"embedding":embedding,
                     "quality":quality,"image_path":None})
+                store.set_cloud_face_model_key(tenant_id,shop_id,local_person_id,face_id,model_key)
             except ValueError:
                 _crm_enrollment_metrics["rejected_images"]+=1
                 store.reject_crm_enrollment(tenant_id,shop_id,crm_user_id,face_id,"invalid_face_template")
@@ -2166,8 +2201,68 @@ def portal_personnel(tenant_id: str, principal: PortalPrincipal = Depends(requir
         item["face_enrolled"]=int(item.get("face_count") or 0)>0
         item["crm_user_id"]=str(mapping["crm_user_id"])
         item["crm_mapped"]=True
+        item["enrollment_preview_url"]=(f"/portal/v1/tenants/{quote(tenant_id,safe='')}/personnel/{quote(pid,safe='')}/enrollment-image"
+                                        if item.get('active') else None)
         items.append(item)
     return {"items":items}
+
+def _enrollment_preview(tenant: str, shop: str, person_id: str):
+    person=store.get_cloud_person(tenant,shop,person_id)
+    mapping=store.crm_person_mapping(tenant,shop,person_id)
+    if not person or not person.get('active') or not mapping:
+        raise HTTPException(404,"Enrollment preview unavailable")
+    mappings=[m for m in store.list_crm_person_mappings(tenant,shop) if m['crm_user_id']==mapping['crm_user_id']]
+    if len(mappings)!=1:
+        raise HTTPException(409,"Ambiguous CRM identity")
+    try:
+        tenant_uuid,source=_crm_face_login_identity(tenant,str(mapping['crm_user_id']),shop)
+        raw=_decode_crm_face_image(source)
+        image=cv2.imdecode(np.frombuffer(raw,np.uint8),cv2.IMREAD_COLOR) if raw else None
+        if image is None: raise ValueError('invalid image')
+        ok,encoded=cv2.imencode('.jpg',image)
+        if not ok: raise ValueError('invalid image')
+    except Exception:
+        raise HTTPException(502,"CRM enrollment preview unavailable") from None
+    return Response(encoded.tobytes(),media_type='image/jpeg',headers={
+        'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Cross-Origin-Resource-Policy':'same-origin'})
+
+
+@app.get('/portal/v1/tenants/{tenant_id}/personnel/{person_id}/enrollment-image')
+def portal_enrollment_preview(tenant_id: str, person_id: str, principal: PortalPrincipal=Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    return _enrollment_preview(tenant_id,principal.shop_id,person_id)
+
+
+@app.get('/edge/v1/personnel/{person_id}/enrollment-image')
+def edge_enrollment_preview(person_id: str, principal: EdgePrincipal=Depends(require_edge_token)):
+    if principal.legacy_global: raise HTTPException(403,'Scoped edge credential required')
+    return _enrollment_preview(str(principal.tenant_id),str(principal.shop_id),person_id)
+
+
+@app.get('/portal/v1/tenants/{tenant_id}/personnel-diagnostics')
+def personnel_diagnostics(tenant_id: str, principal: PortalPrincipal=Depends(require_portal_session)):
+    """Read-only mirror/heartbeat inspection: never refresh CRM or mutate the mirror."""
+    _portal_scope(tenant_id,principal)
+    mappings=store.list_crm_person_mappings(tenant_id,principal.shop_id)
+    items=[]
+    for person in store.list_cloud_people(tenant_id,principal.shop_id):
+        pid=str(person['id']); links=[m for m in mappings if m['local_person_id']==pid]
+        faces=store.list_cloud_faces(tenant_id,principal.shop_id,pid)
+        edge_reports=[]
+        for edge in store.list_edges(tenant_id,shop_id=principal.shop_id):
+            for report in (edge.get('status') or {}).get('personnel') or []:
+                if report.get('person_id')==pid:
+                    edge_reports.append({'edge_id':edge['edge_id'],'face_count':report.get('face_count'),
+                        'heartbeat_received_at':edge.get('received_at') or edge.get('last_seen_at'),
+                        'model_compatibility':report.get('model_compatibility','UNVERIFIED'),
+                        'templates_match':set(report.get('face_ids') or [])=={f['id'] for f in faces},
+                        'heartbeat_is_historical':True})
+        items.append({'person_id':pid,'crm_user_id':links[0]['crm_user_id'] if len(links)==1 else None,
+            'mapping_status':'MAPPED' if len(links)==1 else 'UNMAPPED_OR_AMBIGUOUS',
+            'cloud_face_count':len(faces),'enrollment_model_keys':sorted({f['model_key'] for f in faces if f.get('model_key')}),
+            'unverified_template_count':sum(not f.get('model_key') for f in faces),'edge_reports':edge_reports})
+    return {'items':items}
+
 
 @app.get("/portal/v1/tenants/{tenant_id}/attendance")
 def portal_attendance(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
@@ -2760,7 +2855,7 @@ def _crm_face_token_locked(tenant_id: str, shop_id: str, crm_user_id: str) -> st
     if not hasattr(store,"get_crm_face_token") or not hasattr(store,"save_crm_face_token"):
         raise RuntimeError("Employee CRM authentication requires the PostgreSQL token vault")
     # Check membership against the requested tenant directory even on a cache hit.
-    crm_tenant_id=_crm_tenant_uuid_for_user(tenant_id,crm_user_id)
+    crm_tenant_id=_crm_tenant_uuid_for_user(tenant_id,crm_user_id,shop_id)
     cached=store.get_crm_face_token(tenant_id,shop_id,crm_user_id)
     if cached:
         from cryptography.fernet import InvalidToken
@@ -2774,7 +2869,7 @@ def _crm_face_token_locked(tenant_id: str, shop_id: str, crm_user_id: str) -> st
             store.delete_crm_face_token(tenant_id,shop_id,crm_user_id)
     # The confirmed CRM contract authenticates an enrolled directory image.
     # Camera evidence remains action evidence, never a substitute enrollment.
-    directory_tenant,image=_crm_face_login_identity(tenant_id,crm_user_id)
+    directory_tenant,image=_crm_face_login_identity(tenant_id,crm_user_id,shop_id)
     if directory_tenant!=crm_tenant_id:
         raise RuntimeError("CRM face directory tenant changed during authentication")
     response=crm_client.login_using_face_tenant(image,crm_tenant_id)

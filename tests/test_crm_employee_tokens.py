@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import cv2
+import numpy as np
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
 
@@ -18,6 +20,8 @@ from cloud_portal.crm_client import SnapKeyCrmClient
 def employee_crm(monkeypatch):
     now=datetime.now(timezone.utc)
     state=SimpleNamespace(requests=[],face_logins=0,failure=None,face_user="employee-a",message="")
+    ok,enrolled=cv2.imencode('.jpg',np.zeros((32,32,3),dtype=np.uint8));assert ok
+    state.enrolled_image=base64.b64encode(enrolled).decode()
     evidence={"cloud_evidence_snapshots":[{"evidence_id":f"snapshot-{i}"} for i in range(3)],
               "cloud_clip":{"evidence_id":"clip-1"}}
     event={"event_id":"recognition-a","event_type":"PERSON_RECOGNIZED",
@@ -62,7 +66,7 @@ def employee_crm(monkeypatch):
         if path.startswith("/api/User/face-embeddings/"):
             tenant=request.url.path.rsplit("/",1)[-1]
             users=([{"id":"employee-a","tenantId":"uuid-a","tenantCode":tenant,
-                     "name":"Employee A","faceImages":["enrolled-a"]}]
+                     "name":"Employee A","faceImages":[state.enrolled_image]}]
                    if tenant=="tenant-a" else [{"id":"employee-b","tenantId":"uuid-b"}])
             return httpx.Response(200,json=users)
         if path=="/api/Auth/loginUsingFaceTenant":
@@ -153,8 +157,8 @@ def test_expired_token_is_renewed_for_unattended_absence_without_live_image(empl
     api._v2_auto_logout(ctx.row,ctx.now)
     auth=[r for r in ctx.state.requests if r.url.path=="/api/Auth/loginUsingFaceTenant"]
     assert len(auth)==2
-    assert json.loads(auth[0].content)["base64Image"]=="enrolled-a"
-    assert json.loads(auth[1].content)=={"base64Image":"enrolled-a","tenantId":"uuid-a"}
+    assert json.loads(auth[0].content)["base64Image"]==ctx.state.enrolled_image
+    assert json.loads(auth[1].content)=={"base64Image":ctx.state.enrolled_image,"tenantId":"uuid-a"}
     assert mutations(ctx)[-1].url.path=="/api/UserActivity/auto-logout"
 
 
@@ -264,7 +268,7 @@ def test_employee_token_and_images_are_absent_from_logs(employee_crm,caplog):
     manual(ctx,"BREAK_START")
     token=mutations(ctx)[0].headers["Authorization"]
     assert token not in caplog.text
-    assert "live-a" not in caplog.text and "enrolled-a" not in caplog.text
+    assert "live-a" not in caplog.text and ctx.state.enrolled_image not in caplog.text
     assert ctx.state.message not in caplog.text
 
 

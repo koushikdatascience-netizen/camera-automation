@@ -125,6 +125,24 @@ class CloudSyncClient:
         response.raise_for_status()
         return response.json() if response.content else {"items":[]}
 
+    def enrollment_preview(self, person_id: str) -> bytes:
+        from urllib.parse import quote
+        if not self.enabled(): raise RuntimeError('cloud sync is disabled')
+        response=requests.get(self.config.base_url.rstrip('/')+'/edge/v1/personnel/'+quote(person_id,safe='')+'/enrollment-image',
+            headers={'Authorization':f'Bearer {self.config.api_token}'},timeout=self.config.timeout_seconds,
+            stream=True,allow_redirects=False)
+        try:
+            response.raise_for_status()
+            if response.status_code!=200 or response.headers.get('Content-Type','').split(';')[0]!='image/jpeg':
+                raise ValueError('Invalid enrollment preview response')
+            chunks=[];size=0
+            for chunk in response.iter_content(65536):
+                size+=len(chunk)
+                if size>8*1024*1024: raise ValueError('Enrollment preview exceeds limit')
+                chunks.append(chunk)
+            return b''.join(chunks)
+        finally: response.close()
+
     def edge_commands(self) -> list[dict[str, Any]]:
         if not self.enabled(): raise RuntimeError("cloud sync is disabled")
         response=requests.get(self.config.base_url.rstrip("/")+"/edge/v1/commands",

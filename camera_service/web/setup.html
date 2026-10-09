@@ -2490,6 +2490,13 @@
 
                     const nameCell = document.createElement('td');
                     nameCell.textContent = person.full_name;
+                    if (person.sync_diagnostic) {
+                        const diagnostic=document.createElement('small');
+                        diagnostic.style.display='block';
+                        diagnostic.textContent='CRM: '+(person.sync_diagnostic.crm_user_id||'Not mapped')+
+                            ' · Templates: '+person.sync_diagnostic.edge_face_count+' · '+person.sync_diagnostic.model_compatibility;
+                        nameCell.appendChild(diagnostic);
+                    }
 
                     const codeCell = document.createElement('td');
                     codeCell.textContent = person.employee_code;

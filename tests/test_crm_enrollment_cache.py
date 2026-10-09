@@ -40,10 +40,111 @@ def person_id(store): return store.list_crm_person_mappings('tenant-1','shop-1')
 def faces(store): return store.list_cloud_faces('tenant-1','shop-1',person_id(store),include_embedding=True)
 
 
+def test_employee_code_change_preserves_identity_and_templates(mirror):
+    state,store=mirror; refresh(); pid=person_id(store); original=faces(store)[0]['id']
+    state.users[0]['employeeCode']='changed-code'
+    refresh()
+    assert person_id(store)==pid and faces(store)[0]['id']==original
+    assert len(store.list_cloud_people('tenant-1','shop-1'))==1
+
+
+def test_duplicate_crm_user_rejected_before_mutation(mirror):
+    state,store=mirror; state.users.append(dict(state.users[0],employeeCode='other'))
+    with pytest.raises(HTTPException,match=''): refresh()
+    assert store.list_cloud_people('tenant-1','shop-1')==[]
+
+
+def test_mapping_cannot_duplicate_or_reassign_identity(mirror):
+    _,store=mirror;refresh();pid=person_id(store)
+    with pytest.raises(ValueError):
+        store.upsert_crm_person_mapping({'tenant_id':'tenant-1','shop_id':'shop-1','local_person_id':'other','crm_user_id':'user-1'})
+    with pytest.raises(ValueError):
+        store.upsert_crm_person_mapping({'tenant_id':'tenant-1','shop_id':'shop-1','local_person_id':pid,'crm_user_id':'other'})
+
+
+def test_refresh_preserves_existing_break_mapping(mirror):
+    _,store=mirror;refresh();pid=person_id(store)
+    mapping=store.crm_person_mapping('tenant-1','shop-1',pid)
+    store.upsert_crm_person_mapping({**mapping,'break_master_id':'approved-break'})
+    refresh()
+    assert store.crm_person_mapping('tenant-1','shop-1',pid)['break_master_id']=='approved-break'
+
+
+def portal_principal(tenant='tenant-1',shop='shop-1'):
+    return api.PortalPrincipal('session',tenant,None,shop,'admin','Admin','ADMIN')
+
+
+def test_authenticated_preview_and_scope(mirror):
+    _,store=mirror;refresh();pid=person_id(store)
+    response=api.portal_enrollment_preview('tenant-1',pid,portal_principal())
+    assert response.media_type=='image/jpeg' and response.body.startswith(b'\xff\xd8')
+    assert response.headers['cache-control']=='no-store'
+    with pytest.raises(HTTPException) as exc:
+        api.portal_enrollment_preview('tenant-1',pid,portal_principal('other'))
+    assert exc.value.status_code==403
+    with pytest.raises(HTTPException) as exc:
+        api.portal_enrollment_preview('tenant-1',pid,portal_principal(shop='other'))
+    assert exc.value.status_code==404
+
+
+def test_preview_route_requires_authentication(mirror):
+    from fastapi.testclient import TestClient
+    _,store=mirror;refresh();pid=person_id(store)
+    client=TestClient(api.app)
+    assert client.get('/portal/v1/tenants/tenant-1/personnel/'+pid+'/enrollment-image').status_code==401
+    assert client.get('/edge/v1/personnel/'+pid+'/enrollment-image').status_code==401
+
+
+@pytest.mark.parametrize('field',['faceImages','profileImage'])
+def test_preview_supports_both_image_fields(mirror,field):
+    state,store=mirror;state.users[0].pop('faceImages');state.users[0][field]=image()
+    refresh();assert api._enrollment_preview('tenant-1','shop-1',person_id(store)).body
+
+
+def test_missing_preview_is_explicit(mirror):
+    state,store=mirror;state.users[0]['faceImages']=[];refresh()
+    assert not faces(store)
+    with pytest.raises(HTTPException):api._enrollment_preview('tenant-1','shop-1',person_id(store))
+
+
+def test_available_image_preview_does_not_require_successful_enrollment(mirror,monkeypatch):
+    _,store=mirror
+    monkeypatch.setattr(api,'_cloud_face_enroller',lambda:SimpleNamespace(enroll=lambda _:(_ for _ in ()).throw(ValueError('ambiguous face'))))
+    refresh();assert faces(store)==[]
+    monkeypatch.setattr(api,'_refresh_crm_personnel',lambda *a,**kw:None)
+    result=api.portal_personnel('tenant-1',portal_principal())['items'][0]
+    assert result['enrollment_preview_url'] and not result['face_enrolled']
+    assert api._enrollment_preview('tenant-1','shop-1',person_id(store)).body
+
+
+def test_diagnostic_is_read_only_and_contains_no_biometrics(mirror,monkeypatch):
+    _,store=mirror;refresh()
+    monkeypatch.setattr(api.crm_client,'face_embeddings',lambda *a,**k:pytest.fail('Read-only diagnostic fetched CRM'))
+    result=api.personnel_diagnostics('tenant-1',portal_principal())
+    import json
+    assert result['items'][0]['cloud_face_count']==1
+    assert 'embedding' not in json.dumps(result) and 'base64' not in json.dumps(result).lower()
+
+
+def test_face_login_duplicate_and_tenant_mismatch_rejected(mirror):
+    state,_=mirror
+    state.users.append(dict(state.users[0]))
+    with pytest.raises(RuntimeError):api._crm_face_login_identity('tenant-1','user-1')
+    state.users=state.users[:1];state.users[0]['tenantCode']='other'
+    with pytest.raises(RuntimeError):api._crm_face_login_identity('tenant-1','user-1')
+
+
+def test_face_login_returned_identity_and_tenant_checked():
+    for user in ({'id':'other','tenantId':'uuid-1'},{'id':'user-1','tenantId':'other'}):
+        with pytest.raises(RuntimeError):
+            api._validated_crm_face_login_token({'success':True,'user':user,'token':'synthetic'},'user-1','uuid-1')
+
+
 def test_persistent_image_cache_restart_and_change(mirror,monkeypatch):
     state,store=mirror
     refresh(); assert state.calls==1 and len(faces(store))==1
     original=faces(store)[0]['id']
+    assert faces(store)[0]['model_key']=='model-v1'
     refresh(); assert state.calls==1
     monkeypatch.setattr(api,'store',PortalStore(store.path))
     refresh(); assert state.calls==1
@@ -52,6 +153,17 @@ def test_persistent_image_cache_restart_and_change(mirror,monkeypatch):
     assert faces(store)[0]['id']!=original
     monkeypatch.setattr(api,'enrollment_model_key',lambda:'model-v2')
     refresh(); assert state.calls==3
+    assert faces(store)[0]['model_key']=='model-v2'
+
+
+def test_unverified_cached_model_not_exported_until_refresh(mirror,monkeypatch):
+    _,store=mirror;refresh();pid=person_id(store);face=faces(store)[0]
+    store.set_cloud_face_model_key('tenant-1','shop-1',pid,face['id'],None)
+    monkeypatch.setattr(api,'_refresh_crm_personnel',lambda *a,**kw:None)
+    principal=api.EdgePrincipal(tenant_id='tenant-1',company_code=None,shop_id='shop-1',site_id='site',edge_id='edge')
+    assert api.edge_personnel_config(principal)['items'][0]['faces']==[]
+    refresh()
+    assert api.edge_personnel_config(principal)['items'][0]['enrollment_model_key']=='model-v1'
 
 
 def test_multiple_images_revoke_and_preserve_local(mirror):

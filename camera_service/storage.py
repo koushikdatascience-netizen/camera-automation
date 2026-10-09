@@ -42,6 +42,7 @@ class SQLiteStore:
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
             self._ensure_column(c,'personnel','attendance_mode','TEXT')
+            self._ensure_column(c,'personnel','crm_sync_json','TEXT')
             self._ensure_column(c,'attendance_sessions','entry_confirmed','INTEGER NOT NULL DEFAULT 0')
             for column in ('break_started_at', 'last_break_start', 'last_break_end'):
                 self._ensure_column(c,'attendance_sessions',column,'TEXT')
@@ -139,11 +140,32 @@ class SQLiteStore:
         templates are removed so stale CRM identities can never win recognition.
         """
         now=self.now(); seen=set()
+        mapped=[str(i['crm_user_id']) for i in items if i.get('crm_user_id')]
+        if len(mapped)!=len(set(mapped)): raise ValueError('Duplicate CRM identity in personnel snapshot')
+        for item in items:
+            scope=getattr(self,'_event_scope',{}) or {}
+            for key in ('tenant_id','shop_id'):
+                if item.get(key) and scope.get(key) and str(item[key])!=str(scope[key]):
+                    raise ValueError('Personnel snapshot scope mismatch')
+            if item.get('enrollment_model_key'):
+                from camera_service.face_service import validated_embedding, enrollment_model_key
+                if item['enrollment_model_key']!=enrollment_model_key():
+                    raise ValueError('Cloud enrollment model is incompatible with edge recognition')
+                for face in item.get('faces') or []: validated_embedding(face['embedding'])
         with self._lock,self._conn() as c:
             for item in items:
                 pid=str(item["person_id"]); seen.add(pid)
+                if item.get('crm_user_id'):
+                    for row in c.execute('SELECT id,crm_sync_json FROM personnel WHERE crm_sync_json IS NOT NULL').fetchall():
+                        old=json.loads(row['crm_sync_json'])
+                        if row['id']==pid and old.get('crm_user_id') and old['crm_user_id']!=str(item['crm_user_id']):
+                            raise ValueError('CRM identity reassignment requires reconciliation')
+                        if old.get('crm_user_id')==str(item['crm_user_id']) and row['id']!=pid:
+                            raise ValueError('CRM user already mapped to another local identity')
                 legacy=c.execute("SELECT id,managed_source FROM personnel WHERE employee_code=? AND id<>?",(str(item["employee_code"]),pid)).fetchone()
                 if legacy:
+                    if item.get('crm_user_id'):
+                        raise ValueError('Employee code collision requires explicit identity reconciliation')
                     old_id=str(legacy["id"])
                     c.execute("UPDATE face_profiles SET person_id=? WHERE person_id=?",(pid,old_id))
                     c.execute("UPDATE attendance_sessions SET person_id=? WHERE person_id=?",(pid,old_id))
@@ -156,11 +178,16 @@ class SQLiteStore:
                     (pid,str(item["employee_code"]),str(item["full_name"]),str(item["role"]),item.get("phone"),item.get("email"),
                      1 if item.get("active",True) else 0,now,now,'crm'))
                 mode=str(item.get('attendance_mode') or '').upper()
+                metadata={k:item.get(k) for k in ('crm_user_id','tenant_id','shop_id','enrollment_model_key')}
+                c.execute('UPDATE personnel SET crm_sync_json=? WHERE id=?',(json.dumps(metadata),pid))
                 c.execute("UPDATE personnel SET attendance_mode=? WHERE id=?",
                           (mode if mode in {'AUTO','MANUAL'} else 'MANUAL',pid))
                 cloud_face_ids=set()
                 for face in item.get("faces") or []:
                     fid=str(face["face_id"]); cloud_face_ids.add(fid)
+                    owner=c.execute('SELECT person_id FROM face_profiles WHERE id=?',(fid,)).fetchone()
+                    if item.get('crm_user_id') and owner and owner['person_id']!=pid:
+                        raise ValueError('Face template identity conflict')
                     c.execute("""INSERT INTO face_profiles(id,person_id,embedding_json,quality,created_at,image_path)
                         VALUES(?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET person_id=excluded.person_id,
                         embedding_json=excluded.embedding_json,quality=excluded.quality""",
@@ -216,8 +243,17 @@ class SQLiteStore:
             cur=c.execute("DELETE FROM face_profiles WHERE id=? AND person_id=?",(fid,pid)); return cur.rowcount>0
     def embeddings(self):
         with self._conn() as c:
-            rows=c.execute("SELECT f.id,f.person_id,f.embedding_json,p.full_name,p.role FROM face_profiles f JOIN personnel p ON p.id=f.person_id WHERE p.active=1").fetchall()
-            return [{**dict(r),'embedding':json.loads(r['embedding_json'])} for r in rows]
+            rows=c.execute("SELECT f.id,f.person_id,f.embedding_json,p.full_name,p.role,p.crm_sync_json FROM face_profiles f JOIN personnel p ON p.id=f.person_id WHERE p.active=1").fetchall()
+            result=[]
+            for row in rows:
+                data=dict(row);metadata=json.loads(data.pop('crm_sync_json') or '{}')
+                if metadata.get('enrollment_model_key'):
+                    from camera_service.face_service import enrollment_model_key
+                    try:
+                        if metadata['enrollment_model_key']!=enrollment_model_key(): continue
+                    except ValueError: continue
+                result.append({**data,'embedding':json.loads(data['embedding_json'])})
+            return result
     def open_session(self,person_id,store_id):
         with self._conn() as c:
             r=c.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? AND status='OPEN' ORDER BY arrival_time DESC LIMIT 1",(person_id,store_id)).fetchone(); return dict(r) if r else None

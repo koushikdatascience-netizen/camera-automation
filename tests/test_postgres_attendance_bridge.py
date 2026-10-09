@@ -66,6 +66,64 @@ def test_pg_upgrade_adds_predecessor_recovery_columns():
         admin.dispose()
 
 
+def test_pg_crm_identity_cannot_duplicate_or_reassign(pg_bridge):
+    store=pg_bridge
+    mapping={'tenant_id':'tenant','shop_id':'shop','local_person_id':'person','crm_user_id':'crm'}
+    store.upsert_crm_person_mapping(mapping)
+    with pytest.raises(ValueError):store.upsert_crm_person_mapping({**mapping,'crm_user_id':'other'})
+    from sqlalchemy.exc import IntegrityError
+    with pytest.raises(IntegrityError):store.upsert_crm_person_mapping({**mapping,'local_person_id':'other'})
+    assert store.crm_person_mapping('tenant','shop','person')['crm_user_id']=='crm'
+    store.upsert_crm_person_mapping({**mapping,'shop_id':'other'})
+
+
+def test_pg_enrollment_to_edge_recognition_and_authentication(pg_bridge,tmp_path,monkeypatch):
+    import base64
+    import cv2
+    import numpy as np
+    from types import SimpleNamespace
+    from cloud_portal import api
+    from cloud_portal.crm_client import SnapKeyCrmClient
+    from camera_service.storage import SQLiteStore
+    from camera_service import face_service
+    ok,image=cv2.imencode('.jpg',np.zeros((32,32,3),dtype=np.uint8));assert ok
+    source=base64.b64encode(image).decode()
+    vector=[1.]+[0.]*511
+    monkeypatch.setattr(api,'store',pg_bridge)
+    monkeypatch.setattr(api,'crm_client',SimpleNamespace(face_embeddings=lambda *a,**kw:[{
+        'id':'employee','tenantId':'uuid','tenantCode':'tenant','shopId':'shop','name':'Synthetic',
+        'isActive':True,'faceImages':[source]}],business_success=SnapKeyCrmClient.business_success))
+    monkeypatch.setattr(api,'enrollment_model_key',lambda:'synthetic-model')
+    monkeypatch.setattr(face_service,'enrollment_model_key',lambda:'synthetic-model')
+    monkeypatch.setattr(api,'_cloud_face_enroller',lambda:SimpleNamespace(enroll=lambda _: (vector,.9)))
+    monkeypatch.setattr(api,'_refresh_crm_personnel',lambda *a,**kw:None)
+    api._refresh_crm_personnel_locked('tenant','shop')
+    principal=api.EdgePrincipal(tenant_id='tenant',company_code=None,shop_id='shop',site_id='site',edge_id='edge')
+    config=api.edge_personnel_config(principal)
+    local=SQLiteStore(str(tmp_path/'edge.db'));local.configure_event_scope('tenant',None,'shop','edge')
+    local.apply_cloud_personnel(config['items'])
+    recognizer=face_service.FaceService.__new__(face_service.FaceService);recognizer.store=local
+    result,similarity=recognizer.recognize(vector,.5)
+    assert similarity==pytest.approx(1)
+    assert result['person_id']==config['items'][0]['person_id']
+    assert api._crm_face_login_identity('tenant','employee','shop')==('uuid',source)
+    assert api._validated_crm_face_login_token({'success':True,'token':'synthetic','user':{'id':'employee','tenantId':'uuid'}},'employee','uuid')=='synthetic'
+    assert api._enrollment_preview('tenant','shop',result['person_id']).body.startswith(b'\xff\xd8')
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv('CAMERA_EYE_TOKEN_ENCRYPTION_KEY',Fernet.generate_key().decode())
+    calls=[]
+    def login(enrolled,tenant):
+        assert enrolled==source and tenant=='uuid'
+        calls.append(1)
+        return {'success':True,'token':'synthetic','user':{'id':'employee','tenantId':'uuid'}}
+    api.crm_client.login_using_face_tenant=login
+    assert api._crm_face_token('tenant','shop','employee')=='synthetic'
+    assert api._crm_face_token('tenant','shop','employee')=='synthetic' and calls==[1]
+    saved=pg_bridge.get_crm_face_token('tenant','shop','employee')
+    assert 'synthetic' not in saved['encrypted_token']
+    assert pg_bridge.get_crm_face_token('tenant','other','employee') is None
+
+
 def event(key='entry',kind='ATTENDANCE_ENTRY',predecessor=None,session='session'):
     return {'tenant_id':'tenant','shop_id':'shop','site_id':'site','edge_id':'edge','camera_id':'camera',
         'event_id':key,'event_type':kind,'event_time':datetime.now(timezone.utc).isoformat(),

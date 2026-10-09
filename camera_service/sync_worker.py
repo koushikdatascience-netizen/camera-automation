@@ -274,6 +274,14 @@ class EdgeSyncWorker:
             self._remember(result, {"heartbeat": heartbeat_sync, "camera_sync": camera_sync, "personnel_sync": personnel_sync, "command_sync": command_sync})
             return result
 
+    @staticmethod
+    def _personnel_model_status(person):
+        from camera_service.face_service import enrollment_model_key
+        metadata=json.loads(person.get('crm_sync_json') or '{}')
+        if not metadata.get('enrollment_model_key'): return 'UNVERIFIED'
+        try: return 'COMPATIBLE' if metadata['enrollment_model_key']==enrollment_model_key() else 'INCOMPATIBLE'
+        except ValueError: return 'MODEL_UNAVAILABLE'
+
     def _edge_status_payload(self, license_status) -> dict[str, Any]:
         """Build a credential-free inventory/status heartbeat for the cloud portal."""
         cameras = []
@@ -308,6 +316,8 @@ class EdgeSyncWorker:
                     "role": person["role"],
                     "active": bool(person["active"]),
                     "face_count": len(faces),
+                    "face_ids": [f['id'] for f in faces],
+                    "model_compatibility": self._personnel_model_status(person),
                 })
         except Exception:
             # Heartbeat must remain available even if an older local database is

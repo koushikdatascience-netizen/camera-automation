@@ -60,6 +60,7 @@ class PortalStore(AttendanceDeliveryStore):
                 """
             )
             self._ensure_column(conn, "edge_events", "company_code", "TEXT")
+            self._ensure_column(conn, 'cloud_face_profiles', 'model_key', 'TEXT')
             self._ensure_column(conn, "edge_events", "shop_id", "TEXT")
             self._ensure_column(conn, "edge_machines", "company_code", "TEXT")
             self._ensure_column(conn, "edge_machines", "shop_id", "TEXT")
@@ -224,7 +225,7 @@ class PortalStore(AttendanceDeliveryStore):
                 (item["id"],item["person_id"],item["tenant_id"],item["shop_id"],json.dumps(item["embedding"]),item["quality"],item.get("image_path"),self.now()))
         return {"id":item["id"],"person_id":item["person_id"],"quality":item["quality"],"image_path":item.get("image_path")}
     def list_cloud_faces(self,tenant_id,shop_id,person_id,include_embedding=False):
-        cols="id,person_id,quality,image_path,created_at"+(",embedding_json" if include_embedding else "")
+        cols="id,person_id,quality,image_path,created_at,model_key"+(",embedding_json" if include_embedding else "")
         with self._conn() as c: rows=c.execute(f"SELECT {cols} FROM cloud_face_profiles WHERE tenant_id=? AND shop_id=? AND person_id=? ORDER BY created_at DESC",(tenant_id,shop_id,person_id)).fetchall()
         out=[]
         for r in rows:
@@ -232,6 +233,10 @@ class PortalStore(AttendanceDeliveryStore):
             if include_embedding: item["embedding"]=json.loads(item.pop("embedding_json"))
             out.append(item)
         return out
+    def set_cloud_face_model_key(self,tenant,shop,person,face,key):
+        with self._lock,self._conn() as conn:
+            conn.execute('UPDATE cloud_face_profiles SET model_key=? WHERE tenant_id=? AND shop_id=? AND person_id=? AND id=?',
+                (key,tenant,shop,person,face))
     def delete_cloud_face(self,tenant_id,shop_id,person_id,face_id):
         with self._lock,self._conn() as c: return c.execute("DELETE FROM cloud_face_profiles WHERE tenant_id=? AND shop_id=? AND person_id=? AND id=?",(tenant_id,shop_id,person_id,face_id)).rowcount>0
 
@@ -444,10 +449,18 @@ class PortalStore(AttendanceDeliveryStore):
     def upsert_crm_person_mapping(self, mapping: dict[str, Any]) -> dict[str, Any]:
         now=self.now()
         with self._lock,self._conn() as conn:
+            collision=conn.execute("SELECT local_person_id FROM crm_person_mappings WHERE tenant_id=? AND shop_id=? AND crm_user_id=? AND local_person_id<>?",
+                (mapping['tenant_id'],mapping['shop_id'],mapping['crm_user_id'],mapping['local_person_id'])).fetchone()
+            if collision: raise ValueError('CRM user already mapped to another local identity')
+            previous=conn.execute("SELECT crm_user_id FROM crm_person_mappings WHERE tenant_id=? AND shop_id=? AND local_person_id=?",
+                (mapping['tenant_id'],mapping['shop_id'],mapping['local_person_id'])).fetchone()
+            if previous and previous['crm_user_id']!=mapping['crm_user_id']:
+                raise ValueError('CRM identity reassignment requires reconciliation')
             conn.execute("""INSERT INTO crm_person_mappings(tenant_id,shop_id,local_person_id,crm_user_id,employee_code,break_master_id,enabled,created_at,updated_at)
                 VALUES(?,?,?,?,?,?,1,?,?) ON CONFLICT(tenant_id,shop_id,local_person_id) DO UPDATE SET
-                crm_user_id=excluded.crm_user_id,employee_code=excluded.employee_code,break_master_id=excluded.break_master_id,enabled=1,updated_at=excluded.updated_at""",
-                (mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"],mapping["crm_user_id"],mapping.get("employee_code"),mapping.get("break_master_id"),now,now))
+                crm_user_id=excluded.crm_user_id,employee_code=excluded.employee_code,
+                break_master_id=CASE WHEN ? THEN excluded.break_master_id ELSE crm_person_mappings.break_master_id END,enabled=1,updated_at=excluded.updated_at""",
+                (mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"],mapping["crm_user_id"],mapping.get("employee_code"),mapping.get("break_master_id"),now,now,'break_master_id' in mapping))
         return self.crm_person_mapping(mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"])
 
     def crm_person_mapping(self, tenant_id: str, shop_id: str, local_person_id: str) -> dict[str, Any] | None:

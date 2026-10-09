@@ -123,6 +123,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                 cache_key TEXT NOT NULL,reason TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY(tenant_id,shop_id,crm_user_id,cache_key))""",
             """CREATE INDEX IF NOT EXISTS idx_cloud_faces_person ON cloud_face_profiles(tenant_id,shop_id,person_id)""",
+            "ALTER TABLE cloud_face_profiles ADD COLUMN IF NOT EXISTS model_key TEXT",
             """CREATE TABLE IF NOT EXISTS crm_person_mappings(
                 tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, local_person_id TEXT NOT NULL,
                 crm_user_id TEXT NOT NULL, employee_code TEXT, break_master_id TEXT, enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -398,7 +399,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
         return dict(row)
 
     def list_cloud_faces(self, tenant_id: str, shop_id: str, person_id: str, include_embedding: bool=False) -> list[dict[str, Any]]:
-        cols="id,person_id,quality,image_path,created_at"+(",embedding_json" if include_embedding else "")
+        cols="id,person_id,quality,image_path,created_at,model_key"+(",embedding_json" if include_embedding else "")
         with self._conn() as conn:
             rows=conn.execute(text(f"SELECT {cols} FROM cloud_face_profiles WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person ORDER BY created_at DESC"),
                 {"tenant":tenant_id,"shop":shop_id,"person":person_id}).mappings().all()
@@ -409,6 +410,11 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                 item["embedding"]=item.pop("embedding_json")
             out.append(item)
         return out
+
+    def set_cloud_face_model_key(self,tenant,shop,person,face,key):
+        with self._conn() as conn:
+            conn.execute(text('UPDATE cloud_face_profiles SET model_key=:key WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person AND id=:face'),
+                {'key':key,'tenant':tenant,'shop':shop,'person':person,'face':face})
 
     def delete_cloud_face(self, tenant_id: str, shop_id: str, person_id: str, face_id: str) -> bool:
         with self._conn() as conn:
@@ -708,12 +714,19 @@ class PostgresPortalStore(AttendanceDeliveryStore):
     def upsert_crm_person_mapping(self, mapping: dict[str, Any]) -> dict[str, Any]:
         now=self.now()
         with self._conn() as conn:
+            conn.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:scope,0))'),
+                         {'scope':str(mapping['tenant_id'])+'|'+str(mapping['shop_id'])+'|crm-mapping'})
+            previous=conn.execute(text('SELECT crm_user_id FROM crm_person_mappings WHERE tenant_id=:tenant AND shop_id=:shop AND local_person_id=:local'),
+                {'tenant':mapping['tenant_id'],'shop':mapping['shop_id'],'local':mapping['local_person_id']}).first()
+            if previous and str(previous[0])!=str(mapping['crm_user_id']):
+                raise ValueError('CRM identity reassignment requires reconciliation')
             conn.execute(text("""INSERT INTO crm_person_mappings(tenant_id,shop_id,local_person_id,crm_user_id,employee_code,break_master_id,enabled,created_at,updated_at)
                 VALUES(:tenant,:shop,:local,:crm,:employee,:break,TRUE,:now,:now)
                 ON CONFLICT(tenant_id,shop_id,local_person_id) DO UPDATE SET crm_user_id=EXCLUDED.crm_user_id,
-                employee_code=EXCLUDED.employee_code,break_master_id=EXCLUDED.break_master_id,enabled=TRUE,updated_at=EXCLUDED.updated_at"""),
+                employee_code=EXCLUDED.employee_code,
+                break_master_id=CASE WHEN :has_break THEN EXCLUDED.break_master_id ELSE crm_person_mappings.break_master_id END,enabled=TRUE,updated_at=EXCLUDED.updated_at"""),
                 {"tenant":mapping["tenant_id"],"shop":mapping["shop_id"],"local":mapping["local_person_id"],
-                 "crm":mapping["crm_user_id"],"employee":mapping.get("employee_code"),"break":mapping.get("break_master_id"),"now":now})
+                 "crm":mapping["crm_user_id"],"employee":mapping.get("employee_code"),"break":mapping.get("break_master_id"),"now":now,"has_break":'break_master_id' in mapping})
         return self.crm_person_mapping(mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"])
 
     def crm_person_mapping(self, tenant_id: str, shop_id: str, local_person_id: str) -> dict[str, Any] | None:
