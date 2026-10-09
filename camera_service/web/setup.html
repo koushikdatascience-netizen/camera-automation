@@ -622,6 +622,9 @@
                 <a href="#" class="active" data-section="overview">Overview</a>
                 <a href="#" data-section="live">Live View</a>
                 <a href="#" data-section="cameras">Camera Setup</a>
+                <a href="#" data-section="personnel">Personnel</a>
+                <a href="#" data-section="attendance">Attendance</a>
+                <a href="#" data-section="policy">Policy</a>
                 <a href="#" data-section="system">System Status</a>
             </nav>
         </div>
@@ -1064,6 +1067,45 @@
             </div>
         </div>
 
+
+        <!-- Attendance Policy Section -->
+        <div id="policy-section" class="main-content">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Attendance Policy</h2>
+                    <small>Shop-wide attendance rules synchronized with Camera Eye Cloud.</small>
+                </div>
+                <button class="btn btn-secondary" id="policy-refresh" type="button">Refresh</button>
+            </div>
+
+            <form id="attendance-policy-form">
+                <div class="form-row">
+                    <div class="form-col"><div class="form-group"><label for="policy-working-hours">Working Hours / Day</label><input id="policy-working-hours" class="form-control" type="number" min="0.5" max="24" step="0.5" required><small>Total required working time for the shop.</small></div></div>
+                    <div class="form-col"><div class="form-group"><label for="policy-break-minutes">Allowed Break (minutes)</label><input id="policy-break-minutes" class="form-control" type="number" min="0" max="480" required></div></div>
+                    <div class="form-col"><div class="form-group"><label for="policy-grace-minutes">Grace Period (minutes)</label><input id="policy-grace-minutes" class="form-control" type="number" min="1" max="240" required></div></div>
+                    <div class="form-col"><div class="form-group"><label for="policy-max-logoff">Maximum Logoff Time</label><input id="policy-max-logoff" class="form-control" type="time" required></div></div>
+                </div>
+                <div class="form-row">
+                    <div class="form-col"><div class="form-group"><label for="policy-timezone">Timezone</label><input id="policy-timezone" class="form-control" value="Asia/Kolkata" required></div></div>
+                    <div class="form-col"><div class="form-group"><label for="policy-email-recipients">Alert Emails</label><input id="policy-email-recipients" class="form-control" placeholder="owner@example.com, manager@example.com"><small>Comma-separated. Leave blank to disable email recipients.</small></div></div>
+                    <div class="form-col"><div class="form-group"><label for="policy-whatsapp-recipients">WhatsApp Recipients</label><input id="policy-whatsapp-recipients" class="form-control" placeholder="+9198..., +9199..."><small>Comma-separated phone numbers.</small></div></div>
+                </div>
+                <label class="checkbox-group"><input type="checkbox" id="policy-auto-logout"><span>Enable absence auto-logout policy</span></label>
+                <div class="camera-actions" style="justify-content:flex-start"><button class="btn btn-primary" type="submit" id="policy-save">Save Attendance Policy</button></div>
+                <div id="policy-message" class="activation-message" role="status"></div>
+            </form>
+
+            <div class="section-header" style="margin-top:28px">
+                <div><h2 class="section-title" style="font-size:18px">Employee Attendance Mode</h2><small>Choose AUTO or MANUAL and optionally tune absence thresholds for each CRM employee.</small></div>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>Employee</th><th>Mode</th><th>Out-of-camera grace</th><th>Notify after</th><th>Mark absent</th><th>Required hours</th><th>Action</th></tr></thead>
+                    <tbody id="policy-people"><tr><td colspan="7">Loading policy…</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Object Security Test Section -->
         <div id="object-security-section" class="main-content">
             <div class="section-header">
@@ -1259,6 +1301,7 @@
             cameras: document.getElementById('cameras-section'),
             personnel: document.getElementById('personnel-section'),
             attendance: document.getElementById('attendance-section'),
+            policy: document.getElementById('policy-section'),
             objectSecurity: document.getElementById('object-security-section'),
             security: document.getElementById('security-section'),
             unknown: document.getElementById('unknown-section')
@@ -1356,6 +1399,9 @@
                     break;
                 case 'attendance':
                     loadAttendance();
+                    break;
+                case 'policy':
+                    loadAttendancePolicy();
                     break;
                 case 'objectSecurity':
                     loadObjectSecurity();
@@ -2810,6 +2856,130 @@
                 console.error('Error loading attendance:', error);
             }
         }
+
+
+        function policyRecipientList(value) {
+            return String(value || '').split(',').map(item => item.trim()).filter(Boolean);
+        }
+
+        function policyStatus(message, error=false) {
+            const node=document.getElementById('policy-message');
+            if(!node) return;
+            node.textContent=message || '';
+            node.className='activation-message '+(error?'status-error':'status-ok');
+        }
+
+        function renderPolicyPeople(people) {
+            const body=document.getElementById('policy-people');
+            if(!body) return;
+            if(!people.length) {
+                body.innerHTML='<tr><td colspan="7">No CRM personnel are available for this shop.</td></tr>';
+                return;
+            }
+            body.innerHTML=people.map(person=>{
+                const effective=person.effective||{};
+                const mode=String(effective.attendanceMode||'AUTO').toUpperCase();
+                const required=(Number(effective.requiredWorkingMinutes||480)/60).toFixed(1).replace(/\.0$/,'');
+                return `<tr data-crm-user-id="${escapeHtmlLocal(person.crm_user_id)}">
+                    <td><strong>${escapeHtmlLocal(person.full_name||person.employee_code||'Employee')}</strong><small>${escapeHtmlLocal(person.employee_code||'')} · ${escapeHtmlLocal(person.role||'')}</small></td>
+                    <td><select class="form-control policy-person-mode"><option value="AUTO" ${mode==='AUTO'?'selected':''}>AUTO</option><option value="MANUAL" ${mode==='MANUAL'?'selected':''}>MANUAL</option></select></td>
+                    <td><input class="form-control policy-person-grace" type="number" min="1" max="1438" value="${Number(effective.outOfCameraGraceMinutes||5)}"></td>
+                    <td><input class="form-control policy-person-notify" type="number" min="2" max="1439" value="${Number(effective.adminNotificationAfterMinutes||15)}"></td>
+                    <td><input class="form-control policy-person-absent" type="number" min="3" max="1440" value="${Number(effective.markAbsentAfterMinutes||60)}"></td>
+                    <td><input class="form-control policy-person-hours" type="number" min="0.5" max="24" step="0.5" value="${required}"></td>
+                    <td><button class="btn btn-secondary policy-person-save" type="button">Save</button></td>
+                </tr>`;
+            }).join('');
+            body.querySelectorAll('.policy-person-save').forEach(button=>button.addEventListener('click',()=>savePersonAttendancePolicy(button.closest('tr'))));
+        }
+
+        async function loadAttendancePolicy() {
+            const body=document.getElementById('policy-people');
+            if(!body) return;
+            try {
+                policyStatus('Loading policy…');
+                const response=await fetch(`${API_BASE}/attendance-policy`);
+                const data=await response.json();
+                if(!response.ok) throw new Error(data.detail||'Attendance policy is unavailable.');
+                const policy=data.policy||{};
+                document.getElementById('policy-working-hours').value=(Number(policy.total_working_minutes||480)/60).toFixed(1).replace(/\.0$/,'');
+                document.getElementById('policy-break-minutes').value=Number(policy.allowed_break_minutes||0);
+                document.getElementById('policy-grace-minutes').value=Number(policy.grace_period_minutes||15);
+                document.getElementById('policy-max-logoff').value=policy.max_logoff_time||'21:30';
+                document.getElementById('policy-timezone').value=policy.timezone||'Asia/Kolkata';
+                document.getElementById('policy-auto-logout').checked=policy.absence_auto_logout_enabled!==false;
+                document.getElementById('policy-email-recipients').value=(policy.email_recipients||[]).join(', ');
+                document.getElementById('policy-whatsapp-recipients').value=(policy.whatsapp_recipients||[]).join(', ');
+                renderPolicyPeople((data.people||[]).filter(person=>person.active!==false));
+                policyStatus('Policy synchronized with Camera Eye Cloud.');
+            } catch(error) {
+                body.innerHTML='<tr><td colspan="7">'+escapeHtmlLocal(error.message)+'</td></tr>';
+                policyStatus(error.message,true);
+            }
+        }
+
+        async function saveAttendancePolicy(event) {
+            event.preventDefault();
+            const button=document.getElementById('policy-save');
+            button.disabled=true;
+            try {
+                const payload={
+                    grace_period_minutes:Number(document.getElementById('policy-grace-minutes').value),
+                    allowed_break_minutes:Number(document.getElementById('policy-break-minutes').value),
+                    total_working_minutes:Math.round(Number(document.getElementById('policy-working-hours').value)*60),
+                    max_logoff_time:document.getElementById('policy-max-logoff').value,
+                    absence_auto_logout_enabled:document.getElementById('policy-auto-logout').checked,
+                    timezone:document.getElementById('policy-timezone').value.trim(),
+                    email_recipients:policyRecipientList(document.getElementById('policy-email-recipients').value),
+                    whatsapp_recipients:policyRecipientList(document.getElementById('policy-whatsapp-recipients').value)
+                };
+                const response=await fetch(`${API_BASE}/attendance-policy`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+                const data=await response.json();
+                if(!response.ok) throw new Error(data.detail||'Unable to save attendance policy.');
+                policyStatus('Attendance policy saved.');
+                await loadAttendancePolicy();
+            } catch(error) {
+                policyStatus(error.message,true);
+            } finally {
+                button.disabled=false;
+            }
+        }
+
+        async function savePersonAttendancePolicy(row) {
+            const crmUserId=row?.dataset.crmUserId;
+            if(!crmUserId) return;
+            const button=row.querySelector('.policy-person-save');button.disabled=true;
+            try {
+                const grace=Number(row.querySelector('.policy-person-grace').value);
+                const notify=Number(row.querySelector('.policy-person-notify').value);
+                const absent=Number(row.querySelector('.policy-person-absent').value);
+                if(!(grace<notify && notify<absent)) throw new Error('Employee thresholds must satisfy grace < notify < absent.');
+                const payload={
+                    attendanceMode:row.querySelector('.policy-person-mode').value,
+                    presenceUpdateIntervalMinutes:2,
+                    outOfCameraGraceMinutes:grace,
+                    maxOutOfCameraOccurrencesPerDay:5,
+                    adminNotificationAfterMinutes:notify,
+                    markAbsentAfterMinutes:absent,
+                    requiredWorkingMinutes:Math.round(Number(row.querySelector('.policy-person-hours').value)*60),
+                    dayEndAutoLogoutEnabled:true,
+                    absenceMonitoringEnabled:true,
+                    timezone:document.getElementById('policy-timezone').value.trim()||'Asia/Kolkata',
+                    emailNotificationsEnabled:true,
+                    whatsappNotificationsEnabled:true
+                };
+                const response=await fetch(`${API_BASE}/attendance-policy/users/${encodeURIComponent(crmUserId)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+                const data=await response.json();
+                if(!response.ok) throw new Error(data.detail||'Unable to save employee attendance policy.');
+                policyStatus('Employee attendance policy saved.');
+                await loadAttendancePolicy();
+            } catch(error) {
+                policyStatus(error.message,true);
+            } finally {button.disabled=false;}
+        }
+
+        document.getElementById('attendance-policy-form')?.addEventListener('submit',saveAttendancePolicy);
+        document.getElementById('policy-refresh')?.addEventListener('click',loadAttendancePolicy);
 
         async function loadObjectSecurity() {
             try {

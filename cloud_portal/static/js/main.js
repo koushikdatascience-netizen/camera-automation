@@ -915,19 +915,109 @@
     document.getElementById('enable-alert-sound')?.addEventListener('click',enableBrowserSecurityAlerts);
     refresh();setInterval(refresh,15000);
   }
-  document.querySelectorAll('.nav-menu').forEach(nav=>{
-    if(!nav.querySelector('a[href="/portal/system-status.html"]')){
-      const link=document.createElement('a');link.className='nav-item';link.href='/portal/system-status.html';link.innerHTML='⚡ <span>System Status</span>';
-      const overview=nav.querySelector('a[href="/portal"]');overview?.insertAdjacentElement('afterend',link);
-    }
-    if(!nav.querySelector('a[href="/portal/alerts.html"]')){
-      const link=document.createElement('a');link.className='nav-item';link.href='/portal/alerts.html';link.innerHTML='⚠ <span>Alerts</span>';nav.appendChild(link);
-    }
-  });
+  function normalizePortalShell(){
+    const items=[
+      ["/portal","Overview"],["/portal/live.html","Live View"],["/portal/cameras.html","Camera Setup"],
+      ["/portal/personnel.html","Personnel"],["/portal/attendance.html","Attendance"],
+      ["/portal/policy.html","Policy"],["/portal/alerts.html","Alerts"],["/portal/system-status.html","System Status"]
+    ];
+    const path=window.location.pathname.replace(/\/$/,"")||"/portal";
+    document.querySelectorAll('.nav-menu').forEach(nav=>{
+      nav.innerHTML=items.map(([href,label])=>{
+        const target=href.replace(/\/$/,"");
+        const active=path===target || (target==="/portal" && path==="/portal");
+        return "<a href='"+href+"' class='nav-item"+(active?" active":"")+"'><span>"+label+"</span></a>";
+      }).join("");
+    });
+    document.querySelectorAll('.logo-text strong').forEach(node=>node.textContent="SnapKey Vision AI");
+    document.querySelectorAll('.logo-text span').forEach(node=>node.textContent="Camera intelligence");
+  }
+  normalizePortalShell();
+
+  function policyList(value){return String(value||"").split(",").map(x=>x.trim()).filter(Boolean);}
+  function policyMessage(message,error=false){
+    const node=document.getElementById("policy-page-message");if(!node)return;
+    node.textContent=message||"";node.style.color=error?"#b91c1c":"#166534";
+  }
+  function renderPolicyPeople(people){
+    const body=document.getElementById("policy-people-body");if(!body)return;
+    const active=(people||[]).filter(person=>person.active!==false);
+    body.innerHTML=active.length?active.map(person=>{
+      const p=person.effective||{},mode=String(p.attendanceMode||"AUTO").toUpperCase();
+      const hours=(Number(p.requiredWorkingMinutes||480)/60).toFixed(1).replace(/\.0$/,"");
+      return "<tr data-crm-user-id='"+escapeHtml(person.crm_user_id)+"'><td class='policy-person-name'><strong>"+escapeHtml(person.full_name||person.employee_code||"Employee")+"</strong><small>"+escapeHtml(person.employee_code||"")+" · "+escapeHtml(person.role||"")+"</small></td>"+
+        "<td><select class='policy-person-input policy-user-mode'><option value='AUTO' "+(mode==="AUTO"?"selected":"")+">AUTO</option><option value='MANUAL' "+(mode==="MANUAL"?"selected":"")+">MANUAL</option></select></td>"+
+        "<td><input class='policy-person-input policy-user-grace' type='number' min='1' max='1438' value='"+Number(p.outOfCameraGraceMinutes||5)+"'></td>"+
+        "<td><input class='policy-person-input policy-user-notify' type='number' min='2' max='1439' value='"+Number(p.adminNotificationAfterMinutes||15)+"'></td>"+
+        "<td><input class='policy-person-input policy-user-absent' type='number' min='3' max='1440' value='"+Number(p.markAbsentAfterMinutes||60)+"'></td>"+
+        "<td><input class='policy-person-input policy-user-hours' type='number' min='.5' max='24' step='.5' value='"+hours+"'></td>"+
+        "<td><button class='btn btn-light policy-user-save' type='button'>Save</button></td></tr>";
+    }).join(""):"<tr><td colspan='7'>No CRM personnel are available for this shop.</td></tr>";
+    body.querySelectorAll(".policy-user-save").forEach(button=>button.addEventListener("click",()=>savePortalPersonPolicy(button.closest("tr"))));
+  }
+  async function loadPortalPolicy(){
+    if(!document.getElementById("attendance-policy-form"))return;
+    try{
+      policyMessage("Loading policy…");
+      const scope=requireScope(["tenant_id"]);
+      const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-policy");
+      const data=await response.json();if(!response.ok)throw new Error(data.detail||"Unable to load attendance policy.");
+      const p=data.policy||{};
+      document.getElementById("policy-working-hours").value=(Number(p.total_working_minutes||480)/60).toFixed(1).replace(/\.0$/,"");
+      document.getElementById("policy-break-minutes").value=Number(p.allowed_break_minutes||0);
+      document.getElementById("policy-grace-minutes").value=Number(p.grace_period_minutes||15);
+      document.getElementById("policy-max-logoff").value=p.max_logoff_time||"21:30";
+      document.getElementById("policy-timezone").value=p.timezone||"Asia/Kolkata";
+      document.getElementById("policy-auto-logout").checked=p.absence_auto_logout_enabled!==false;
+      document.getElementById("policy-email-recipients").value=(p.email_recipients||[]).join(", ");
+      document.getElementById("policy-whatsapp-recipients").value=(p.whatsapp_recipients||[]).join(", ");
+      renderPolicyPeople(data.people||[]);policyMessage("Policy synchronized.");
+    }catch(error){policyMessage(error.message,true);}
+  }
+  async function savePortalPolicy(event){
+    event.preventDefault();const button=document.getElementById("policy-save");button.disabled=true;
+    try{
+      const scope=requireScope(["tenant_id"]);
+      const payload={grace_period_minutes:Number(document.getElementById("policy-grace-minutes").value),
+        allowed_break_minutes:Number(document.getElementById("policy-break-minutes").value),
+        total_working_minutes:Math.round(Number(document.getElementById("policy-working-hours").value)*60),
+        max_logoff_time:document.getElementById("policy-max-logoff").value,
+        absence_auto_logout_enabled:document.getElementById("policy-auto-logout").checked,
+        timezone:document.getElementById("policy-timezone").value.trim(),
+        email_recipients:policyList(document.getElementById("policy-email-recipients").value),
+        whatsapp_recipients:policyList(document.getElementById("policy-whatsapp-recipients").value)};
+      const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-policy",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+      const data=await response.json();if(!response.ok)throw new Error(data.detail||"Unable to save attendance policy.");
+      policyMessage("Attendance policy saved.");await loadPortalPolicy();
+    }catch(error){policyMessage(error.message,true);}finally{button.disabled=false;}
+  }
+  async function savePortalPersonPolicy(row){
+    const crmUserId=row?.dataset.crmUserId;if(!crmUserId)return;const button=row.querySelector(".policy-user-save");button.disabled=true;
+    try{
+      const grace=Number(row.querySelector(".policy-user-grace").value),notify=Number(row.querySelector(".policy-user-notify").value),absent=Number(row.querySelector(".policy-user-absent").value);
+      if(!(grace<notify&&notify<absent))throw new Error("Employee thresholds must satisfy grace < notify < absent.");
+      const scope=requireScope(["tenant_id"]);
+      const payload={attendanceMode:row.querySelector(".policy-user-mode").value,presenceUpdateIntervalMinutes:2,outOfCameraGraceMinutes:grace,
+        maxOutOfCameraOccurrencesPerDay:5,adminNotificationAfterMinutes:notify,markAbsentAfterMinutes:absent,
+        requiredWorkingMinutes:Math.round(Number(row.querySelector(".policy-user-hours").value)*60),dayEndAutoLogoutEnabled:true,
+        absenceMonitoringEnabled:true,timezone:document.getElementById("policy-timezone").value.trim()||"Asia/Kolkata",
+        emailNotificationsEnabled:true,whatsappNotificationsEnabled:true};
+      const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-policy/users/"+encodeURIComponent(crmUserId),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+      const data=await response.json();if(!response.ok)throw new Error(data.detail||"Unable to save employee policy.");
+      policyMessage("Employee attendance policy saved.");await loadPortalPolicy();
+    }catch(error){policyMessage(error.message,true);}finally{button.disabled=false;}
+  }
+  function wirePolicyPage(){
+    if(!document.getElementById("attendance-policy-form"))return;
+    document.getElementById("attendance-policy-form").addEventListener("submit",savePortalPolicy);
+    document.getElementById("policy-refresh")?.addEventListener("click",loadPortalPolicy);
+    loadPortalPolicy();
+  }
+
   function wireSystemStatusPage(){
     if(!document.getElementById("edge-device-list") || document.getElementById("overview-activity-list"))return;
     loadSystemStatus().catch(error=>showMessage(error.message,true));
     setInterval(loadSystemStatus,15000);
   }
-  bootstrapCrmSession().then(()=>{wireOverviewActivity();wireSystemStatusPage();wireEdgeSetup();wireCameraPage();wireCloudLivePage();wirePersonnelPage();wireAttendancePage();wireAlertsPage();}).catch(error=>showMessage(error.message,true));
+  bootstrapCrmSession().then(()=>{wireOverviewActivity();wireSystemStatusPage();wireEdgeSetup();wireCameraPage();wireCloudLivePage();wirePersonnelPage();wireAttendancePage();wirePolicyPage();wireAlertsPage();}).catch(error=>showMessage(error.message,true));
 })();

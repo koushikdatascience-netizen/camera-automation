@@ -514,6 +514,124 @@ def integration_get_attendance_policy(tenant_id: str, shop_id: str, request: Req
     return {"policy":store.attendance_policy(tenant_id,shop_id)}
 
 
+def _attendance_policy_bundle(tenant_id: str, shop_id: str) -> dict[str, Any]:
+    from cloud_portal.policy_resolution import resolve_attendance_policy
+    shop_policy=store.attendance_policy(tenant_id,shop_id)
+    people=[]
+    mappings=store.list_crm_person_mappings(tenant_id,shop_id) if hasattr(store,"list_crm_person_mappings") else []
+    for mapping in mappings:
+        crm_user_id=str(mapping.get("crm_user_id") or "").strip()
+        person_id=str(mapping.get("local_person_id") or "").strip()
+        if not crm_user_id or not person_id:
+            continue
+        person=store.get_cloud_person(tenant_id,shop_id,person_id)
+        if not person:
+            continue
+        override=(store.person_attendance_policy(tenant_id,shop_id,crm_user_id)
+                  if hasattr(store,"person_attendance_policy") else None)
+        resolved=resolve_attendance_policy(override,shop_policy)
+        people.append({
+            "person_id":person_id,"crm_user_id":crm_user_id,
+            "employee_code":person.get("employee_code"),"full_name":person.get("full_name"),
+            "role":person.get("role"),"active":bool(person.get("active")),
+            "override":override,"effective":resolved.values,"sources":resolved.sources,
+        })
+    people.sort(key=lambda item:(not item["active"],str(item.get("full_name") or "").lower(),str(item.get("employee_code") or "")))
+    return {"policy":shop_policy,"people":people}
+
+
+def _validate_shop_attendance_policy(payload: AttendancePolicyRequest) -> dict[str, Any]:
+    try:
+        ZoneInfo(payload.timezone)
+    except Exception as exc:
+        raise HTTPException(400,"Invalid IANA timezone") from exc
+    return payload.model_dump()
+
+
+def _validate_person_attendance_policy(payload: PersonAttendancePolicyRequest) -> dict[str, Any]:
+    from cloud_portal.person_attendance_rules import PersonAttendancePolicy
+    try:
+        PersonAttendancePolicy(
+            attendance_mode=payload.attendanceMode,
+            presence_update_interval_minutes=payload.presenceUpdateIntervalMinutes,
+            out_of_camera_grace_minutes=payload.outOfCameraGraceMinutes,
+            max_out_of_camera_occurrences_per_day=payload.maxOutOfCameraOccurrencesPerDay,
+            admin_notification_after_minutes=payload.adminNotificationAfterMinutes,
+            mark_absent_after_minutes=payload.markAbsentAfterMinutes,
+            required_working_minutes=payload.requiredWorkingMinutes,
+            timezone=payload.timezone,
+        )
+        ZoneInfo(payload.timezone)
+    except (ValueError,KeyError) as exc:
+        raise HTTPException(422,str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(400,"Invalid IANA timezone") from exc
+    return payload.model_dump(exclude_unset=True)
+
+
+def _assert_policy_user_in_shop(tenant_id: str, shop_id: str, crm_user_id: str) -> None:
+    mappings=store.list_crm_person_mappings(tenant_id,shop_id) if hasattr(store,"list_crm_person_mappings") else []
+    if crm_user_id not in {str(item.get("crm_user_id") or "") for item in mappings}:
+        raise HTTPException(404,"CRM user is not mapped to this Camera Eye shop")
+
+
+@app.get("/portal/v1/tenants/{tenant_id}/attendance-policy")
+def portal_get_attendance_policy(tenant_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    return _attendance_policy_bundle(tenant_id,principal.shop_id)
+
+
+@app.put("/portal/v1/tenants/{tenant_id}/attendance-policy")
+def portal_put_attendance_policy(tenant_id: str, payload: AttendancePolicyRequest,
+                                 principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal); _portal_scope(tenant_id,principal)
+    saved=store.upsert_attendance_policy(tenant_id,principal.shop_id,_validate_shop_attendance_policy(payload))
+    return {"policy":saved}
+
+
+@app.put("/portal/v1/tenants/{tenant_id}/attendance-policy/users/{crm_user_id}")
+def portal_put_person_attendance_policy(tenant_id: str, crm_user_id: str,
+                                        payload: PersonAttendancePolicyRequest,
+                                        principal: PortalPrincipal = Depends(require_portal_session)):
+    _portal_admin(principal); _portal_scope(tenant_id,principal)
+    _assert_policy_user_in_shop(tenant_id,principal.shop_id,crm_user_id)
+    if not hasattr(store,"upsert_person_attendance_policy"):
+        raise HTTPException(503,"Person-wise policies require PostgreSQL")
+    saved=store.upsert_person_attendance_policy(
+        tenant_id,principal.shop_id,crm_user_id,_validate_person_attendance_policy(payload))
+    return {"policy":saved}
+
+
+@app.get("/edge/v1/config/attendance-policy")
+def edge_attendance_policy(principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global:
+        raise HTTPException(403,"Scoped edge credential is required for attendance policy")
+    return _attendance_policy_bundle(principal.tenant_id,principal.shop_id)
+
+
+@app.put("/edge/v1/config/attendance-policy")
+def edge_put_attendance_policy(payload: AttendancePolicyRequest,
+                               principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global:
+        raise HTTPException(403,"Scoped edge credential is required for attendance policy")
+    saved=store.upsert_attendance_policy(
+        principal.tenant_id,principal.shop_id,_validate_shop_attendance_policy(payload))
+    return {"policy":saved}
+
+
+@app.put("/edge/v1/config/attendance-policy/users/{crm_user_id}")
+def edge_put_person_attendance_policy(crm_user_id: str, payload: PersonAttendancePolicyRequest,
+                                      principal: EdgePrincipal = Depends(require_edge_token)):
+    if principal.legacy_global:
+        raise HTTPException(403,"Scoped edge credential is required for attendance policy")
+    _assert_policy_user_in_shop(principal.tenant_id,principal.shop_id,crm_user_id)
+    if not hasattr(store,"upsert_person_attendance_policy"):
+        raise HTTPException(503,"Person-wise policies require PostgreSQL")
+    saved=store.upsert_person_attendance_policy(
+        principal.tenant_id,principal.shop_id,crm_user_id,_validate_person_attendance_policy(payload))
+    return {"policy":saved}
+
+
 
 @app.put("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/policy")
 def integration_put_person_attendance_policy(tenant_id: str, shop_id: str, crm_user_id: str,
@@ -838,7 +956,7 @@ def portal_login():
 
 @app.get("/portal/{page_name}", include_in_schema=False)
 def portal_page(page_name: str):
-    allowed = {"index.html", "system-status.html", "cameras.html", "personnel.html", "attendance.html", "live.html", "alerts.html", "verification.html"}
+    allowed = {"index.html", "system-status.html", "cameras.html", "personnel.html", "attendance.html", "policy.html", "live.html", "alerts.html", "verification.html"}
     if page_name not in allowed:
         raise HTTPException(404, "Portal page not found")
     return FileResponse(PORTAL_STATIC_DIR / page_name)

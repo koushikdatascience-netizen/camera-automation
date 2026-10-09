@@ -561,6 +561,66 @@ def sync_edge_events():
     _enforce_runtime_license({"cloud_sync"})
     return sync_worker.run_once().model_dump()
 
+class LocalAttendancePolicyRequest(BaseModel):
+    grace_period_minutes: int = Field(default=15, ge=1, le=240)
+    allowed_break_minutes: int = Field(default=60, ge=0, le=480)
+    total_working_minutes: int = Field(default=480, ge=1, le=1440)
+    max_logoff_time: str = Field(default="21:30", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    absence_auto_logout_enabled: bool = True
+    timezone: str = "Asia/Kolkata"
+    email_recipients: list[str] = Field(default_factory=list, max_length=20)
+    whatsapp_recipients: list[str] = Field(default_factory=list, max_length=20)
+
+
+class LocalPersonAttendancePolicyRequest(BaseModel):
+    attendanceMode: str = Field(default="AUTO", pattern="^(AUTO|MANUAL)$")
+    presenceUpdateIntervalMinutes: int = Field(default=2, ge=1, le=60)
+    outOfCameraGraceMinutes: int = Field(default=5, ge=1, le=1438)
+    maxOutOfCameraOccurrencesPerDay: int = Field(default=5, ge=1, le=100)
+    adminNotificationAfterMinutes: int = Field(default=15, ge=2, le=1439)
+    markAbsentAfterMinutes: int = Field(default=60, ge=3, le=1440)
+    requiredWorkingMinutes: int = Field(default=480, ge=1, le=1440)
+    dayEndAutoLogoutEnabled: bool = True
+    absenceMonitoringEnabled: bool = True
+    timezone: str = "Asia/Kolkata"
+    emailNotificationsEnabled: bool = True
+    whatsappNotificationsEnabled: bool = True
+
+
+def _local_policy_cloud_call(callback, *args):
+    _enforce_runtime_license({"cloud_sync"})
+    if not cloud_client.enabled():
+        raise HTTPException(503,"Cloud sync is not configured. Activate this Camera Eye PC first.")
+    try:
+        return callback(*args)
+    except requests.HTTPError as exc:
+        detail="Cloud attendance policy request failed"
+        try:
+            body=exc.response.json() if exc.response is not None else {}
+            detail=str(body.get("detail") or detail)
+        except Exception:
+            pass
+        raise HTTPException(exc.response.status_code if exc.response is not None and exc.response.status_code<500 else 502,detail) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(502,"Camera Eye Cloud is temporarily unavailable") from exc
+
+
+@app.get('/api/v1/attendance-policy')
+def local_attendance_policy():
+    return _local_policy_cloud_call(cloud_client.attendance_policy)
+
+
+@app.put('/api/v1/attendance-policy')
+def local_update_attendance_policy(payload: LocalAttendancePolicyRequest):
+    return _local_policy_cloud_call(cloud_client.update_attendance_policy,payload.model_dump())
+
+
+@app.put('/api/v1/attendance-policy/users/{crm_user_id}')
+def local_update_person_attendance_policy(crm_user_id: str, payload: LocalPersonAttendancePolicyRequest):
+    return _local_policy_cloud_call(
+        cloud_client.update_person_attendance_policy,crm_user_id,payload.model_dump())
+
+
 @app.get('/api/v1/license/status')
 def license_status():
     return license_manager.status().model_dump()

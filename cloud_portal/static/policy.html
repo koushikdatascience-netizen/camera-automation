@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SnapKey Vision AI | Attendance Policy</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="logo"><img src="/static/assets/snapkey.png" alt="SnapKey"><div class="logo-text"><strong>SnapKey Vision AI</strong><span>Camera intelligence</span></div></div>
+    <nav class="nav-menu"></nav>
+  </aside>
+  <main class="main">
+    <section class="content">
+      <div class="page-title"><h1>Attendance Policy</h1><p>One simple place to control shop attendance rules and employee AUTO / MANUAL behavior.</p></div>
+      <div class="attendance-card">
+        <div class="attendance-card-header"><div><h2>Shop Policy</h2><p>These defaults apply to the current shop unless an employee has a specific override.</p></div><button class="btn btn-light" id="policy-refresh" type="button">Refresh</button></div>
+        <form id="attendance-policy-form">
+          <div class="policy-grid">
+            <div class="form-group"><label>Working Hours / Day</label><input id="policy-working-hours" type="number" min=".5" max="24" step=".5" required><small>Total required working time.</small></div>
+            <div class="form-group"><label>Allowed Break (minutes)</label><input id="policy-break-minutes" type="number" min="0" max="480" required></div>
+            <div class="form-group"><label>Grace Period (minutes)</label><input id="policy-grace-minutes" type="number" min="1" max="240" required></div>
+            <div class="form-group"><label>Maximum Logoff Time</label><input id="policy-max-logoff" type="time" required></div>
+          </div>
+          <div class="policy-grid three">
+            <div class="form-group"><label>Timezone</label><input id="policy-timezone" value="Asia/Kolkata" required></div>
+            <div class="form-group"><label>Alert Emails</label><input id="policy-email-recipients" placeholder="owner@example.com, manager@example.com"><small>Comma-separated.</small></div>
+            <div class="form-group"><label>WhatsApp Recipients</label><input id="policy-whatsapp-recipients" placeholder="+9198..., +9199..."><small>Comma-separated.</small></div>
+          </div>
+          <div class="policy-actions"><label class="policy-inline-check"><input type="checkbox" id="policy-auto-logout"> Enable absence auto-logout policy</label><button class="btn btn-primary" id="policy-save" type="submit">Save Attendance Policy</button><span id="policy-page-message"></span></div>
+        </form>
+      </div>
+      <div class="attendance-card" style="margin-top:18px">
+        <div class="attendance-card-header"><div><h2>Employee Attendance Mode</h2><p>Set AUTO or MANUAL and the absence thresholds for each CRM employee.</p></div></div>
+        <div class="table-wrapper"><table class="attendance-table"><thead><tr><th>Employee</th><th>Mode</th><th>Out-of-camera grace</th><th>Notify after</th><th>Mark absent</th><th>Required hours</th><th>Action</th></tr></thead><tbody id="policy-people-body"><tr><td colspan="7">Loading policy…</td></tr></tbody></table></div>
+      </div>
+    </section>
+  </main>
+  <script src="/static/js/main.js"></script>
+</body>
+</html>

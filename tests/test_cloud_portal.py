@@ -258,3 +258,45 @@ def test_general_live_start_queues_scoped_webrtc_command_with_same_room(tmp_path
  assert body['camera_id']==request['camera_id'] and body['edge_id']=='edge-1'
  assert body['session_id']==request['session_id'] and body['command_id']==claimed[0]['id']
  assert body['expires_at'] and response.status_code==200
+
+
+def test_attendance_policy_portal_ui_and_api(tmp_path, monkeypatch):
+ monkeypatch.setenv('SNAPKEY_PORTAL_DB',str(tmp_path/'policy.db'))
+ monkeypatch.delenv('SNAPKEY_DATABASE_URL',raising=False)
+ monkeypatch.setenv('SNAPKEY_ENV','development')
+ import importlib
+ import cloud_portal.api as api
+ importlib.reload(api)
+ client=TestClient(api.app)
+ auth=portal_auth(client,monkeypatch)
+ api.store.create_cloud_person({'id':'person-1','tenant_id':'tenant-a','shop_id':'shop1','employee_code':'EMP-1','full_name':'Employee One','role':'WORKER'})
+ api.store.upsert_crm_person_mapping({'tenant_id':'tenant-a','shop_id':'shop1','local_person_id':'person-1','crm_user_id':'crm-1','employee_code':'EMP-1'})
+ page=client.get('/portal/policy.html')
+ assert page.status_code==200 and 'Attendance Policy' in page.text and 'Working Hours / Day' in page.text
+ current=client.get('/portal/v1/tenants/tenant-a/attendance-policy',headers=auth)
+ assert current.status_code==200 and current.json()['policy']['total_working_minutes']==480
+ saved=client.put('/portal/v1/tenants/tenant-a/attendance-policy',headers=auth,json={
+  'grace_period_minutes':10,'allowed_break_minutes':45,'total_working_minutes':510,'max_logoff_time':'20:30',
+  'absence_auto_logout_enabled':True,'timezone':'Asia/Kolkata','email_recipients':['owner@example.com'],
+  'whatsapp_recipients':['+919999999999']})
+ assert saved.status_code==200 and saved.json()['policy']['total_working_minutes']==510
+ person=client.put('/portal/v1/tenants/tenant-a/attendance-policy/users/crm-1',headers=auth,json={
+  'attendanceMode':'MANUAL','presenceUpdateIntervalMinutes':2,'outOfCameraGraceMinutes':5,
+  'maxOutOfCameraOccurrencesPerDay':5,'adminNotificationAfterMinutes':15,'markAbsentAfterMinutes':60,
+  'requiredWorkingMinutes':510,'dayEndAutoLogoutEnabled':True,'absenceMonitoringEnabled':True,
+  'timezone':'Asia/Kolkata','emailNotificationsEnabled':True,'whatsappNotificationsEnabled':True})
+ assert person.status_code==200 and person.json()['policy']['attendanceMode']=='MANUAL'
+ bundle=client.get('/portal/v1/tenants/tenant-a/attendance-policy',headers=auth).json()
+ assert bundle['people'][0]['effective']['attendanceMode']=='MANUAL'
+
+
+def test_cloud_attendance_page_has_no_demo_people(tmp_path, monkeypatch):
+ monkeypatch.setenv('SNAPKEY_PORTAL_DB',str(tmp_path/'portal-ui.db'))
+ import importlib
+ import cloud_portal.api as api
+ importlib.reload(api)
+ client=TestClient(api.app)
+ page=client.get('/portal/attendance.html')
+ assert page.status_code==200
+ assert 'John Doe' not in page.text
+ assert 'Priya Sharma' not in page.text
