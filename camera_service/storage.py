@@ -224,6 +224,7 @@ class SQLiteStore:
     def attendance_sync_metadata(self, conn, person_id, session_id, mode):
         previous = conn.execute("""SELECT id FROM edge_event_queue
             WHERE json_extract(payload_json,'$.person_id')=?
+            AND event_type IN ('ATTENDANCE_ENTRY','ATTENDANCE_EXIT','BREAK_START','BREAK_END')
             AND json_extract(payload_json,'$.metadata.attendance_sync_bridge')=1
             ORDER BY rowid DESC LIMIT 1""", (person_id,)).fetchone()
         return {"attendance_sync_bridge": True, "attendance_session_id": session_id,

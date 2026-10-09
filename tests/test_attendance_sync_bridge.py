@@ -99,6 +99,17 @@ def test_manual_evidence_preserves_fresh_media_without_reusing_old_clip(bridge,a
         assert metadata['evidence_missing']['clip']=='recognition_clip_not_available'
 
 
+def test_recognition_event_is_never_attendance_predecessor(bridge):
+    bridge.local.add_person_event(
+        bridge.person['id'],'shop','camera','PERSON_RECOGNIZED',bridge.now,
+        {'attendance_sync_bridge':True,'snapshot_path':'recognition.jpg'})
+    bridge.apply('CHECK_IN','in')
+    row=next(row for row in bridge.local.queued_events() if row['event_type']=='ATTENDANCE_ENTRY')
+    metadata=json.loads(row['payload_json'])['metadata']
+    assert metadata['predecessor_event_id'] is None
+    assert bridge.ingest(bridge.envelope(1))['attendance_sync']['status']=='SUCCEEDED'
+
+
 def test_existing_explicit_break_routes_use_the_same_session_queue(bridge):
     checked_in=bridge.apply('CHECK_IN','in')
     bridge.station.engine.start_break(bridge.person['id'],'camera',bridge.now)
