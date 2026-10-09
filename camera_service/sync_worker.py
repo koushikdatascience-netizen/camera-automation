@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import threading
+import os
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
@@ -69,6 +71,7 @@ class EdgeSyncWorker:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._last_personnel_sync_monotonic: float | None = None
         self.last_run_at: str | None = None
         self.last_result: dict[str, Any] | None = None
 
@@ -176,18 +179,29 @@ class EdgeSyncWorker:
                         self.camera_supervisor.reconcile()
                 except Exception as exc:
                     camera_sync["error"] = str(exc)
+            # Camera/heartbeat/event delivery run frequently; CRM personnel snapshots
+            # do not need a SQLite rewrite every few seconds. A failed refresh is
+            # immediately retryable on the next sync cycle.
             personnel_sync={"fetched":0,"applied":0,"deactivated":0,"failed":0}
-            try:
-                roster=self.cloud_client.personnel_config()
-                people=roster.get("items") or []
-                personnel_sync["fetched"]=len(people)
-                applied=self.store.apply_cloud_personnel(people)
-                personnel_sync["applied"]=int(applied.get("applied") or 0)
-                personnel_sync["deactivated"]=int(applied.get("deactivated") or 0)
-                personnel_sync["authoritative"]=bool(applied.get("authoritative",False))
-            except Exception as exc:
-                personnel_sync["failed"]+=1
-                personnel_sync["error"]=str(exc)
+            personnel_interval=max(15.0,float(os.getenv("SNAPKEY_EDGE_PERSONNEL_SYNC_SECONDS","60")))
+            personnel_now=time.monotonic()
+            personnel_due=(self._last_personnel_sync_monotonic is None or
+                           personnel_now-self._last_personnel_sync_monotonic>=personnel_interval)
+            if personnel_due:
+                try:
+                    roster=self.cloud_client.personnel_config()
+                    people=roster.get("items") or []
+                    personnel_sync["fetched"]=len(people)
+                    applied=self.store.apply_cloud_personnel(people)
+                    personnel_sync["applied"]=int(applied.get("applied") or 0)
+                    personnel_sync["deactivated"]=int(applied.get("deactivated") or 0)
+                    personnel_sync["authoritative"]=bool(applied.get("authoritative",False))
+                    self._last_personnel_sync_monotonic=time.monotonic()
+                except Exception as exc:
+                    personnel_sync["failed"]+=1
+                    personnel_sync["error"]=str(exc)
+            else:
+                personnel_sync["skipped"]="interval_not_elapsed"
             for row in self.store.queued_events(getattr(self.sync_config, "batch_size", 50)):
                 try:
                     event = json.loads(row["payload_json"])
