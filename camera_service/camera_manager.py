@@ -17,8 +17,7 @@ import logging
 from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, Field, model_validator
 from enum import Enum
-from camera_service.models import IdentitySeen, LineCrossingEvent
-from camera_service.line_crossing import LineCrossingDetector
+from camera_service.models import IdentitySeen
 from camera_service.object_security.alerts import ObjectSecurityAlerter
 from camera_service.domain import ResourceScope
 from camera_service.inference import build_runtime_router, select_runtime_backend
@@ -1235,38 +1234,6 @@ class CameraManager:
                 and getattr(recognition_config, "enabled", True)
                 and camera_id is not None
             )
-            attendance_line = None
-            attendance_enabled = bool(
-                runtime_camera_config is not None
-                and camera_id is not None
-                and attendance_engine is not None
-                and getattr(getattr(runtime_camera_config, "features", None), "attendance", False)
-                and getattr(runtime_camera_config, "attendance_active", False)
-                and getattr(getattr(runtime_camera_config, "camera_role", None), "value", str(getattr(runtime_camera_config, "camera_role", ""))) == "ENTRANCE_EXIT"
-            )
-            if attendance_enabled:
-                # Dynamic/cloud cameras historically had no persisted attendance line.
-                # Use a safe default horizontal gate at 55% frame height so the
-                # entrance/exit workflow is functional immediately. Direction can be
-                # reversed with SNAPKEY_ATTENDANCE_INSIDE_SIDE=negative.
-                h, w = frame.shape[:2]
-                line_y = max(1.0, min(float(h - 1), float(h) * float(os.environ.get("SNAPKEY_ATTENDANCE_LINE_Y", "0.55"))))
-                inside_side = str(os.environ.get("SNAPKEY_ATTENDANCE_INSIDE_SIDE", "positive")).strip().lower()
-                if inside_side not in {"positive", "negative"}:
-                    inside_side = "positive"
-                detector_key = f"{camera_id}:{w}x{h}:{line_y:.1f}:{inside_side}"
-                attendance_line = self._attendance_line_detectors.get(detector_key)
-                if attendance_line is None:
-                    from types import SimpleNamespace
-                    attendance_line = LineCrossingDetector(SimpleNamespace(
-                        x1=0.0, y1=line_y, x2=float(w - 1), y2=line_y,
-                        inside_side=inside_side,
-                        min_crossing_displacement_px=float(os.environ.get("SNAPKEY_ATTENDANCE_MIN_CROSSING_PX", "12")),
-                    ))
-                    self._attendance_line_detectors[detector_key] = attendance_line
-                cv2.line(frame, (0, int(line_y)), (max(0, w - 1), int(line_y)), (0, 255, 255), 2)
-                cv2.putText(frame, "Attendance gate", (12, max(20, int(line_y) - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
             face_recheck_seconds = self._face_recheck_seconds(recognition_config) if recognition_enabled else 2.0
             person_count = sum(1 for class_id in classes if names.get(class_id, f"class_{class_id}") == "person")
             summary["people"] = person_count
@@ -1307,19 +1274,6 @@ class CameraManager:
                         for key in list(self._unknown_zone_state):
                             if key.startswith(prefix):
                                 self._unknown_zone_state.pop(key, None)
-
-                if label == "person" and track_id is not None and attendance_line is not None and runtime_camera_config.attendance_active:
-                    direction = attendance_line.update(str(track_id), (float(x1), float(y1), float(x2), float(y2)))
-                    if direction:
-                        attendance_engine.on_crossing(LineCrossingEvent(
-                            store_id=attendance_engine.store_id,
-                            camera_id=camera_id,
-                            track_id=str(track_id),
-                            direction=direction,
-                            timestamp=datetime.now(timezone.utc),
-                            bbox=(float(x1), float(y1), float(x2), float(y2)),
-                            snapshot_path=self._save_event_snapshot(frame, camera_id, direction.lower()),
-                        ))
 
                 if (
                     label == "person"
