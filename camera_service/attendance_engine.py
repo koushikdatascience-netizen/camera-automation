@@ -20,6 +20,7 @@ class AttendanceEngine:
         import os
         mode = os.environ.get("CAMERA_EYE_ATTENDANCE_MODE", "AUTO").strip().upper()
         with self._lock:
+            self.identities[(ev.camera_id, ev.track_id)] = ev
             p = self.presence.get(ev.person_id) or Presence(person_id=ev.person_id, first_seen_today=ev.timestamp)
             if mode == "AUTO" and p.status != "BREAK":
                 session, _ = self.store.create_arrival(
