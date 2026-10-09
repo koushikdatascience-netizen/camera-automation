@@ -125,6 +125,39 @@ class CloudSyncClient:
         response.raise_for_status()
         return response.json() if response.content else {"items":[]}
 
+    def attendance_policy(self) -> dict[str, Any]:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response=requests.get(
+            self.config.base_url.rstrip("/")+"/edge/v1/config/attendance-policy",
+            headers={"Authorization":f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def update_attendance_policy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response=requests.put(
+            self.config.base_url.rstrip("/")+"/edge/v1/config/attendance-policy",
+            json=payload,headers={"Authorization":f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def update_person_attendance_policy(self, crm_user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response=requests.put(
+            self.config.base_url.rstrip()+"/edge/v1/config/attendance-policy/users/"+str(crm_user_id),
+            json=payload,headers={"Authorization":f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def edge_commands(self) -> list[dict[str, Any]]:
         if not self.enabled(): raise RuntimeError("cloud sync is disabled")
         response=requests.get(self.config.base_url.rstrip("/")+"/edge/v1/commands",

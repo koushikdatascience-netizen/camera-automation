@@ -53,6 +53,8 @@ class PortalStore(AttendanceDeliveryStore):
                 CREATE TABLE IF NOT EXISTS crm_person_mappings(tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,local_person_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,employee_code TEXT,break_master_id TEXT,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(tenant_id,shop_id,local_person_id));
                 CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id, site_id, event_time);
                 CREATE INDEX IF NOT EXISTS idx_edge_events_type ON edge_events(tenant_id, event_type, event_time);
+                CREATE TABLE IF NOT EXISTS attendance_policies(tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,grace_period_minutes INTEGER NOT NULL DEFAULT 15,allowed_break_minutes INTEGER NOT NULL DEFAULT 60,total_working_minutes INTEGER NOT NULL DEFAULT 480,max_logoff_time TEXT NOT NULL DEFAULT '21:30',absence_auto_logout_enabled INTEGER NOT NULL DEFAULT 1,timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata',email_recipients_json TEXT NOT NULL DEFAULT '[]',whatsapp_recipients_json TEXT NOT NULL DEFAULT '[]',updated_at TEXT NOT NULL,PRIMARY KEY(tenant_id,shop_id));
+                CREATE TABLE IF NOT EXISTS person_attendance_policies(tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,policy_json TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL,PRIMARY KEY(tenant_id,shop_id,crm_user_id));
                 """
             )
             self._ensure_column(conn, "edge_events", "company_code", "TEXT")
@@ -208,6 +210,67 @@ class PortalStore(AttendanceDeliveryStore):
         return out
     def delete_cloud_face(self,tenant_id,shop_id,person_id,face_id):
         with self._lock,self._conn() as c: return c.execute("DELETE FROM cloud_face_profiles WHERE tenant_id=? AND shop_id=? AND person_id=? AND id=?",(tenant_id,shop_id,person_id,face_id)).rowcount>0
+
+    def upsert_attendance_policy(self, tenant_id: str, shop_id: str, policy: dict[str, Any]) -> dict[str, Any]:
+        now=self.now()
+        with self._lock,self._conn() as conn:
+            conn.execute("""INSERT INTO attendance_policies(
+                tenant_id,shop_id,grace_period_minutes,allowed_break_minutes,total_working_minutes,
+                max_logoff_time,absence_auto_logout_enabled,timezone,email_recipients_json,
+                whatsapp_recipients_json,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(tenant_id,shop_id) DO UPDATE SET
+                grace_period_minutes=excluded.grace_period_minutes,
+                allowed_break_minutes=excluded.allowed_break_minutes,
+                total_working_minutes=excluded.total_working_minutes,
+                max_logoff_time=excluded.max_logoff_time,
+                absence_auto_logout_enabled=excluded.absence_auto_logout_enabled,
+                timezone=excluded.timezone,
+                email_recipients_json=excluded.email_recipients_json,
+                whatsapp_recipients_json=excluded.whatsapp_recipients_json,
+                updated_at=excluded.updated_at""",(
+                    tenant_id,shop_id,int(policy["grace_period_minutes"]),int(policy["allowed_break_minutes"]),
+                    int(policy["total_working_minutes"]),str(policy["max_logoff_time"]),
+                    1 if policy.get("absence_auto_logout_enabled",True) else 0,str(policy.get("timezone") or "Asia/Kolkata"),
+                    json.dumps(policy.get("email_recipients") or []),json.dumps(policy.get("whatsapp_recipients") or []),now))
+        return self.attendance_policy(tenant_id,shop_id)
+
+    def attendance_policy(self, tenant_id: str, shop_id: str) -> dict[str, Any]:
+        with self._conn() as conn:
+            row=conn.execute("SELECT * FROM attendance_policies WHERE tenant_id=? AND shop_id=?",(tenant_id,shop_id)).fetchone()
+        if not row:
+            return {"tenant_id":tenant_id,"shop_id":shop_id,"grace_period_minutes":15,
+                    "allowed_break_minutes":60,"total_working_minutes":480,"max_logoff_time":"21:30",
+                    "absence_auto_logout_enabled":True,"timezone":"Asia/Kolkata",
+                    "email_recipients":[],"whatsapp_recipients":[],"updated_at":None}
+        item=dict(row)
+        item["absence_auto_logout_enabled"]=bool(item["absence_auto_logout_enabled"])
+        item["email_recipients"]=json.loads(item.pop("email_recipients_json") or "[]")
+        item["whatsapp_recipients"]=json.loads(item.pop("whatsapp_recipients_json") or "[]")
+        return item
+
+    def upsert_person_attendance_policy(self, tenant_id: str, shop_id: str, crm_user_id: str,
+                                        policy: dict[str, Any]) -> dict[str, Any]:
+        now=self.now()
+        with self._lock,self._conn() as conn:
+            row=conn.execute("SELECT version FROM person_attendance_policies WHERE tenant_id=? AND shop_id=? AND crm_user_id=?",
+                             (tenant_id,shop_id,crm_user_id)).fetchone()
+            version=(int(row["version"])+1) if row else 1
+            conn.execute("""INSERT INTO person_attendance_policies(tenant_id,shop_id,crm_user_id,policy_json,version,updated_at)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(tenant_id,shop_id,crm_user_id) DO UPDATE SET
+                policy_json=excluded.policy_json,version=excluded.version,updated_at=excluded.updated_at""",
+                (tenant_id,shop_id,crm_user_id,json.dumps(policy),version,now))
+        return {"tenantCode":tenant_id,"shopCode":shop_id,"userId":crm_user_id,**policy,
+                "version":version,"updatedAt":now}
+
+    def person_attendance_policy(self, tenant_id: str, shop_id: str, crm_user_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row=conn.execute("SELECT policy_json,version,updated_at FROM person_attendance_policies WHERE tenant_id=? AND shop_id=? AND crm_user_id=?",
+                             (tenant_id,shop_id,crm_user_id)).fetchone()
+        if not row:
+            return None
+        return {"tenantCode":tenant_id,"shopCode":shop_id,"userId":crm_user_id,
+                **json.loads(row["policy_json"] or "{}"),"version":int(row["version"]),"updatedAt":row["updated_at"]}
 
     def record_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         tenant_id = str(payload["tenant_id"])
