@@ -724,10 +724,24 @@
   function renderAttendance(data){
     const records=document.getElementById("attendance-records-body");
     if(!records)return;
-    const rows=data.records||[]; const count=document.getElementById("attendance-count"); if(count)count.textContent=rows.length+" Records";
-    records.innerHTML=rows.length?rows.map(r=>"<tr><td><strong>"+escapeHtml(r.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(r.employee_code||"—")+"</td><td>"+escapeHtml(r.role||"—")+"</td><td>"+fmtDate(r.entry_time||r.exit_time)+"</td><td>"+fmtTime(r.entry_time)+"</td><td>"+fmtTime(r.exit_time)+"</td><td>—</td><td><span class='status-badge "+(r.exit_time?"":"active")+"'>"+(r.exit_time?"Completed":"Present")+"</span></td><td>—</td></tr>").join(""):"<tr><td colspan='9'>No real attendance events received from this shop yet.</td></tr>";
-    const presence=document.getElementById("presence-body"); const active=data.presence||[];
-    if(presence) presence.innerHTML=active.length?active.map(r=>"<tr><td><strong>"+escapeHtml(r.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(r.employee_code||"—")+"</td><td>"+escapeHtml(r.role||"—")+"</td><td>"+fmtTime(r.entry_time)+"</td><td>"+fmtTime(r.entry_time)+"</td><td>—</td><td>—</td><td>—</td><td><span class='status-badge active'>● Present</span></td></tr>").join(""):"<tr><td colspan='9'>No personnel currently present from confirmed attendance events.</td></tr>";
+    const rows=data.records||[];
+    const durationLabel=(entry,exit)=>{
+      if(!entry||!exit)return "—";
+      const minutes=Math.floor((Date.parse(exit)-Date.parse(entry))/60000);
+      if(!Number.isFinite(minutes)||minutes<0)return "—";
+      return Math.floor(minutes/60)+"h "+String(minutes%60).padStart(2,"0")+"m";
+    };
+    const count=document.getElementById("attendance-count"); if(count)count.textContent=rows.length+" Records";
+    records.innerHTML=rows.length?rows.map(r=>"<tr><td><strong>"+escapeHtml(r.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(r.employee_code||"—")+"</td><td>"+escapeHtml(r.role||"—")+"</td><td>"+fmtDate(r.entry_time||r.exit_time)+"</td><td>"+fmtTime(r.entry_time)+"</td><td>"+fmtTime(r.exit_time)+"</td><td>"+durationLabel(r.entry_time,r.exit_time)+"</td><td><span class='status-badge "+(r.exit_time?"":"active")+"'>"+(r.exit_time?"Completed":"Present")+"</span></td><td>—</td></tr>").join(""):"<tr><td colspan='9'>No real attendance events received from this shop yet.</td></tr>";
+    const presence=document.getElementById("presence-body");
+    const activeByPerson=new Map();
+    for(const r of data.presence||[]){
+      const key=String(r.person_id||r.crm_user_id||r.employee_code||r.full_name||"");
+      const previous=activeByPerson.get(key);
+      if(!previous||Date.parse(r.entry_time||0)>Date.parse(previous.entry_time||0))activeByPerson.set(key,r);
+    }
+    const active=[...activeByPerson.values()];
+    if(presence) presence.innerHTML=active.length?active.map(r=>"<tr><td><strong>"+escapeHtml(r.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(r.employee_code||"—")+"</td><td>"+escapeHtml(r.role||"—")+"</td><td>"+fmtTime(r.entry_time)+"</td><td>—</td><td>—</td><td>—</td><td>—</td><td><span class='status-badge active'>● Present</span></td></tr>").join(""):"<tr><td colspan='9'>No personnel currently present from confirmed attendance events.</td></tr>";
     const events=document.getElementById("person-events-body"); const ev=data.events||[];
     if(events){
       events.innerHTML=ev.length?ev.map(e=>"<tr><td>"+fmtTime(e.event_time)+"</td><td><strong>"+escapeHtml(e.full_name||"Unknown")+"</strong></td><td>"+escapeHtml(String(e.event_type||"").replaceAll("_"," "))+"</td><td>"+escapeHtml(e.camera_id||"—")+"</td><td>—</td><td>"+(e.has_evidence?"<button class='btn btn-light person-evidence' data-event-id='"+escapeHtml(e.event_id)+"'>View image</button>":"—")+"</td><td>"+(e.confidence!=null?Math.round(Number(e.confidence)*100)+"%":"—")+"</td><td>—</td></tr>").join(""):"<tr><td colspan='8'>No person events received yet.</td></tr>";
