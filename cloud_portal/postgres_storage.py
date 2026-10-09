@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import create_engine, text
+from cloud_portal.attendance_delivery import AttendanceDeliveryStore
 
 
-class PostgresPortalStore:
+class PostgresPortalStore(AttendanceDeliveryStore):
     """Production cloud store. Edge machines remain SQLite/offline-first."""
 
     def __init__(self, database_url: str | None = None):
@@ -25,6 +26,7 @@ class PostgresPortalStore:
             pool_recycle=int(os.getenv("SNAPKEY_DB_POOL_RECYCLE_SECONDS", "1800")),
         )
         self._init()
+        self.initialize_attendance_delivery()
 
     @contextmanager
     def _conn(self):
@@ -1171,6 +1173,9 @@ class PostgresPortalStore:
                     WHERE NOT EXISTS (SELECT 1 FROM person_attendance_policies pp
                                       WHERE pp.tenant_id=p.tenant_id AND pp.shop_id=p.shop_id
                                         AND pp.crm_user_id=p.crm_user_id)
+                      AND NOT EXISTS (SELECT 1 FROM edge_attendance_delivery d
+                                      WHERE d.tenant_id=p.tenant_id AND d.shop_id=p.shop_id
+                                        AND d.person_id=p.local_person_id)
                       AND p.checked_in=TRUE AND p.on_break=FALSE
                       AND ap.absence_auto_logout_enabled=TRUE
                       AND p.last_seen_at + (ap.grace_period_minutes * INTERVAL '1 minute') <= :now

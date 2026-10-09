@@ -1,9 +1,6 @@
 name: Camera Eye Cloud Deploy
 
 on:
-  push:
-    branches:
-      - feat/camera-eye-live-view-ux
   workflow_dispatch:
 
 permissions:
@@ -15,6 +12,7 @@ concurrency:
 
 jobs:
   deploy:
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:

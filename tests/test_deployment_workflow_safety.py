@@ -8,17 +8,17 @@ def _deploy_workflow():
     return yaml.load(workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
-def test_cloud_deploy_runs_automatically_on_reviewed_feature_branch():
+def test_cloud_deploy_requires_manual_dispatch():
     workflow = _deploy_workflow()
-    assert workflow["on"]["push"]["branches"] == ["feat/camera-eye-live-view-ux"]
+    assert 'push' not in workflow['on']
     assert "workflow_dispatch" in workflow["on"]
     assert "pull_request" not in workflow["on"]
 
 
-def test_cloud_deploy_does_not_require_environment_approval():
+def test_cloud_deploy_requires_production_environment_approval():
     workflow = _deploy_workflow()
     deploy = workflow["jobs"]["deploy"]
-    assert "environment" not in deploy
+    assert deploy['environment']=='production'
 
 
 def test_cloud_deploy_validates_before_production_deploy():

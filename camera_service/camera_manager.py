@@ -1336,11 +1336,13 @@ class CameraManager:
                                                 face_snapshot_path=self._save_event_snapshot(face_crop,camera_id,"recognized_face")
                                     recognized_name = match["full_name"]
                                     recognized_text = f"{recognized_name} {score:.2f}"
+                                    recognized_event_id = None
                                     if store and self._should_emit_alert(f"recognized:{camera_id}:{match['person_id']}", 5 if camera_config.features.attendance else 60):
                                         recognized_event_id=store.add_person_event(
                                             match["person_id"],getattr(attendance_engine,"store_id","store-1"),
                                             camera_id,"PERSON_RECOGNIZED",datetime.now(timezone.utc),
                                             {"track_id":str(track_id),"confidence":score,
+                                             "attendance_sync_bridge":bool(runtime_camera_config.features.attendance and runtime_camera_config.attendance_active),
                                              "snapshot_path":snapshot_path,"face_path":face_snapshot_path or snapshot_path,
                                              "snapshot_paths":[snapshot_path] if snapshot_path else [],
                                              "evidence_status":"PENDING_CAPTURE","evidence_pending":True})
@@ -1355,7 +1357,7 @@ class CameraManager:
                                             confidence=score,
                                             bbox=(float(x1), float(y1), float(x2), float(y2)),
                                             snapshot_path=snapshot_path,
-                                        ))
+                                        ), recognition_event_id=recognized_event_id)
                                     self._track_identity_cache[cache_key] = {
                                         "checked_at": now,
                                         "person_id": match["person_id"],

@@ -34,9 +34,9 @@ def test_postgres_fresh_schema_outbox_and_auto_logout_recovery():
     try:
         with admin_engine.begin() as conn:
             conn.execute(text(f'CREATE SCHEMA {quoted_schema}'))
-            conn.execute(text(f'ALTER DATABASE {quoted_database} SET search_path TO {quoted_schema}, public'))
         schema_created=True
-        store=PostgresPortalStore(dsn)
+        scoped_url=root_url.update_query_dict({'options':f'-csearch_path={schema},public'})
+        store=PostgresPortalStore(scoped_url.render_as_string(hide_password=False))
         now=datetime.now(timezone.utc)
         tenant,shop,user,person="tenant-test","shop-test","user-test","person-test"
         store.upsert_person_attendance_policy(tenant,shop,user,{
@@ -104,6 +104,5 @@ def test_postgres_fresh_schema_outbox_and_auto_logout_recovery():
             store.engine.dispose()
         if schema_created:
             with admin_engine.begin() as conn:
-                conn.execute(text(f'ALTER DATABASE {quoted_database} RESET search_path'))
                 conn.execute(text(f'DROP SCHEMA IF EXISTS {quoted_schema} CASCADE'))
         admin_engine.dispose()

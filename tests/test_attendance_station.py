@@ -68,7 +68,8 @@ def test_state_actions_duplicates_and_restart(tmp_path):
     assert recent[0]['last_break_start'] and recent[0]['last_break_end']
     assert recent[0]['full_name'] == 'Alice'
     assert len(station.engine.store.person_events()) == 4
-    assert not station.engine.store.queued_events()
+    events=station.engine.store.queued_events()
+    assert [e['event_type'] for e in events]==['ATTENDANCE_ENTRY','BREAK_START','BREAK_END','ATTENDANCE_EXIT']
 
 
 def test_local_station_api_and_camera_scope(tmp_path, monkeypatch):

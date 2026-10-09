@@ -1220,7 +1220,11 @@ def edge_personnel_config(principal: EdgePrincipal = Depends(require_edge_token)
     items=[]
     for person in store.list_cloud_people(principal.tenant_id,principal.shop_id):
         faces=store.list_cloud_faces(principal.tenant_id,principal.shop_id,str(person["id"]),include_embedding=True)
+        mapping=store.crm_person_mapping(principal.tenant_id,principal.shop_id,str(person['id']))
+        policy=(store.person_attendance_policy(principal.tenant_id,principal.shop_id,str(mapping['crm_user_id']))
+                if mapping and hasattr(store,'person_attendance_policy') else {}) or {}
         items.append({"person_id":str(person["id"]),"employee_code":person["employee_code"],"full_name":person["full_name"],
+            "attendance_mode":str(policy.get('attendanceMode') or 'AUTO').upper() if mapping else 'MANUAL',
             "role":person["role"],"phone":person.get("phone"),"email":person.get("email"),"active":bool(person["active"]),
             "faces":[{"face_id":str(f["id"]),"embedding":f["embedding"],"quality":float(f["quality"])} for f in faces]})
     return {"tenant_id":principal.tenant_id,"shop_id":principal.shop_id,"items":items}
@@ -1268,16 +1272,21 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
     outer_payload=envelope.get("payload") or {}
     payload=outer_payload.get("payload") if isinstance(outer_payload.get("payload"),dict) else outer_payload
     local_person_id=str(payload.get("person_id") or envelope.get("person_id") or "").strip()
+    metadata=payload.get('metadata') or {}
+    bridge=metadata.get('attendance_sync_bridge') is True
+    manual=bridge and metadata.get('attendance_source')=='MANUAL'
     if not local_person_id:
         return
     tenant_id=str(envelope.get("tenant_id") or "")
     shop_id=str(envelope.get("shop_id") or "")
     mapping=store.crm_person_mapping(tenant_id,shop_id,local_person_id)
     if not mapping:
+        if bridge: raise ValueError('CRM_MAPPING_REQUIRED')
         return
     if event_type in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT"} and hasattr(store,"person_attendance_policy"):
         person_policy=store.person_attendance_policy(tenant_id,shop_id,str(mapping["crm_user_id"]))
-        if person_policy and str(person_policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
+        if not manual and person_policy and str(person_policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
+            if bridge: raise ValueError('EMPLOYEE_MANUAL_MODE')
             logger.info("CRM_ATTENDANCE_EVENT_SKIPPED person_id=%s event_type=%s reason=manual_mode",
                         local_person_id,event_type)
             return
@@ -1301,19 +1310,25 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
         os.getenv("SNAPKEY_CRM_ATTENDANCE_ENABLED","0")).strip()=="1"
     auto_logout_enabled=os.getenv("SNAPKEY_CRM_AUTO_LOGOUT_ENABLED","0").strip()=="1"
     location="Camera Eye - "+str(envelope.get("site_id") or shop_id)
-    if event_type=="ATTENDANCE_ENTRY" and not auto_login_enabled:
+    if event_type=="ATTENDANCE_ENTRY" and not auto_login_enabled and not manual:
+        if bridge: raise ValueError('AUTO_LOGIN_DISABLED')
         return
-    if event_type=="ATTENDANCE_EXIT" and not auto_logout_enabled:
+    if bridge and event_type=='ATTENDANCE_EXIT' and not manual:
+        raise ValueError('EXPLICIT_CHECKOUT_REQUIRED')
+    if event_type=="ATTENDANCE_EXIT" and not auto_logout_enabled and not manual:
         return
     if event_type in {"BREAK_START","BREAK_END"}:
         # Track loss alone must never mutate CRM break state.
         metadata=payload.get("metadata") or {}
         if metadata.get("crm_confirmed_break") is not True:
+            if bridge: raise ValueError('CONFIRMED_BREAK_REQUIRED')
             return
         if event_type=="BREAK_START" and not mapping.get("break_master_id"):
+            if bridge: raise ValueError('CRM_BREAK_MAPPING_REQUIRED')
             return
+    # Authentication failures occur before the mutation and are safe to retry.
+    face_token=_crm_face_token(tenant_id,shop_id,crm_user_id)
     try:
-        face_token=_crm_face_token(tenant_id,shop_id,crm_user_id)
         if event_type=="ATTENDANCE_ENTRY":
             result=crm_client.login_logout_with_face_token({"userId":crm_user_id,"date":crm_date,
                 "actualStartTime":crm_time,"actualOffTime":None,
@@ -1329,8 +1344,69 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
         if not _crm_mutation_succeeded(result):
             raise RuntimeError("CRM rejected attendance event")
     except Exception as exc:
+        if bridge:
+            exc.attendance_mutation_attempted=True
         _invalidate_crm_face_token_on_401(tenant_id,shop_id,crm_user_id,exc)
         raise
+
+
+def _synchronize_attendance_bridge(envelope):
+    from cloud_portal.attendance_delivery import attendance_payload
+    payload=attendance_payload(envelope)
+    metadata=payload.get('metadata') or {}
+    tenant,shop=str(envelope['tenant_id']),str(envelope.get('shop_id') or '')
+    person=str(payload.get('person_id') or '')
+    mapping=store.crm_person_mapping(tenant,shop,person)
+    if not mapping:
+        return {'status':'MAPPING_REQUIRED'}
+    if metadata.get('attendance_source') not in {'MANUAL','RECOGNITION'}:
+        raise HTTPException(400,'Invalid attendance source')
+    try:
+        status,claimed=store.claim_attendance_delivery(envelope,str(mapping['crm_user_id']))
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+    if not claimed:
+        return {'status':status}
+    try:
+        if status!='CRM_CONFIRMED':
+            _deliver_crm_attendance_event(envelope)
+            status='CRM_CONFIRMED'
+            store.set_attendance_delivery(envelope,'CRM_CONFIRMED')
+        # These are the same services used by the portal attendance station.
+        when=datetime.fromisoformat(str(envelope['event_time']).replace('Z','+00:00'))
+        event_type=envelope['event_type']
+        if event_type=='ATTENDANCE_ENTRY' and hasattr(store,'touch_attendance_presence'):
+            store.touch_attendance_presence(tenant_id=tenant,shop_id=shop,local_person_id=person,
+                crm_user_id=str(mapping['crm_user_id']),seen_at=when,camera_id=envelope.get('camera_id'),
+                recognition_event_id=envelope['event_id'],checked_in=True)
+            store.set_attendance_presence_break(tenant,shop,person,False)
+        elif event_type=='ATTENDANCE_EXIT' and hasattr(store,'complete_presence_checkout'):
+            store.complete_presence_checkout(tenant,shop,person,True)
+        elif event_type in {'BREAK_START','BREAK_END'} and hasattr(store,'set_attendance_presence_break'):
+            store.set_attendance_presence_break(tenant,shop,person,event_type=='BREAK_START')
+        if hasattr(store,'record_attendance_activity'):
+            store.record_attendance_activity({'id':envelope['event_id'],'tenant_id':tenant,'shop_id':shop,
+                'crm_user_id':str(mapping['crm_user_id']),'local_person_id':person,
+                'activity_type':{'ATTENDANCE_ENTRY':'CHECK_IN','ATTENDANCE_EXIT':'CHECK_OUT',
+                                 'BREAK_START':'BREAK_START','BREAK_END':'BREAK_END'}[event_type],
+                'occurred_at':when,'source':metadata['attendance_source'],'camera_id':envelope.get('camera_id'),
+                'evidence':_action_evidence_manifest(metadata,metadata.get('recognition_event_id')),
+                'metadata':metadata})
+        store.set_attendance_delivery(envelope,'SUCCEEDED')
+        return {'status':'SUCCEEDED'}
+    except Exception as exc:
+        # Never persist exception text: upstream errors can contain credentials.
+        attempted=getattr(exc,'attendance_mutation_attempted',False)
+        upstream=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
+        definitive_rejection=(isinstance(exc,RuntimeError) and str(exc)=='CRM rejected attendance event')
+        safe_failure=(definitive_rejection or upstream in {400,401,403,404,409,422,429}
+                      or isinstance(exc,(httpx.ConnectError,httpx.ConnectTimeout)))
+        uncertain=attempted and not safe_failure
+        failure='RECONCILIATION_REQUIRED' if uncertain else 'RETRY'
+        # A confirmed remote mutation must only retry local finalization.
+        if status=='CRM_CONFIRMED': failure='CRM_CONFIRMED'
+        store.set_attendance_delivery(envelope,failure,type(exc).__name__,retry_seconds=5)
+        return {'status':failure,'error_code':type(exc).__name__}
 
 
 def _attendance_session_id(person_id: str, when: datetime, action_id: str | None = None) -> str:
@@ -1537,6 +1613,18 @@ def _evidence_manifest_for_last_recognition(tenant_id: str,shop_id: str,
 
 def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     """Immediately face-login a recognized person from an entrance camera."""
+    from cloud_portal.attendance_delivery import attendance_payload
+    if (attendance_payload(envelope).get('metadata') or {}).get('attendance_sync_bridge') is True:
+        # This edge owns the attendance session; recognition is evidence only.
+        payload=attendance_payload(envelope)
+        tenant=str(envelope.get('tenant_id') or ''); shop=str(envelope.get('shop_id') or '')
+        person=str(payload.get('person_id') or '')
+        mapping=store.crm_person_mapping(tenant,shop,person) if tenant and shop and person else None
+        if mapping and hasattr(store,'touch_attendance_presence'):
+            store.touch_attendance_presence(tenant_id=tenant,shop_id=shop,local_person_id=person,
+                crm_user_id=str(mapping['crm_user_id']),seen_at=datetime.fromisoformat(str(envelope['event_time']).replace('Z','+00:00')),
+                camera_id=envelope.get('camera_id'),recognition_event_id=envelope.get('event_id'),checked_in=None)
+        return
     event_id=str(envelope.get("event_id") or "")
     event_type=str(envelope.get("event_type") or "")
     tenant_id=str(envelope.get("tenant_id") or "")
@@ -1667,7 +1755,26 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
     if envelope["schema_version"] != "edge.event.v1":
         raise HTTPException(400, "Unsupported event schema")
     _enforce_edge_scope(principal, envelope)
+    from cloud_portal.attendance_delivery import attendance_payload
+    bridge=(attendance_payload(envelope).get('metadata') or {}).get('attendance_sync_bridge') is True
+    if bridge and principal.legacy_global:
+        raise HTTPException(403,'Attendance synchronization requires a scoped edge credential')
     result=store.ingest_event(envelope)
+    if bridge and envelope.get('event_type') in {'ATTENDANCE_ENTRY','ATTENDANCE_EXIT','BREAK_START','BREAK_END'}:
+        original=store.get_event(str(envelope['tenant_id']),str(envelope.get('shop_id') or ''),str(envelope['event_id']))
+        if not original:
+            raise HTTPException(409,'Event identity conflicts with an existing scope')
+        saved=original['payload']
+        # Event IDs are immutable. Never deliver an altered retry payload.
+        keys=('tenant_id','shop_id','edge_id','camera_id','event_type','event_time')
+        saved_payload=attendance_payload(saved); retry_payload=attendance_payload(envelope)
+        if (any(saved.get(k)!=envelope.get(k) for k in keys)
+            or saved_payload.get('person_id')!=retry_payload.get('person_id')
+            or any((saved_payload.get('metadata') or {}).get(k)!=(retry_payload.get('metadata') or {}).get(k)
+                   for k in ('attendance_session_id','attendance_source','predecessor_event_id'))):
+            raise HTTPException(409,'Attendance event identity conflict')
+        result['attendance_sync']=_synchronize_attendance_bridge(saved)
+        return result
     # Edge delivery is at-least-once. Only the first successful insert may create a
     # downstream CRM mutation; retries of the same event_id are acknowledged without
     # scheduling another login/logout/break call.
@@ -1689,6 +1796,32 @@ def ingest_edge_event(envelope: dict[str, Any], background_tasks: BackgroundTask
         logger.info("EDGE_EVENT_DUPLICATE event_id=%s event_type=%s",
                     str(envelope.get("event_id") or ""),str(envelope.get("event_type") or ""))
     return result
+
+
+class AttendanceSyncReconciliation(BaseModel):
+    crm_applied: bool
+    justification: str = Field(min_length=10,max_length=500)
+
+
+@app.get('/portal/v1/tenants/{tenant_id}/attendance-sync/{event_id}')
+def attendance_sync_receipt(tenant_id: str,event_id: str,
+                            principal: PortalPrincipal=Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    _portal_admin(principal)
+    receipt=store.attendance_delivery_receipt(tenant_id,principal.shop_id,event_id)
+    if not receipt: raise HTTPException(404,'Attendance delivery not found')
+    return receipt
+
+
+@app.post('/portal/v1/tenants/{tenant_id}/attendance-sync/{event_id}/reconcile')
+def reconcile_attendance_sync(tenant_id: str,event_id: str,request: AttendanceSyncReconciliation,
+                              principal: PortalPrincipal=Depends(require_portal_session)):
+    _portal_scope(tenant_id,principal)
+    _portal_admin(principal)
+    if not store.reconcile_attendance_delivery(tenant_id,principal.shop_id,event_id,
+            request.crm_applied,str(principal.user_id),request.justification):
+        raise HTTPException(409,'Delivery is not awaiting reconciliation in this shop')
+    return {'ok':True,'status':'CRM_CONFIRMED' if request.crm_applied else 'RETRY'}
 
 
 @app.delete("/portal/v1/tenants/{tenant_id}/edges/{edge_id}")
@@ -2538,6 +2671,9 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
     if not row.get("checked_in") or row.get("on_break"):
         return
     tenant=str(row["tenant_id"]);shop=str(row["shop_id"]);user=str(row["crm_user_id"])
+    if hasattr(store,'has_bridge_attendance') and store.has_bridge_attendance(
+            tenant,shop,str(row.get('local_person_id') or '')):
+        return  # Bridge sessions require an explicit checkout, not disappearance.
     started=row["last_seen_at"]
     # Policy thresholds drive absence alerts; this one fixed limit is reserved
     # solely for the CRM endpoint's confirmed 60-minute absence contract.
@@ -2737,6 +2873,9 @@ def _evaluate_absence_checkouts() -> None:
             _process_automatic_checkout(presence,now=now,reason_code="MAX_LOGOFF_REACHED",
                                         require_camera_health=False)
         for presence in store.claim_due_absence_checkouts(now,limit=50):
+            if hasattr(store,'has_bridge_attendance') and store.has_bridge_attendance(
+                    str(presence['tenant_id']),str(presence['shop_id']),str(presence['local_person_id'])):
+                continue
             _process_automatic_checkout(presence,now=now,reason_code="ABSENCE_GRACE_EXCEEDED",
                                         require_camera_health=True)
     else:

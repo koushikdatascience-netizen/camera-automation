@@ -85,7 +85,7 @@ class _AttendanceEngine:
     def __init__(self):
         self.identities = []
 
-    def on_identity(self, identity):
+    def on_identity(self, identity, recognition_event_id=None):
         self.identities.append(identity)
 
 

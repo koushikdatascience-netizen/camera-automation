@@ -7,14 +7,16 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from cloud_portal.attendance_delivery import AttendanceDeliveryStore
 
 
-class PortalStore:
+class PortalStore(AttendanceDeliveryStore):
     def __init__(self, path: str = "data/cloud_portal.db"):
         self.path = path
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._init()
+        self.initialize_attendance_delivery()
 
     @contextmanager
     def _conn(self):

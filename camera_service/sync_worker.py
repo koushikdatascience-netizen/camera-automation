@@ -241,8 +241,13 @@ class EdgeSyncWorker:
                                                            else "PARTIAL" if uploaded or cloud_metadata.get("cloud_clip")
                                                            else "UNAVAILABLE")
                     event["metadata"] = {key:value for key,value in cloud_metadata.items()
-                        if key not in {'snapshot_path','person_path','face_path','clip_path','snapshot_paths','evidence_pending'}}
-                    self.cloud_client.post_event(self.edge_config, event)
+                        if key not in {'snapshot_path','person_path','face_path','clip_path','snapshot_paths','evidence_pending','evidence_path','candidate_token'}}
+                    receipt=self.cloud_client.post_event(self.edge_config, event)
+                    if metadata.get('attendance_sync_bridge') is True and event.get('event_type') in {
+                            'ATTENDANCE_ENTRY','ATTENDANCE_EXIT','BREAK_START','BREAK_END'}:
+                        status=(receipt.get('attendance_sync') or {}).get('status') if isinstance(receipt,dict) else None
+                        if status!='SUCCEEDED':
+                            raise RuntimeError('Attendance cloud delivery pending: '+str(status or 'NO_RECEIPT'))
                     self.store.mark_event_synced(row["id"])
                     synced += 1
                 except Exception as exc:

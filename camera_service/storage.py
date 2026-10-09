@@ -41,6 +41,7 @@ class SQLiteStore:
             self._ensure_column(c,'face_profiles','image_path','TEXT')
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
+            self._ensure_column(c,'personnel','attendance_mode','TEXT')
             self._ensure_column(c,'attendance_sessions','entry_confirmed','INTEGER NOT NULL DEFAULT 0')
             for column in ('break_started_at', 'last_break_start', 'last_break_end'):
                 self._ensure_column(c,'attendance_sessions',column,'TEXT')
@@ -154,6 +155,9 @@ class SQLiteStore:
                     active=excluded.active,updated_at=excluded.updated_at,managed_source='crm'""",
                     (pid,str(item["employee_code"]),str(item["full_name"]),str(item["role"]),item.get("phone"),item.get("email"),
                      1 if item.get("active",True) else 0,now,now,'crm'))
+                mode=str(item.get('attendance_mode') or '').upper()
+                c.execute("UPDATE personnel SET attendance_mode=? WHERE id=?",
+                          (mode if mode in {'AUTO','MANUAL'} else 'MANUAL',pid))
                 cloud_face_ids=set()
                 for face in item.get("faces") or []:
                     fid=str(face["face_id"]); cloud_face_ids.add(fid)
@@ -217,22 +221,33 @@ class SQLiteStore:
     def open_session(self,person_id,store_id):
         with self._conn() as c:
             r=c.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? AND status='OPEN' ORDER BY arrival_time DESC LIMIT 1",(person_id,store_id)).fetchone(); return dict(r) if r else None
+    def attendance_sync_metadata(self, conn, person_id, session_id, mode):
+        previous = conn.execute("""SELECT id FROM edge_event_queue
+            WHERE json_extract(payload_json,'$.person_id')=?
+            AND json_extract(payload_json,'$.metadata.attendance_sync_bridge')=1
+            ORDER BY rowid DESC LIMIT 1""", (person_id,)).fetchone()
+        return {"attendance_sync_bridge": True, "attendance_session_id": session_id,
+                "attendance_mode": mode, "attendance_source": "MANUAL" if mode == "MANUAL" else "RECOGNITION",
+                "predecessor_event_id": previous["id"] if previous else None}
     def create_arrival(self,person_id,store_id,ts,camera,confidence,snapshot_path=None,confirmed=False):
-        with self._lock:
-            existing=self.open_session(person_id,store_id)
-            if existing:
-                if confirmed and not existing.get('entry_confirmed'):
-                    with self._conn() as c:
-                        c.execute("UPDATE attendance_sessions SET arrival_time=?,arrival_camera=?,arrival_confidence=?,arrival_snapshot=?,entry_confirmed=1 WHERE id=?",(ts.isoformat(),camera,confidence,snapshot_path,existing['id']))
-                        self._enqueue_edge_event(c,existing['id'],'ATTENDANCE_ENTRY',{'event_id':existing['id'],'person_id':person_id,'store_id':store_id,'camera_id':camera,'event_type':'ATTENDANCE_ENTRY','event_time':ts.isoformat(),'metadata':{'attendance_session_id':existing['id'],'confidence':confidence,'snapshot_path':snapshot_path}})
-                    return self.open_session(person_id,store_id),False
+        with self._lock, self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row=c.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? AND status='OPEN' ORDER BY arrival_time DESC LIMIT 1",(person_id,store_id)).fetchone()
+            existing=dict(row) if row else None
+            if existing and (not confirmed or existing['entry_confirmed']):
                 return existing,False
-            sid=str(uuid.uuid4())
-            with self._conn() as c:
+            sid=existing['id'] if existing else str(uuid.uuid4())
+            if existing:
+                c.execute("UPDATE attendance_sessions SET arrival_time=?,arrival_camera=?,arrival_confidence=?,arrival_snapshot=?,entry_confirmed=1 WHERE id=?",(ts.isoformat(),camera,confidence,snapshot_path,sid))
+            else:
                 c.execute("INSERT INTO attendance_sessions(id,person_id,store_id,arrival_time,arrival_camera,arrival_confidence,arrival_snapshot,status,entry_confirmed) VALUES(?,?,?,?,?,?,?, 'OPEN',?)",(sid,person_id,store_id,ts.isoformat(),camera,confidence,snapshot_path,1 if confirmed else 0))
-                if confirmed:
-                    self._enqueue_edge_event(c,sid,'ATTENDANCE_ENTRY',{'event_id':sid,'person_id':person_id,'store_id':store_id,'camera_id':camera,'event_type':'ATTENDANCE_ENTRY','event_time':ts.isoformat(),'metadata':{'attendance_session_id':sid,'confidence':confidence,'snapshot_path':snapshot_path}})
-            return self.open_session(person_id,store_id),True
+            if confirmed:
+                metadata={**self.attendance_sync_metadata(c,person_id,sid,'AUTO'),
+                          'confidence':confidence,'snapshot_path':snapshot_path,
+                          'attendance_action_evidence':True}
+                self._enqueue_edge_event(c,sid,'ATTENDANCE_ENTRY',{'event_id':sid,'person_id':person_id,'store_id':store_id,'camera_id':camera,'event_type':'ATTENDANCE_ENTRY','event_time':ts.isoformat(),'metadata':metadata})
+            result=dict(c.execute("SELECT * FROM attendance_sessions WHERE id=?",(sid,)).fetchone())
+            return result,not bool(existing)
     def close_exit(self,person_id,store_id,ts,camera,confidence,snapshot_path=None):
         with self._lock:
             s=self.open_session(person_id,store_id)
@@ -241,6 +256,31 @@ class SQLiteStore:
                 c.execute("UPDATE attendance_sessions SET exit_time=?,exit_camera=?,exit_confidence=?,exit_snapshot=?,status='CLOSED' WHERE id=?",(ts.isoformat(),camera,confidence,snapshot_path,s['id']))
                 self._enqueue_edge_event(c,f"{s['id']}:exit",'ATTENDANCE_EXIT',{'event_id':f"{s['id']}:exit",'person_id':person_id,'store_id':store_id,'camera_id':camera,'event_type':'ATTENDANCE_EXIT','event_time':ts.isoformat(),'metadata':{'attendance_session_id':s['id'],'confidence':confidence,'snapshot_path':snapshot_path}})
             return self.get_attendance_id(s['id']),True
+    def record_attendance_break(self, person_id, store_id, camera_id, event_type, ts, metadata):
+        with self._lock, self._conn() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            session=conn.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? "
+                                 "AND status='OPEN' AND entry_confirmed=1 ORDER BY arrival_time DESC LIMIT 1",
+                                 (person_id,store_id)).fetchone()
+            if not session: raise ValueError('Confirmed attendance session required')
+            starting=event_type=='BREAK_START'
+            if starting==bool(session['break_started_at']):
+                raise ValueError('Break state changed')
+            stamp=ts.isoformat()
+            if starting:
+                conn.execute('UPDATE attendance_sessions SET break_started_at=?,last_break_start=?,last_break_end=NULL WHERE id=?',
+                             (stamp,stamp,session['id']))
+            else:
+                conn.execute('UPDATE attendance_sessions SET break_started_at=NULL,last_break_end=? WHERE id=?',
+                             (stamp,session['id']))
+            evidence={**metadata,**self.attendance_sync_metadata(conn,person_id,session['id'],'MANUAL'),
+                      'crm_confirmed_break':True,'attendance_action_evidence':True}
+            event_id=str(uuid.uuid4())
+            conn.execute('INSERT INTO person_events VALUES(?,?,?,?,?,?,?)',
+                         (event_id,person_id,store_id,camera_id,event_type,stamp,json.dumps(evidence)))
+            self._enqueue_edge_event(conn,event_id,event_type,dict(event_id=event_id,person_id=person_id,
+                store_id=store_id,camera_id=camera_id,event_type=event_type,event_time=stamp,metadata=evidence))
+            return event_id
     def get_attendance_id(self,sid):
         with self._conn() as c: r=c.execute("SELECT * FROM attendance_sessions WHERE id=?",(sid,)).fetchone(); return dict(r) if r else None
     def attendance(self,person_id=None,limit=None,camera_id=None):
@@ -289,7 +329,29 @@ class SQLiteStore:
                 payload=json.loads(queued["payload_json"])
                 payload["metadata"]={**(payload.get("metadata") or {}),**metadata}
                 c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),event_id))
+            for linked in c.execute("SELECT id,payload_json FROM edge_event_queue WHERE status='PENDING' "
+                                    "AND json_extract(payload_json,'$.metadata.evidence_parent_event_id')=?",(event_id,)).fetchall():
+                payload=json.loads(linked['payload_json'])
+                payload['metadata'].update({key:metadata[key] for key in
+                    ('snapshot_paths','snapshot_path','clip_path','evidence_pending','evidence_status','evidence_missing')
+                    if key in metadata})
+                c.execute('UPDATE edge_event_queue SET payload_json=? WHERE id=?',(json.dumps(payload),linked['id']))
         return True
+
+    def link_attendance_evidence(self, session_id, recognition_event_id):
+        with self._lock,self._conn() as conn:
+            queued=conn.execute("SELECT payload_json FROM edge_event_queue WHERE id=? AND status='PENDING'",(session_id,)).fetchone()
+            evidence=conn.execute('SELECT metadata_json FROM person_events WHERE id=?',(recognition_event_id,)).fetchone()
+            if not queued or not evidence: return
+            payload=json.loads(queued['payload_json']); metadata=payload.get('metadata') or {}
+            if metadata.get('evidence_parent_event_id'): return
+            source=json.loads(evidence['metadata_json'] or '{}')
+            metadata['evidence_parent_event_id']=recognition_event_id
+            metadata.update({key:source[key] for key in
+                ('snapshot_paths','snapshot_path','clip_path','evidence_pending','evidence_status','evidence_missing')
+                if key in source})
+            payload['metadata']=metadata
+            conn.execute('UPDATE edge_event_queue SET payload_json=? WHERE id=?',(json.dumps(payload),session_id))
     def person_events(self,person_id=None):
         q='''SELECT e.*,p.employee_code,p.full_name,p.role FROM person_events e LEFT JOIN personnel p ON p.id=e.person_id'''
         args=[]

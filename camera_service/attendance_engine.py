@@ -11,7 +11,7 @@ class Presence:
 class AttendanceEngine:
     def __init__(self, store, store_id:str, pending_window_seconds:float=5.0):
         self.store=store; self.store_id=store_id; self.pending_window_seconds=pending_window_seconds; self._lock=threading.RLock(); self.presence={}; self.identities={}; self.crossings={}
-    def on_identity(self, ev: IdentitySeen):
+    def on_identity(self, ev: IdentitySeen, recognition_event_id=None):
         """A recognized employee confirms arrival in AUTO mode without line crossing.
 
         An existing open session is reused by storage, preventing repeat entries.
@@ -19,6 +19,9 @@ class AttendanceEngine:
         """
         import os
         mode = os.environ.get("CAMERA_EYE_ATTENDANCE_MODE", "AUTO").strip().upper()
+        person = self.store.get_person(ev.person_id)
+        if person and person.get("attendance_mode") in {"AUTO", "MANUAL"}:
+            mode = person["attendance_mode"]
         with self._lock:
             self.identities[(ev.camera_id, ev.track_id)] = ev
             p = self.presence.get(ev.person_id) or Presence(person_id=ev.person_id, first_seen_today=ev.timestamp)
@@ -41,6 +44,8 @@ class AttendanceEngine:
             p.current_track_id = ev.track_id
             p.last_snapshot_path = ev.snapshot_path or p.last_snapshot_path
             self.presence[ev.person_id] = p
+            if recognition_event_id and session:
+                self.store.link_attendance_evidence(session['id'],recognition_event_id)
         return None
 
     def start_break(self, person_id: str, camera_id: str, timestamp: datetime | None = None, break_master_id: str | None = None):
@@ -54,14 +59,14 @@ class AttendanceEngine:
             p = self.presence.get(person_id)
             if not p or p.status != 'PRESENT':
                 raise ValueError('person must be present before starting a break')
+            metadata = {'crm_confirmed_break': True,'snapshot_path':p.last_snapshot_path}
+            if break_master_id:
+                metadata['break_master_id'] = break_master_id
+            event_id = self.store.record_attendance_break(person_id,self.store_id,camera_id,'BREAK_START',ts,metadata)
             p.status = 'BREAK'
             p.break_started_at = ts
             p.last_seen_at = ts
             p.last_camera_id = camera_id
-            metadata = {'crm_confirmed_break': True}
-            if break_master_id:
-                metadata['break_master_id'] = break_master_id
-            event_id = self.store.add_person_event(person_id,self.store_id,camera_id,'BREAK_START',ts,metadata)
             return {'event_id':event_id,'person_id':person_id,'status':'BREAK','started_at':ts.isoformat()}
 
     def end_break(self, person_id: str, camera_id: str, timestamp: datetime | None = None):
@@ -71,14 +76,15 @@ class AttendanceEngine:
             if not p or p.status != 'BREAK':
                 raise ValueError('person is not currently on break')
             started = p.break_started_at
+            event_id = self.store.record_attendance_break(person_id,self.store_id,camera_id,'BREAK_END',ts,{
+                'crm_confirmed_break': True,
+                'snapshot_path':p.last_snapshot_path,
+                'break_started_at': started.isoformat() if started else None,
+            })
             p.status = 'PRESENT'
             p.break_started_at = None
             p.last_seen_at = ts
             p.last_camera_id = camera_id
-            event_id = self.store.add_person_event(person_id,self.store_id,camera_id,'BREAK_END',ts,{
-                'crm_confirmed_break': True,
-                'break_started_at': started.isoformat() if started else None,
-            })
             return {'event_id':event_id,'person_id':person_id,'status':'PRESENT','ended_at':ts.isoformat()}
 
     def on_track_lost(self,camera_id,track_id):

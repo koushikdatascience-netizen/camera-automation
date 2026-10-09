@@ -88,9 +88,7 @@ class AttendanceStation:
             raise ValueError("Attendance camera is stopped")
         store = self.engine.store
         with self._lock, self.engine._lock, store._lock, store._conn() as c:
-            candidate = self.candidate(camera_id, now)
-            if not candidate or candidate["person_id"] != person_id or candidate["token"] != token:
-                raise ValueError("Recognition expired or changed; wait for a fresh recognition")
+            c.execute("BEGIN IMMEDIATE")
             previous = c.execute(
                 "SELECT * FROM person_events WHERE id=?", ("manual:" + request_id,)
             ).fetchone()
@@ -102,7 +100,11 @@ class AttendanceStation:
                     or metadata.get("action") != action
                 ):
                     raise ValueError("Request identifier already used")
-                return {"applied": False, "duplicate": True}
+                return {"applied": False, "duplicate": True,
+                        "session_id": metadata.get("attendance_session_id")}
+            candidate = self.candidate(camera_id, now)
+            if not candidate or candidate["person_id"] != person_id or candidate["token"] != token:
+                raise ValueError("Recognition expired or changed; wait for a fresh recognition")
             if candidate["state"] != expected_state or action not in candidate["actions"]:
                 raise ValueError("Attendance state changed; refresh before confirming")
 
@@ -120,6 +122,17 @@ class AttendanceStation:
             ).fetchone()
             stamp = now.isoformat()
             action_snapshot = evidence_path or ev.snapshot_path
+            session_id = session["id"] if session else str(uuid.uuid4())
+            recognized = c.execute("SELECT id,metadata_json,event_time FROM person_events WHERE person_id=? "
+                                   "AND camera_id=? AND event_type='PERSON_RECOGNIZED' "
+                                   "ORDER BY event_time DESC LIMIT 1", (person_id, camera_id)).fetchone()
+            evidence = json.loads(recognized['metadata_json'] or '{}') if recognized else {}
+            if recognized:
+                recognized_at=datetime.fromisoformat(recognized['event_time'].replace('Z','+00:00'))
+                if recognized_at.tzinfo is None: recognized_at=recognized_at.replace(tzinfo=timezone.utc)
+                if not 0 <= (now-recognized_at).total_seconds() <= self.candidate_seconds:
+                    evidence={}
+                    recognized=None
 
             if action == "CHECK_IN":
                 if session:
@@ -134,7 +147,7 @@ class AttendanceStation:
                         "arrival_camera,arrival_confidence,arrival_snapshot,status,entry_confirmed) "
                         "VALUES(?,?,?,?,?,?,?,'OPEN',1)",
                         (
-                            str(uuid.uuid4()), person_id, self.engine.store_id, stamp,
+                            session_id, person_id, self.engine.store_id, stamp,
                             camera_id, ev.confidence, action_snapshot,
                         ),
                     )
@@ -171,7 +184,14 @@ class AttendanceStation:
                 "candidate_token": token,
                 "confidence": ev.confidence,
                 "evidence_path": action_snapshot,
-                "recognition_event_id": f"{camera_id}:{ev.track_id}:{ev.timestamp.isoformat()}",
+                "snapshot_path": action_snapshot,
+                "attendance_action_evidence": True,
+                "snapshot_paths": list(dict.fromkeys([p for p in [action_snapshot, *(evidence.get('snapshot_paths') or [])] if p]))[:3],
+                "clip_path": evidence.get('clip_path'),
+                "evidence_missing": {"clip": "recognition_clip_not_available"} if not evidence.get('clip_path') else {},
+                "crm_confirmed_break": action in {"START_BREAK", "END_BREAK"},
+                **store.attendance_sync_metadata(c, person_id, session_id, "MANUAL"),
+                "recognition_event_id": recognized['id'] if recognized else f"{camera_id}:{ev.track_id}:{ev.timestamp.isoformat()}",
             }
             c.execute(
                 "INSERT INTO person_events VALUES(?,?,?,?,?,?,?)",
@@ -180,4 +200,12 @@ class AttendanceStation:
                     "MANUAL_" + action, stamp, json.dumps(metadata),
                 ),
             )
-            return {"applied": True, "duplicate": False, "state_before": expected_state}
+            event_type = {"CHECK_IN": "ATTENDANCE_ENTRY", "CHECK_OUT": "ATTENDANCE_EXIT",
+                          "START_BREAK": "BREAK_START", "END_BREAK": "BREAK_END"}[action]
+            store._enqueue_edge_event(c, "manual:" + request_id, event_type, {
+                "event_id": "manual:" + request_id, "person_id": person_id,
+                "store_id": self.engine.store_id, "camera_id": camera_id,
+                "event_type": event_type, "event_time": stamp, "metadata": metadata,
+            })
+            return {"applied": True, "duplicate": False, "state_before": expected_state,
+                    "session_id": session_id, "event_id": "manual:" + request_id}

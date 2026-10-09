@@ -247,6 +247,8 @@ def test_recognition_uses_current_snapshot_for_initial_arrival(monkeypatch):
     monkeypatch.setenv('CAMERA_EYE_ATTENDANCE_MODE', 'AUTO')
     calls=[]
     class Store:
+        def get_person(self, person_id):
+            return {'attendance_mode':'AUTO'}
         def create_arrival(self, *args, **kwargs):
             calls.append((args, kwargs))
             return {'id':'session'},True
