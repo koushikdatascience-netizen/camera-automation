@@ -128,3 +128,11 @@ def test_v2_cache_rejects_another_employees_token_and_authenticates_requested_us
     assert calls[0]==("get",("tenant-a","shop-a","employee-a"))
     assert calls[1]==("delete",("tenant-a","shop-a","employee-a"))
     assert calls[2][0]=="save"
+
+def test_scoped_token_binds_crm_uuid(monkeypatch):
+    from cryptography.fernet import Fernet
+    from cloud_portal.attendance_tokens import encrypt_scoped_token,decrypt_scoped_token,TokenScopeError
+    monkeypatch.setenv('CAMERA_EYE_TOKEN_ENCRYPTION_KEY',Fernet.generate_key().decode())
+    cipher=encrypt_scoped_token('credential','tenant-code','shop','user','uuid-a')
+    assert decrypt_scoped_token(cipher,'tenant-code','shop','user','uuid-a')=='credential'
+    with pytest.raises(TokenScopeError):decrypt_scoped_token(cipher,'tenant-code','shop','user','uuid-b')

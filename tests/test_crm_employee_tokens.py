@@ -153,7 +153,7 @@ def test_expired_token_is_renewed_for_unattended_absence_without_live_image(empl
     api._v2_auto_logout(ctx.row,ctx.now)
     auth=[r for r in ctx.state.requests if r.url.path=="/api/Auth/loginUsingFaceTenant"]
     assert len(auth)==2
-    assert json.loads(auth[0].content)["base64Image"]=="live-a"
+    assert json.loads(auth[0].content)["base64Image"]=="enrolled-a"
     assert json.loads(auth[1].content)=={"base64Image":"enrolled-a","tenantId":"uuid-a"}
     assert mutations(ctx)[-1].url.path=="/api/UserActivity/auto-logout"
 
@@ -278,3 +278,34 @@ def test_cached_jwt_expiry_is_respected_even_if_database_expiry_is_later(employe
     assert cached["expires_at"]>ctx.now
     manual(ctx,"CHECK_OUT")
     assert ctx.state.face_logins==2
+
+
+def test_concurrent_token_requests_single_face_login(employee_crm):
+    from concurrent.futures import ThreadPoolExecutor
+    ctx=employee_crm
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        results=list(executor.map(lambda _:api._crm_face_token("tenant-a","shop-a","employee-a"),range(12)))
+    assert len(set(results))==1
+    assert ctx.state.face_logins==1
+
+def test_face_directory_concurrent_cache_miss_single_request(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    client=SnapKeyCrmClient(); calls=[];entered=threading.Event();release=threading.Event()
+    def request(*args,**kwargs):
+        calls.append(1);entered.set();release.wait(2);return []
+    monkeypatch.setattr(client,'_request',request)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures=[executor.submit(client.face_embeddings,'tenant-a') for _ in range(6)]
+        assert entered.wait(2);release.set()
+        assert [future.result() for future in futures]==[[]]*6
+    assert calls==[1]
+
+def test_auth_directory_outage_cannot_use_stale_membership(monkeypatch):
+    import httpx,time
+    client=SnapKeyCrmClient()
+    client._face_directory_cache['tenant-a']=(time.monotonic()-client.face_directory_ttl_seconds-1,[{'id':'old'}])
+    def fail(*args,**kwargs):raise httpx.ConnectError('mock offline')
+    monkeypatch.setattr(client,'_request',fail)
+    assert client.face_embeddings('tenant-a')==[{'id':'old'}]
+    with pytest.raises(httpx.ConnectError):client.face_embeddings('tenant-a',allow_stale=False)

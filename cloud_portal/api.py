@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import json
 import logging
 import os
@@ -29,7 +30,8 @@ from cloud_portal.storage import PortalStore
 from cloud_portal.crm_client import crm_client
 from cloud_portal.attendance_policy import AttendancePolicy
 from cloud_portal.notifications import NotificationService
-from camera_service.face_service import FaceService
+from camera_service.face_service import FaceService, enrollment_model_key, validated_embedding
+from cloud_portal.enrollment_worker import EnrollmentWorker
 
 logger = logging.getLogger("camera_eye.portal")
 logger.setLevel(logging.INFO)
@@ -182,12 +184,30 @@ _cloud_face_service: FaceService | None = None
 _crm_personnel_refresh_guard = threading.Lock()
 _crm_personnel_refresh_locks: dict[tuple[str, str], threading.Lock] = {}
 _crm_personnel_last_refresh: dict[tuple[str, str], float] = {}
-_crm_face_image_fingerprints: set[tuple[str, str, str, str]] = set()
+_cloud_face_init_lock = threading.Lock()
+_crm_enrollment_worker = EnrollmentWorker(
+    concurrency=max(1,min(4,int(os.getenv("SNAPKEY_ENROLLMENT_WORKERS","1")))),
+    capacity=max(1,int(os.getenv("SNAPKEY_ENROLLMENT_QUEUE_SIZE","32"))))
+_crm_enrollment_metrics = {"cache_hits":0,"inference_count":0,"model_initializations":0,"rejected_images":0,"rejected_cache_hits":0}
+
+@app.on_event("startup")
+def start_enrollment_worker():
+    global _crm_enrollment_worker
+    if _crm_enrollment_worker.closed:
+        _crm_enrollment_worker=EnrollmentWorker(
+            concurrency=max(1,min(4,int(os.getenv("SNAPKEY_ENROLLMENT_WORKERS","1")))),
+            capacity=max(1,int(os.getenv("SNAPKEY_ENROLLMENT_QUEUE_SIZE","32"))))
+
+@app.on_event("shutdown")
+def shutdown_enrollment_worker():
+    _crm_enrollment_worker.shutdown()
 
 def _cloud_face_enroller() -> FaceService:
     global _cloud_face_service
-    if _cloud_face_service is None:
-        _cloud_face_service=FaceService(None)
+    with _cloud_face_init_lock:
+        if _cloud_face_service is None:
+            _cloud_face_service=FaceService(None)
+            _crm_enrollment_metrics["model_initializations"]+=1
     return _cloud_face_service
 
 def _crm_personnel_refresh_lock(tenant_id: str, shop_id: str) -> threading.Lock:
@@ -197,8 +217,8 @@ def _crm_personnel_refresh_lock(tenant_id: str, shop_id: str) -> threading.Lock:
 
 def _crm_personnel_refresh_due(tenant_id: str, shop_id: str) -> bool:
     ttl=max(15,int(os.getenv("SNAPKEY_CRM_PERSONNEL_REFRESH_SECONDS","60")))
-    last=_crm_personnel_last_refresh.get((tenant_id,shop_id),0.0)
-    return monotonic_time.monotonic()-last >= ttl
+    last=_crm_personnel_last_refresh.get((tenant_id,shop_id))
+    return last is None or monotonic_time.monotonic()-last >= ttl
 
 class CrmPersonMappingRequest(BaseModel):
     local_person_id: str
@@ -663,7 +683,7 @@ def integration_person_attendance_evidence_video(tenant_id: str,shop_id: str,crm
         activity_id: str,request: Request):
     _require_crm_integration(request,tenant_id,shop_id)
     path=_integration_attendance_media(tenant_id,shop_id,crm_user_id,activity_id,kind="video")
-    return FileResponse(path,media_type="video/mp4",headers={"Cache-Control":"private, no-store"})
+    return FileResponse(path,media_type="video/webm" if path.suffix.lower()==".webm" else "video/mp4",headers={"Cache-Control":"private, no-store"})
 
 
 @app.get("/integration/v2/tenants/{tenant_id}/shops/{shop_id}/attendance/users/{crm_user_id}/auto-logout-actions")
@@ -1241,25 +1261,26 @@ async def upload_edge_event_evidence(
     if not safe_event_id:
         raise HTTPException(400, "Invalid event_id")
     content_type = (file.content_type or "").lower()
-    allowed = {"image/jpeg", "image/jpg", "image/png", "image/webp", "video/mp4"}
+    allowed = {"image/jpeg", "image/jpg", "image/png", "image/webp", "video/mp4", "video/webm"}
     if content_type not in allowed:
-        raise HTTPException(415, "Only JPEG, PNG, WebP, and MP4 evidence are supported")
-    max_bytes = 50 * 1024 * 1024 if content_type == "video/mp4" else 5 * 1024 * 1024
+        raise HTTPException(415, "Only JPEG, PNG, WebP, MP4, and WebM evidence are supported")
+    max_bytes = 50 * 1024 * 1024 if content_type.startswith("video/") else 5 * 1024 * 1024
     data = await file.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise HTTPException(413, "Evidence file exceeds the allowed size")
-    suffix = {"image/png": ".png", "image/webp": ".webp", "video/mp4": ".mp4"}.get(content_type, ".jpg")
+    suffix = {"image/png": ".png", "image/webp": ".webp", "video/mp4": ".mp4", "video/webm": ".webm"}.get(content_type, ".jpg")
     root = Path(os.getenv("SNAPKEY_EVIDENCE_ROOT", "/app/data/evidence"))
     root = root.resolve()
     target_dir = (root / str(principal.tenant_id) / str(principal.shop_id) / str(principal.edge_id)).resolve()
     if not target_dir.is_relative_to(root):
         raise HTTPException(403, 'Invalid evidence scope')
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / f"{safe_event_id}{suffix}"
+    filename_id = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
+    target = target_dir / f"{filename_id}{suffix}"
     target.write_bytes(data)
     return {
         "event_id": event_id,
-        "evidence_id": f"{principal.tenant_id}/{principal.shop_id}/{principal.edge_id}/{safe_event_id}{suffix}",
+        "evidence_id": f"{principal.tenant_id}/{principal.shop_id}/{principal.edge_id}/{filename_id}{suffix}",
         "content_type": content_type,
         "size_bytes": len(data),
     }
@@ -1444,7 +1465,7 @@ def _crm_face_login_identity(tenant_code: str, crm_user_id: str) -> tuple[str, s
     face-embeddings directory, not Camera Eye recognition evidence. Preserve the CRM
     image bytes exactly: only remove an optional data-URL prefix.
     """
-    raw=crm_client.face_embeddings(tenant_code)
+    raw=crm_client.face_embeddings(tenant_code,allow_stale=False)
     users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
     target=str(crm_user_id or "").strip()
     for user in users:
@@ -1457,7 +1478,7 @@ def _crm_face_login_identity(tenant_code: str, crm_user_id: str) -> tuple[str, s
         sources=_crm_image_sources(user)
         for source in sources:
             image=source.strip()
-            if image.startswith(("http://","https://","/")):
+            if image.startswith(("http://","https://")) or (image.startswith("/") and _decode_crm_face_image(image) is None):
                 continue
             if image.startswith("data:") and "," in image:
                 image=image.split(",",1)[1].strip()
@@ -1495,15 +1516,16 @@ def _validated_crm_face_login_token(response: Any, crm_user_id: str,
     returned_tenant=str(user.get("tenantId") or "").strip()
     if returned_tenant and returned_tenant!=str(crm_tenant_id).strip():
         raise RuntimeError("CRM face authentication tenant mismatch")
-    token=str(response.get("token") or "").strip()
-    if not token:
+    raw_token=response.get("token")
+    token=raw_token.strip() if isinstance(raw_token,str) else ""
+    if not token or any(char.isspace() for char in token.removeprefix("Bearer ")):
         raise RuntimeError("CRM face authentication returned no token")
     return token
 
 
 def _crm_tenant_uuid_for_user(tenant_code: str, crm_user_id: str) -> str:
     """Resolve CRM's tenant UUID from the authoritative face directory."""
-    raw=crm_client.face_embeddings(tenant_code)
+    raw=crm_client.face_embeddings(tenant_code,allow_stale=False)
     users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
     target=str(crm_user_id or "").strip()
     for user in users:
@@ -1512,6 +1534,10 @@ def _crm_tenant_uuid_for_user(tenant_code: str, crm_user_id: str) -> str:
         candidate_user=str(user.get("id") or "").strip()
         candidate_tenant=str(user.get("tenantId") or "").strip()
         if candidate_user==target and candidate_tenant:
+            if user.get("isActive",True) is not True:
+                raise RuntimeError("CRM employee is inactive")
+            if user.get("tenantCode") and str(user["tenantCode"]).strip().casefold()!=tenant_code.strip().casefold():
+                raise RuntimeError("CRM directory tenant code mismatch")
             logger.info("CRM_TENANT_RESOLVED tenant_code=%s crm_user_id=%s crm_tenant_id=%s",
                         tenant_code,target,candidate_tenant)
             return candidate_tenant
@@ -1952,10 +1978,13 @@ def _decode_crm_face_image(source: str) -> bytes | None:
         if "," not in value:
             return None
         value = value.split(",", 1)[1]
-    elif value.startswith(("http://", "https://", "/")):
+    elif value.startswith(("http://", "https://")):
         return None
     try:
-        return base64.b64decode(value, validate=False)
+        decoded=base64.b64decode(value, validate=True)
+        if source.strip().startswith("/") and not decoded.startswith(b"\xff\xd8\xff"):
+            return None
+        return decoded
     except Exception:
         return None
 
@@ -1970,19 +1999,53 @@ def _refresh_crm_personnel(tenant_id: str, shop_id: str, *, force: bool = False)
         raise HTTPException(503,"SnapKey CRM face directory is not configured")
     if not force and not _crm_personnel_refresh_due(tenant_id,shop_id):
         return
-    refresh_lock=_crm_personnel_refresh_lock(tenant_id,shop_id)
-    with refresh_lock:
-        if not force and not _crm_personnel_refresh_due(tenant_id,shop_id):
-            return
-        _refresh_crm_personnel_locked(tenant_id,shop_id)
-        _crm_personnel_last_refresh[(tenant_id,shop_id)]=monotonic_time.monotonic()
+    def refresh():
+        with _crm_personnel_refresh_lock(tenant_id,shop_id):
+            if force or _crm_personnel_refresh_due(tenant_id,shop_id):
+                lock=store.crm_enrollment_lock(tenant_id,shop_id) if hasattr(store,"crm_enrollment_lock") else nullcontext(True)
+                with lock as acquired:
+                    if not acquired:
+                        return
+                    _refresh_crm_personnel_locked(tenant_id,shop_id)
+                    _crm_personnel_last_refresh[(tenant_id,shop_id)]=monotonic_time.monotonic()
+    _crm_enrollment_worker.submit((tenant_id,shop_id), refresh)
+    # An initial empty mirror is not an authoritative empty roster.
+    if ((tenant_id,shop_id) not in _crm_personnel_last_refresh
+            and not store.list_cloud_people(tenant_id,shop_id)):
+        raise HTTPException(503,"CRM personnel initialization pending; retry shortly")
 
 def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
     try:
         raw=crm_client.face_embeddings(tenant_id)
     except httpx.HTTPError as exc:
         raise HTTPException(502,f"SnapKey CRM personnel lookup failed: {exc}") from exc
-    users=raw if isinstance(raw,list) else (raw.get("items") or raw.get("data") or [])
+    if isinstance(raw,list):
+        users=raw
+    elif isinstance(raw,dict) and ("success" not in raw or raw["success"] is True):
+        users=raw.get("items") if "items" in raw else raw.get("data")
+    else:
+        users=None
+    if not isinstance(users,list) or any(not isinstance(u,dict) or not str(u.get("id") or "").strip() for u in users):
+        raise HTTPException(502,"CRM personnel response is not an authoritative user list")
+    tenant_uuids={str(u.get("tenantId") or "").strip().lower() for u in users}
+    if users and ("" in tenant_uuids or len(tenant_uuids)!=1):
+        raise HTTPException(502,"CRM personnel tenant identity is missing or inconsistent")
+    for user in users:
+        if "isActive" in user and not isinstance(user["isActive"],bool):
+            raise HTTPException(502,"CRM personnel active status is malformed")
+        if user.get("tenantCode") and str(user["tenantCode"]).strip().casefold()!=tenant_id.strip().casefold():
+            raise HTTPException(502,"CRM personnel tenant code mismatch")
+        if user.get("shopId") and str(user["shopId"])!=shop_id:
+            raise HTTPException(502,"CRM personnel shop mismatch")
+        for field in ("faceImages","profileImage"):
+            value=user.get(field)
+            if value is not None and not isinstance(value,(str,list)):
+                raise HTTPException(502,"CRM enrollment image field is malformed")
+            if isinstance(value,list) and any(not isinstance(source,str) for source in value):
+                raise HTTPException(502,"CRM enrollment image list is malformed")
+        if any(_decode_crm_face_image(source) is None for source in _crm_image_sources(user)):
+            raise HTTPException(502,"CRM enrollment image encoding is invalid or unsupported")
+    model_key=enrollment_model_key() if any(_crm_image_sources(u) for u in users) else None
     seen_local_ids: set[str] = set()
     for user in users:
         if not isinstance(user,dict) or not str(user.get("id") or "").strip():
@@ -1996,7 +2059,12 @@ def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
         # employee code matches, but always update it from the current CRM identity.
         existing_person=next((p for p in store.list_cloud_people(tenant_id,shop_id)
                               if str(p.get("employee_code") or "").strip().lower()==employee_code.strip().lower()),None)
-        local_person_id=str(existing_person["id"]) if existing_person else crm_user_id
+        if existing_person:
+            previous_mapping=store.crm_person_mapping(tenant_id,shop_id,str(existing_person["id"]))
+            if previous_mapping and str(previous_mapping["crm_user_id"])!=crm_user_id:
+                raise HTTPException(502,"CRM employee code changed identity; operator reconciliation required")
+        local_person_id=str(existing_person["id"]) if existing_person else "crm-person:"+hashlib.sha256(
+            json.dumps([tenant_id,shop_id,crm_user_id],separators=(",",":")).encode()).hexdigest()
         seen_local_ids.add(local_person_id)
         if existing_person:
             store.update_cloud_person(tenant_id,shop_id,local_person_id,{
@@ -2014,64 +2082,63 @@ def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
             "crm_user_id":crm_user_id,"employee_code":employee_code})
 
         existing=store.list_cloud_faces(tenant_id,shop_id,local_person_id,include_embedding=True)
-        existing_vectors={json.dumps(face.get("embedding") or [],separators=(",",":")) for face in existing}
-
-        # CRM currently returns faceEmbeddings as wrapper objects on some tenants.
-        # Extract only InsightFace-compatible 512-D numeric vectors.
-        raw_vectors=user.get("faceEmbeddings") or []
-        candidates=raw_vectors if isinstance(raw_vectors,list) else [raw_vectors]
-        if isinstance(raw_vectors,list) and raw_vectors and all(isinstance(x,(int,float)) and not isinstance(x,bool) for x in raw_vectors):
-            candidates=[raw_vectors]
-        for candidate in candidates:
-            vector=_crm_embedding_vector(candidate)
-            if not vector or len(vector)!=512:
-                continue
-            key=json.dumps(vector,separators=(",",":"))
-            if key in existing_vectors:
-                continue
-            store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":local_person_id,
-                "tenant_id":tenant_id,"shop_id":shop_id,"embedding":vector,"quality":1.0,"image_path":None})
-            existing_vectors.add(key)
-
-        # Also enroll CRM face images with Camera Eye's own InsightFace model. This is
-        # intentionally done even when CRM supplied vectors exist: CRM vector wrappers
-        # may come from a different model/version, while image-derived embeddings are
-        # guaranteed to match the recognizer running on the edge.
-        for source in _crm_image_sources(user):
+        active=bool(user.get("isActive",True))
+        desired=set()
+        for source in _crm_image_sources(user) if active else []:
             raw_image=_decode_crm_face_image(source)
             if not raw_image:
                 continue
-            # Never run InsightFace repeatedly for an unchanged CRM image. The
-            # fingerprint intentionally contains no biometric bytes and is scoped
-            # by tenant/shop/person.
-            source_sha=hashlib.sha256(raw_image).hexdigest()
-            fingerprint=(tenant_id,shop_id,local_person_id,source_sha)
-            if fingerprint in _crm_face_image_fingerprints:
+            digest=hashlib.sha256(json.dumps([tenant_id,str(user["tenantId"]).strip().lower(),shop_id,crm_user_id,local_person_id,
+                hashlib.sha256(raw_image).hexdigest(),model_key],separators=(",",":")).encode()).hexdigest()
+            face_id="crm-image:"+digest
+            desired.add(face_id)
+            if store.crm_enrollment_rejected(tenant_id,shop_id,crm_user_id,face_id):
+                _crm_enrollment_metrics["rejected_cache_hits"]+=1
                 continue
+            cached=next((face for face in existing if face["id"]==face_id),None)
+            if cached:
+                try:
+                    validated_embedding(cached["embedding"])
+                    _crm_enrollment_metrics["cache_hits"]+=1
+                    continue
+                except ValueError:
+                    store.delete_cloud_face(tenant_id,shop_id,local_person_id,face_id)
             try:
                 image=cv2.imdecode(np.frombuffer(raw_image,np.uint8),cv2.IMREAD_COLOR)
                 if image is None:
-                    _crm_face_image_fingerprints.add(fingerprint)
+                    store.reject_crm_enrollment(tenant_id,shop_id,crm_user_id,face_id,"image_decode_failed")
                     continue
-                embedding,quality=_cloud_face_enroller().enroll(image)
-                if len(embedding)!=512:
-                    continue
-                key=json.dumps(embedding,separators=(",",":"))
-                if key not in existing_vectors:
-                    store.add_cloud_face({"id":secrets.token_urlsafe(18),"person_id":local_person_id,
-                        "tenant_id":tenant_id,"shop_id":shop_id,"embedding":embedding,
-                        "quality":quality,"image_path":None})
-                    existing_vectors.add(key)
-                _crm_face_image_fingerprints.add(fingerprint)
+                _crm_enrollment_metrics["inference_count"]+=1
+                enroller=_cloud_face_enroller()
+                if isinstance(enroller,FaceService) and enroller._app is None:
+                    raise RuntimeError("InsightFace enrollment unavailable")
+                embedding,quality=enroller.enroll(image)
+                embedding=validated_embedding(embedding)
+                store.add_cloud_face({"id":face_id,"person_id":local_person_id,
+                    "tenant_id":tenant_id,"shop_id":shop_id,"embedding":embedding,
+                    "quality":quality,"image_path":None})
+            except ValueError:
+                _crm_enrollment_metrics["rejected_images"]+=1
+                store.reject_crm_enrollment(tenant_id,shop_id,crm_user_id,face_id,"invalid_face_template")
+                continue
             except Exception:
-                logger.exception("CRM_FACE_ENROLL_FAILED tenant_id=%s shop_id=%s person_id=%s",
-                                 tenant_id,shop_id,local_person_id)
+                # Model/storage failures must retry, never mark a failed refresh successful.
+                raise RuntimeError("CRM enrollment processing unavailable") from None
+        if active and "faceImages" not in user and "profileImage" not in user:
+            # An omitted enrollment field is not a confirmed revocation.
+            desired.update(face["id"] for face in existing if str(face["id"]).startswith("crm-image:"))
+        # Withdraw obsolete CRM templates, keeping intentionally enrolled local images.
+        # Legacy CRM vectors had no verified model provenance and must be quarantined.
+        for face in existing:
+            if ((str(face["id"]).startswith("crm-image:") and face["id"] not in desired)
+                    or (not str(face["id"]).startswith("crm-image:") and not face.get("image_path"))):
+                store.delete_cloud_face(tenant_id,shop_id,local_person_id,face["id"])
 
     # CRM is authoritative for lifecycle as well. People that disappear from the
     # current CRM face directory must not remain active recognition candidates.
     for person in store.list_cloud_people(tenant_id,shop_id):
         pid=str(person["id"])
-        if pid not in seen_local_ids and bool(person.get("active")):
+        if pid not in seen_local_ids and store.crm_person_mapping(tenant_id,shop_id,pid) and bool(person.get("active")):
             store.update_cloud_person(tenant_id,shop_id,pid,{"active":False})
 
 @app.get("/portal/v1/tenants/{tenant_id}/personnel")
@@ -2559,7 +2626,7 @@ def portal_event_evidence(tenant_id: str, event_id: str, index: int = 0,
 def portal_event_clip(tenant_id: str, event_id: str, principal: PortalPrincipal = Depends(require_portal_session)):
     _portal_scope(tenant_id, principal)
     path=_resolve_attendance_event_media(tenant_id,principal.shop_id,event_id,"video")
-    return FileResponse(path,media_type="video/mp4",headers={"Cache-Control":"private, no-store"})
+    return FileResponse(path,media_type="video/webm" if path.suffix.lower()==".webm" else "video/mp4",headers={"Cache-Control":"private, no-store"})
 
 
 def _resolve_attendance_event_media(tenant_id: str,shop_id: str,event_id: str,
@@ -2675,8 +2742,19 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
 
 
 
+_crm_token_guard=threading.Lock()
+_crm_token_locks={}
+
 def _crm_face_token(tenant_id: str, shop_id: str, crm_user_id: str, *,
                     recognition_payload: dict[str, Any] | None = None) -> str:
+    key=(tenant_id,shop_id,crm_user_id)
+    with _crm_token_guard:
+        lock=_crm_token_locks.setdefault(key,threading.Lock())
+    with lock:
+        return _crm_face_token_locked(tenant_id,shop_id,crm_user_id)
+
+
+def _crm_face_token_locked(tenant_id: str, shop_id: str, crm_user_id: str) -> str:
     """Reuse one employee's encrypted token; Face Login is the only renewal flow."""
     from cloud_portal.attendance_tokens import decrypt_scoped_token, encrypt_scoped_token, jwt_expiry, usable
     if not hasattr(store,"get_crm_face_token") or not hasattr(store,"save_crm_face_token"):
@@ -2687,26 +2765,25 @@ def _crm_face_token(tenant_id: str, shop_id: str, crm_user_id: str, *,
     if cached:
         from cryptography.fernet import InvalidToken
         try:
-            token=decrypt_scoped_token(cached["encrypted_token"],tenant_id,shop_id,crm_user_id)
+            token=decrypt_scoped_token(cached["encrypted_token"],tenant_id,shop_id,crm_user_id,crm_tenant_id)
         except (InvalidToken,ValueError,UnicodeDecodeError):
             token=""
         if token and usable(min(cached["expires_at"],jwt_expiry(token))):
             return token
         if hasattr(store,"delete_crm_face_token"):
             store.delete_crm_face_token(tenant_id,shop_id,crm_user_id)
-    if recognition_payload is not None:
-        image=_recognition_image_base64(recognition_payload)
-    else:
-        directory_tenant,image=_crm_face_login_identity(tenant_id,crm_user_id)
-        if directory_tenant!=crm_tenant_id:
-            raise RuntimeError("CRM face directory tenant changed during authentication")
+    # The confirmed CRM contract authenticates an enrolled directory image.
+    # Camera evidence remains action evidence, never a substitute enrollment.
+    directory_tenant,image=_crm_face_login_identity(tenant_id,crm_user_id)
+    if directory_tenant!=crm_tenant_id:
+        raise RuntimeError("CRM face directory tenant changed during authentication")
     response=crm_client.login_using_face_tenant(image,crm_tenant_id)
     token=_validated_crm_face_login_token(response,crm_user_id,crm_tenant_id)
     expires=jwt_expiry(token)
     if not usable(expires):
         raise RuntimeError("CRM face token already expired")
     store.save_crm_face_token(tenant_id,shop_id,crm_user_id,
-                              encrypt_scoped_token(token,tenant_id,shop_id,crm_user_id),expires)
+                              encrypt_scoped_token(token,tenant_id,shop_id,crm_user_id,crm_tenant_id),expires)
     return token
 
 

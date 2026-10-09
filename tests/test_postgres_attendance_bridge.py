@@ -160,3 +160,16 @@ def test_pg_bridge_reuses_existing_attendance_services_without_absence_checkout(
         crm_user_id='employee',seen_at=now-timedelta(hours=2),camera_id='camera',
         recognition_event_id='recognition',checked_in=True)
     assert store.claim_due_absence_checkouts(now)==[]
+
+def test_pg_enrollment_singleflight_and_scope_guard(pg_bridge):
+    from sqlalchemy.exc import NoResultFound
+    store=pg_bridge
+    with store.crm_enrollment_lock('tenant-a','shop-a') as first:
+        assert first
+        with store.crm_enrollment_lock('tenant-a','shop-a') as second: assert not second
+        with store.crm_enrollment_lock('tenant-b','shop-a') as other: assert other
+    with store.crm_enrollment_lock('tenant-a','shop-a') as released: assert released
+    item={'id':'shared','tenant_id':'tenant-a','shop_id':'shop-a','employee_code':'A','full_name':'A','role':'WORKER'}
+    store.upsert_crm_cloud_person(item)
+    with pytest.raises(NoResultFound):store.upsert_crm_cloud_person({**item,'tenant_id':'tenant-b'})
+    assert store.get_cloud_person('tenant-a','shop-a','shared')

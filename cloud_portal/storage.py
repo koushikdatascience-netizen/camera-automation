@@ -49,6 +49,10 @@ class PortalStore(AttendanceDeliveryStore):
                 CREATE TABLE IF NOT EXISTS cloud_personnel(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,employee_code TEXT NOT NULL,full_name TEXT NOT NULL,role TEXT NOT NULL,phone TEXT,email TEXT,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(tenant_id,shop_id,employee_code));
                 CREATE TABLE IF NOT EXISTS cloud_face_profiles(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,embedding_json TEXT NOT NULL,quality REAL NOT NULL,image_path TEXT,created_at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS idx_cloud_personnel_scope ON cloud_personnel(tenant_id,shop_id,active);
+                CREATE TABLE IF NOT EXISTS crm_enrollment_rejections(
+                    tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,
+                    cache_key TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,
+                    PRIMARY KEY(tenant_id,shop_id,crm_user_id,cache_key));
                 CREATE INDEX IF NOT EXISTS idx_cloud_faces_person ON cloud_face_profiles(tenant_id,shop_id,person_id);
                 CREATE TABLE IF NOT EXISTS crm_person_mappings(tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,local_person_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,employee_code TEXT,break_master_id TEXT,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(tenant_id,shop_id,local_person_id));
                 CREATE INDEX IF NOT EXISTS idx_edge_events_tenant_time ON edge_events(tenant_id, site_id, event_time);
@@ -176,6 +180,20 @@ class PortalStore(AttendanceDeliveryStore):
             c.execute("INSERT INTO cloud_personnel(id,tenant_id,shop_id,employee_code,full_name,role,phone,email,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?,?)",
                 (item["id"],item["tenant_id"],item["shop_id"],item["employee_code"],item["full_name"],item["role"],item.get("phone"),item.get("email"),now,now))
         return self.get_cloud_person(item["tenant_id"],item["shop_id"],item["id"])
+    def upsert_crm_cloud_person(self,item):
+        with self._lock,self._conn() as conn:
+            owner=conn.execute("SELECT tenant_id,shop_id FROM cloud_personnel WHERE id=?",(item['id'],)).fetchone()
+            if owner and (owner['tenant_id']!=item['tenant_id'] or owner['shop_id']!=item['shop_id']):
+                raise ValueError('person identity belongs to another scope')
+            if owner:
+                conn.execute("UPDATE cloud_personnel SET employee_code=?,full_name=?,role=?,phone=?,email=?,active=?,updated_at=? WHERE id=?",
+                    (item['employee_code'],item['full_name'],item['role'],item.get('phone'),item.get('email'),
+                     int(bool(item.get('active',True))),self.now(),item['id']))
+            else:
+                conn.execute("INSERT INTO cloud_personnel(id,tenant_id,shop_id,employee_code,full_name,role,phone,email,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (item['id'],item['tenant_id'],item['shop_id'],item['employee_code'],item['full_name'],item['role'],
+                     item.get('phone'),item.get('email'),int(bool(item.get('active',True))),self.now(),self.now()))
+        return self.get_cloud_person(item['tenant_id'],item['shop_id'],item['id'])
     def list_cloud_people(self,tenant_id,shop_id):
         with self._conn() as c:
             rows=c.execute("""SELECT p.*,COUNT(f.id) face_count FROM cloud_personnel p LEFT JOIN cloud_face_profiles f ON f.person_id=p.id
@@ -192,6 +210,14 @@ class PortalStore(AttendanceDeliveryStore):
             allowed["updated_at"]=self.now(); sql="UPDATE cloud_personnel SET "+",".join(f"{k}=?" for k in allowed)+" WHERE tenant_id=? AND shop_id=? AND id=?"
             with self._lock,self._conn() as c: c.execute(sql,tuple(allowed.values())+(tenant_id,shop_id,person_id))
         return self.get_cloud_person(tenant_id,shop_id,person_id)
+    def crm_enrollment_rejected(self,tenant,shop,user,key):
+        with self._conn() as conn:
+            return conn.execute("SELECT 1 FROM crm_enrollment_rejections WHERE tenant_id=? AND shop_id=? AND crm_user_id=? AND cache_key=?",
+                (tenant,shop,user,key)).fetchone() is not None
+    def reject_crm_enrollment(self,tenant,shop,user,key,reason):
+        with self._lock,self._conn() as conn:
+            conn.execute("INSERT OR IGNORE INTO crm_enrollment_rejections VALUES(?,?,?,?,?,?)",(tenant,shop,user,key,reason,self.now()))
+
     def add_cloud_face(self,item):
         with self._lock,self._conn() as c:
             c.execute("INSERT INTO cloud_face_profiles(id,person_id,tenant_id,shop_id,embedding_json,quality,image_path,created_at) VALUES(?,?,?,?,?,?,?,?)",

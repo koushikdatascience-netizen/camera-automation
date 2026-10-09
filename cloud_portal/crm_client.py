@@ -48,6 +48,7 @@ class SnapKeyCrmClient:
         )
         self._face_directory_cache: dict[str, tuple[float, Any]]={}
         self._face_directory_lock=threading.RLock()
+        self._face_directory_fetch_locks={}
 
     @property
     def configured(self) -> bool:
@@ -180,7 +181,7 @@ class SnapKeyCrmClient:
             auth_token=auth_token,
             user_id=user_id,params={"userId":user_id})
 
-    def face_embeddings(self, tenant_code: str, *, force_refresh: bool = False) -> Any:
+    def face_embeddings(self, tenant_code: str, *, force_refresh: bool = False, allow_stale: bool = True) -> Any:
         """Return the tenant face directory, refreshing the in-process cache every 60s by default.
 
         The CRM contract for this endpoint does not require the legacy static JWT.
@@ -190,6 +191,12 @@ class SnapKeyCrmClient:
         code=(tenant_code or "").strip()
         if not code:
             raise ValueError("tenant_code is required")
+        with self._face_directory_lock:
+            fetch_lock=self._face_directory_fetch_locks.setdefault(code,threading.Lock())
+        with fetch_lock:
+            return self._face_embeddings_locked(code,force_refresh,allow_stale)
+
+    def _face_embeddings_locked(self, code: str, force_refresh: bool, allow_stale: bool) -> Any:
         now=time.monotonic()
         with self._face_directory_lock:
             cached=self._face_directory_cache.get(code)
@@ -205,7 +212,7 @@ class SnapKeyCrmClient:
         except Exception:
             with self._face_directory_lock:
                 stale=self._face_directory_cache.get(code)
-            if stale:
+            if stale and allow_stale:
                 logger.warning(
                     "CRM_FACE_DIRECTORY_STALE_FALLBACK tenant_code=%s age_seconds=%s",
                     code,int(now-stale[0]),

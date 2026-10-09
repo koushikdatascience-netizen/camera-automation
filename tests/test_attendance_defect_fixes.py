@@ -548,7 +548,7 @@ def test_crm_service_token_scope_uses_only_matching_crm_user_ids(
     from cloud_portal import api
 
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(
-        face_embeddings=lambda _tenant:directory,
+        face_embeddings=lambda _tenant, **kwargs:directory,
         users_roster=lambda *_args,**_kwargs:roster))
 
     if should_raise:
@@ -562,7 +562,7 @@ def test_crm_service_token_scope_fails_closed_for_empty_or_unrecognized_roster(m
     from types import SimpleNamespace
 
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(
-        face_embeddings=lambda _tenant:{"items":[{"id":"employee-1"}]},
+        face_embeddings=lambda _tenant, **kwargs:{"items":[{"id":"employee-1"}]},
         users_roster=lambda *_args,**_kwargs:{"data":[{"userId":"employee-1"}]}))
 
     with pytest.raises(RuntimeError,match="scope could not be verified"):
@@ -571,7 +571,7 @@ def test_crm_service_token_scope_fails_closed_for_empty_or_unrecognized_roster(m
 
 def test_crm_service_token_scope_rejects_user_outside_verified_tenant_intersection(monkeypatch):
     monkeypatch.setattr(api,"crm_client",SimpleNamespace(
-        face_embeddings=lambda _tenant:[{"id":"employee-a"},{"id":"employee-b"}],
+        face_embeddings=lambda _tenant, **kwargs:[{"id":"employee-a"},{"id":"employee-b"}],
         users_roster=lambda *_args,**_kwargs:[{"userId":"employee-a"},{"userId":"employee-b"}]))
 
     with pytest.raises(RuntimeError,match="does not include the requested CRM user"):

@@ -33,6 +33,15 @@ class PostgresPortalStore(AttendanceDeliveryStore):
         with self.engine.begin() as conn:
             yield conn
 
+    @contextmanager
+    def crm_enrollment_lock(self, tenant_id, shop_id):
+        """Cross-process single-flight; PostgreSQL releases it on worker interruption."""
+        key=int.from_bytes(hashlib.sha256(json.dumps(['crm-enrollment',tenant_id,shop_id]).encode()).digest()[:8],
+                           'big',signed=True)
+        with self._conn() as conn:
+            acquired=bool(conn.execute(text('SELECT pg_try_advisory_xact_lock(:key)'),{'key':key}).scalar())
+            yield acquired
+
     def _init(self) -> None:
         statements = [
             """CREATE TABLE IF NOT EXISTS tenants(id TEXT PRIMARY KEY, name TEXT, created_at TIMESTAMPTZ NOT NULL)""",
@@ -109,6 +118,10 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                 id TEXT PRIMARY KEY, person_id TEXT NOT NULL, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
                 embedding_json JSONB NOT NULL, quality DOUBLE PRECISION NOT NULL, image_path TEXT,
                 created_at TIMESTAMPTZ NOT NULL, FOREIGN KEY(person_id) REFERENCES cloud_personnel(id) ON DELETE CASCADE)""",
+            """CREATE TABLE IF NOT EXISTS crm_enrollment_rejections(
+                tenant_id TEXT NOT NULL,shop_id TEXT NOT NULL,crm_user_id TEXT NOT NULL,
+                cache_key TEXT NOT NULL,reason TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(tenant_id,shop_id,crm_user_id,cache_key))""",
             """CREATE INDEX IF NOT EXISTS idx_cloud_faces_person ON cloud_face_profiles(tenant_id,shop_id,person_id)""",
             """CREATE TABLE IF NOT EXISTS crm_person_mappings(
                 tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, local_person_id TEXT NOT NULL,
@@ -335,9 +348,10 @@ class PostgresPortalStore(AttendanceDeliveryStore):
         with self._conn() as conn:
             row=conn.execute(text("""INSERT INTO cloud_personnel(id,tenant_id,shop_id,employee_code,full_name,role,phone,email,active,created_at,updated_at)
                 VALUES(:id,:tenant,:shop,:code,:name,:role,:phone,:email,:active,:now,:now)
-                ON CONFLICT(id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id,shop_id=EXCLUDED.shop_id,
+                ON CONFLICT(id) DO UPDATE SET
                 employee_code=EXCLUDED.employee_code,full_name=EXCLUDED.full_name,role=EXCLUDED.role,
                 phone=EXCLUDED.phone,email=EXCLUDED.email,active=EXCLUDED.active,updated_at=EXCLUDED.updated_at
+                WHERE cloud_personnel.tenant_id=EXCLUDED.tenant_id AND cloud_personnel.shop_id=EXCLUDED.shop_id
                 RETURNING *"""),
                 {"id":item["id"],"tenant":item["tenant_id"],"shop":item["shop_id"],"code":item["employee_code"],
                  "name":item["full_name"],"role":item["role"],"phone":item.get("phone"),"email":item.get("email"),
@@ -365,6 +379,15 @@ class PostgresPortalStore(AttendanceDeliveryStore):
             sets=",".join(f"{key}=:{key}" for key in allowed)
             with self._conn() as conn: conn.execute(text(f"UPDATE cloud_personnel SET {sets} WHERE tenant_id=:tenant AND shop_id=:shop AND id=:id"),params)
         return self.get_cloud_person(tenant_id,shop_id,person_id)
+
+    def crm_enrollment_rejected(self,tenant,shop,user,key):
+        with self._conn() as conn:
+            return conn.execute(text("SELECT 1 FROM crm_enrollment_rejections WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user AND cache_key=:key"),
+                {'tenant':tenant,'shop':shop,'user':user,'key':key}).first() is not None
+    def reject_crm_enrollment(self,tenant,shop,user,key,reason):
+        with self._conn() as conn:
+            conn.execute(text("INSERT INTO crm_enrollment_rejections VALUES(:tenant,:shop,:user,:key,:reason,:now) ON CONFLICT DO NOTHING"),
+                {'tenant':tenant,'shop':shop,'user':user,'key':key,'reason':reason,'now':self.now()})
 
     def add_cloud_face(self, item: dict[str, Any]) -> dict[str, Any]:
         with self._conn() as conn:
