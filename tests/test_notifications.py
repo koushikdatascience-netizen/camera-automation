@@ -64,3 +64,33 @@ def test_notification_failures_are_reported_without_raising(monkeypatch):
     result = service.send_email(["admin@example.test"], "Alert", "Test")
     assert result.delivered is False
     assert result.detail == "OSError"
+
+
+def test_notification_test_mode_never_contacts_providers(monkeypatch):
+    monkeypatch.setenv('CAMERA_EYE_NOTIFICATIONS_TEST_MODE','true')
+    monkeypatch.setattr('cloud_portal.notifications.smtplib.SMTP',lambda *_a,**_k: (_ for _ in ()).throw(AssertionError('SMTP called')))
+    monkeypatch.setattr('cloud_portal.notifications.httpx.post',lambda *_a,**_k: (_ for _ in ()).throw(AssertionError('WhatsApp called')))
+    service=NotificationService()
+    assert service.send_email(['synthetic@example.test'],'Test','Test').detail=='test_mode_no_delivery'
+    assert service.send_whatsapp_text(['15550000000'],'Test')[0].delivered is False
+
+
+def test_provider_exception_message_never_leaks_secrets(monkeypatch,caplog):
+    service=NotificationService();service.smtp_host='test';service.smtp_from='test@example.test'
+    monkeypatch.setattr('cloud_portal.notifications.smtplib.SMTP',lambda *_a,**_k: (_ for _ in ()).throw(OSError('secret-token-do-not-log')))
+    assert service.send_email(['synthetic@example.test'],'Test','Test').delivered is False
+    assert 'secret-token-do-not-log' not in caplog.text
+
+
+def test_employee_recipient_override_and_explicit_empty_channel(monkeypatch):
+    from cloud_portal import api
+    from unittest.mock import Mock
+    store=Mock()
+    store.attendance_policy.return_value={'email_recipients':['shop@example.test'],'whatsapp_recipients':['15550000000']}
+    store.person_attendance_policy.return_value={'email_recipients':['employee@example.test'],'whatsapp_recipients':[]}
+    monkeypatch.setattr(api,'store',store)
+    api._notify_cloud_event({'event_id':'synthetic','tenant_id':'tenant','shop_id':'shop','event_type':'ATTENDANCE_POLICY_VIOLATION',
+        'payload':{'metadata':{'crm_user_id':'crm-user','reason_code':'GRACE_EXCEEDED'}}})
+    call=store.enqueue_notification_delivery.call_args
+    assert store.enqueue_notification_delivery.call_count==1
+    assert call.args[:5]==('tenant','shop','synthetic','email','employee@example.test')

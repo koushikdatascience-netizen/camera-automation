@@ -70,6 +70,7 @@
 
 
   <section class="content attendance-content">
+    <div id="attendance-workspace"></div>
 
     <!-- PAGE TITLE -->
 
@@ -103,7 +104,7 @@
         <div class="personnel-card" style="margin:0"><div class="panel-heading"><div><h2>Detected Person</h2><p id="station-expiry">Waiting for a fresh recognition.</p></div></div>
           <div id="station-candidate" style="padding:18px"><p>No person selected. Ask the employee to face the attendance camera.</p></div>
           <div id="station-actions" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 18px 18px">
-            <button class="btn btn-primary station-action" data-action="CHECK_IN" disabled>Check In</button><button class="btn btn-light station-action" data-action="CHECK_OUT" disabled>Check Out</button><button class="btn btn-light station-action" data-action="BREAK_START" disabled>Start Break</button><button class="btn btn-light station-action" data-action="BREAK_END" disabled>End Break</button>
+            <button class="btn btn-primary station-action" data-action="CHECK_IN" disabled>Log In</button><button class="btn btn-light station-action" data-action="CHECK_OUT" disabled>Log Out</button><button class="btn btn-light station-action" data-action="BREAK_START" disabled>Break In</button><button class="btn btn-light station-action" data-action="BREAK_END" disabled>Break Out</button>
           </div>
         </div>
       </div>
@@ -624,6 +625,8 @@
 
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.3/dist/livekit-client.umd.min.js"></script>
 <script src="/static/js/live-view.js"></script>
+<link rel="stylesheet" href="/attendance-assets/workspace.css">
+<script src="/attendance-assets/workspace.js"></script>
 <script src="/static/js/main.js"></script>
 </body>
 </html>

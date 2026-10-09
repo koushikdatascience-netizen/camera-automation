@@ -232,6 +232,7 @@ class AttendanceStationActionRequest(BaseModel):
     edge_id: str
     recognition_event_id: str
     action: str
+    request_id:str|None=Field(default=None,max_length=128)
 
 
 class AttendancePolicyRequest(BaseModel):
@@ -791,11 +792,11 @@ def _notify_cloud_event(envelope: dict[str, Any]) -> None:
     event_id=str(envelope.get("event_id") or hashlib.sha256(
         json.dumps(envelope,sort_keys=True,default=str).encode()).hexdigest())
     if person_policy.get("emailNotificationsEnabled",True):
-        for recipient in policy.get("email_recipients") or []:
+        for recipient in person_policy.get("email_recipients",policy.get("email_recipients")) or []:
             store.enqueue_notification_delivery(tenant_id,shop_id,event_id,"email",str(recipient),
                 {"subject":f"Camera Eye - {event_type}","body":body})
     if person_policy.get("whatsappNotificationsEnabled",True):
-        for recipient in policy.get("whatsapp_recipients") or []:
+        for recipient in person_policy.get("whatsapp_recipients",policy.get("whatsapp_recipients")) or []:
             store.enqueue_notification_delivery(tenant_id,shop_id,event_id,"whatsapp",str(recipient),
                 {"body":body})
     logger.info("NOTIFICATION_ENQUEUED event_id=%s event_type=%s",event_id,event_type)
@@ -2402,7 +2403,11 @@ def attendance_station_candidate(tenant_id: str, camera_id: str, edge_id: str, p
         person_id=str(payload.get("person_id") or "").strip(); metadata=payload.get("metadata") or {}
         person=store.get_cloud_person(tenant_id,principal.shop_id,person_id) if person_id else None
         mapping=store.crm_person_mapping(tenant_id,principal.shop_id,person_id) if person_id else None
-        return {"candidate":{"recognition_event_id":event.get("id"),"person_id":person_id,"full_name":(person or {}).get("full_name") or person_id,
+        from camera_service.attendance_workspace_api import cloud_current_state
+        from camera_service.attendance_state import ACTIONS,STATES
+        state,_=cloud_current_state(store,tenant_id,principal.shop_id,person_id,str((mapping or {}).get('crm_user_id') or ''))
+        actions=[{'START_BREAK':'BREAK_START','END_BREAK':'BREAK_END'}.get(action,action) for action in ACTIONS.get(state,[])]
+        return {"candidate":{"state":state,"state_label":STATES[state],"actions":actions,"recognition_event_id":event.get("id"),"person_id":person_id,"full_name":(person or {}).get("full_name") or person_id,
             "employee_code":(person or {}).get("employee_code"),"role":(person or {}).get("role"),"confidence":metadata.get("confidence"),
             "camera_id":camera_id,"edge_id":edge_id,"detected_at":str(event.get("event_time")),"expires_in_seconds":max(0,int(15-age)),
             "crm_mapped":bool(mapping),"break_configured":bool(mapping and mapping.get("break_master_id"))}}
@@ -3311,3 +3316,13 @@ def edge_heartbeat(payload: dict[str, Any], background_tasks: BackgroundTasks,
     result=store.record_heartbeat(payload)
     background_tasks.add_task(_evaluate_absence_checkouts)
     return result
+
+
+from camera_service.attendance_workspace_api import install_cloud as _install_attendance_workspace
+_install_attendance_workspace(app,lambda:store,require_portal_session,_portal_scope,_portal_admin,_resolve_attendance_event_media)
+
+
+@app.post('/portal/v2/tenants/{tenant_id}/attendance-station/action')
+def attendance_station_action_v2(tenant_id:str,request:AttendanceStationActionRequest,principal:PortalPrincipal=Depends(require_portal_session)):
+    from camera_service.attendance_workspace_api import apply_cloud_station
+    return apply_cloud_station(tenant_id,request,principal,globals())

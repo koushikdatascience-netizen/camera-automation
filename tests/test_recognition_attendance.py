@@ -15,6 +15,8 @@ def identity(person_id="employee-1", track_id="track-1"):
 
 def make_engine():
     store = Mock()
+    store.get_person.return_value = None
+    store.open_session.return_value = None
     store.create_arrival.return_value = ({"id": "session-1"}, True)
     return AttendanceEngine(store, "store-1"), store
 
@@ -40,6 +42,7 @@ def test_recognition_does_not_end_break(monkeypatch):
     person = identity()
     engine.on_identity(person)
     engine.presence[person.person_id].status = "BREAK"
+    store.open_session.return_value = {"id":"session-1","entry_confirmed":1,"break_started_at":person.timestamp.isoformat()}
     engine.on_identity(identity(track_id="track-2"))
     assert engine.presence[person.person_id].status == "BREAK"
     assert store.create_arrival.call_args.kwargs["confirmed"] is False

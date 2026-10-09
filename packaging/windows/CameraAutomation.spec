@@ -15,6 +15,7 @@ SCISSORS_MODEL = ROOT / "kaggle-model/scissors_yolo11m_960.pt"
 
 datas = [
     (str(ROOT / "camera_service/web/setup.html"), "camera_service/web"),
+    (str(ROOT / "camera_service/web/attendance-assets"), "camera_service/web/attendance-assets"),
     (str(ROOT / "camera_service/web/favicon.ico"), "camera_service/web"),
     (str(ROOT / "camera_service/web/static"), "camera_service/web/static"),
     (str(ROOT / "assets/brand"), "assets/brand"),

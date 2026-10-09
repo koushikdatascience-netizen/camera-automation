@@ -180,6 +180,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                 created_at TIMESTAMPTZ NOT NULL)""",
             """CREATE INDEX IF NOT EXISTS idx_attendance_activity_daily
                 ON attendance_activity(tenant_id,shop_id,crm_user_id,occurred_at DESC)""",
+            "ALTER TABLE attendance_policies ADD COLUMN IF NOT EXISTS workspace_rules_json JSONB NOT NULL DEFAULT '{}'::jsonb",
             """CREATE TABLE IF NOT EXISTS attendance_presence(
                 tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL, local_person_id TEXT NOT NULL,
                 crm_user_id TEXT NOT NULL, checked_in BOOLEAN NOT NULL DEFAULT FALSE,
@@ -1054,14 +1055,15 @@ class PostgresPortalStore(AttendanceDeliveryStore):
             "emails":json.dumps(policy.get("email_recipients") or []),
             "whatsapp":json.dumps(policy.get("whatsapp_recipients") or []),
             "updated_at":now,
+            "rules":json.dumps({k:policy[k] for k in ('shift_start_time','late_grace_minutes','scheduled_weekdays','overtime_enabled') if k in policy}),
         }
         with self._conn() as conn:
             conn.execute(text("""INSERT INTO attendance_policies(
                 tenant_id,shop_id,grace_period_minutes,allowed_break_minutes,total_working_minutes,
                 max_logoff_time,absence_auto_logout_enabled,timezone,email_recipients_json,
-                whatsapp_recipients_json,updated_at)
+                whatsapp_recipients_json,updated_at,workspace_rules_json)
                 VALUES(:tenant,:shop,:grace,:breaks,:working,:max_logoff,:auto_logout,:timezone,
-                       CAST(:emails AS JSONB),CAST(:whatsapp AS JSONB),:updated_at)
+                       CAST(:emails AS JSONB),CAST(:whatsapp AS JSONB),:updated_at,CAST(:rules AS JSONB))
                 ON CONFLICT(tenant_id,shop_id) DO UPDATE SET
                 grace_period_minutes=EXCLUDED.grace_period_minutes,
                 allowed_break_minutes=EXCLUDED.allowed_break_minutes,
@@ -1071,6 +1073,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                 timezone=EXCLUDED.timezone,
                 email_recipients_json=EXCLUDED.email_recipients_json,
                 whatsapp_recipients_json=EXCLUDED.whatsapp_recipients_json,
+                workspace_rules_json=attendance_policies.workspace_rules_json || EXCLUDED.workspace_rules_json,
                 updated_at=EXCLUDED.updated_at"""),params)
         return self.attendance_policy(tenant_id,shop_id)
 
@@ -1088,6 +1091,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
         item=dict(row)
         item["email_recipients"]=list(item.pop("email_recipients_json") or [])
         item["whatsapp_recipients"]=list(item.pop("whatsapp_recipients_json") or [])
+        item.update(item.pop('workspace_rules_json') or {})
         return item
 
 

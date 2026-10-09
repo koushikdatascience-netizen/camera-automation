@@ -1502,3 +1502,7 @@ def ack(incident_id:str,s=Depends(get_store)):
     i=s.acknowledge_unknown(incident_id)
     if not i: raise HTTPException(404,'Incident not found')
     return _public_incident(i, 'unknown-incidents', s)
+
+
+from camera_service.attendance_workspace_api import install_local as _install_attendance_workspace
+_install_attendance_workspace(app,lambda:store,lambda:config)

@@ -7,15 +7,12 @@ from datetime import datetime, timezone, timedelta
 import json
 import threading
 import uuid
+from camera_service.attendance_state import ACTIONS,session_state,transition,logout_update
 
 
 class AttendanceStation:
     candidate_seconds = 15
-    actions = {
-        "OUT": ["CHECK_IN"],
-        "IN": ["CHECK_OUT", "START_BREAK"],
-        "ON_BREAK": ["END_BREAK", "CHECK_OUT"],
-    }
+    actions = ACTIONS
 
     def __init__(self, engine, camera_manager=None):
         self.engine = engine
@@ -62,9 +59,7 @@ class AttendanceStation:
                 self._candidates[camera_id] = current
             current["seen_at"] = ev.timestamp
             session = self.engine.store.open_session(ev.person_id, self.engine.store_id)
-            state = "OUT"
-            if session and session.get("entry_confirmed"):
-                state = "ON_BREAK" if session.get("break_started_at") else "IN"
+            state=session_state(session)
             return {
                 "person_id": ev.person_id,
                 "full_name": person["full_name"],
@@ -74,6 +69,7 @@ class AttendanceStation:
                 "detected_at": ev.timestamp.isoformat(),
                 "expires_at": (ev.timestamp + timedelta(seconds=self.candidate_seconds)).isoformat(),
                 "state": state,
+                "state_label":{'OUT':'Logged Out','IN':'Working','ON_BREAK':'On Break'}[state],
                 "actions": self.actions[state],
                 "token": current["token"],
                 "recognition_snapshot_path": ev.snapshot_path,
@@ -121,6 +117,9 @@ class AttendanceStation:
                 (person_id, self.engine.store_id),
             ).fetchone()
             stamp = now.isoformat()
+            actual_state=session_state(dict(session) if session else None)
+            if actual_state!=expected_state:raise ValueError('Attendance state changed; refresh before confirming')
+            new_state=transition(actual_state,action)
             action_snapshot = evidence_path or ev.snapshot_path
             session_id = session["id"] if session else str(uuid.uuid4())
             recognized = c.execute("SELECT id,metadata_json,event_time FROM person_events WHERE person_id=? "
@@ -156,8 +155,8 @@ class AttendanceStation:
                     raise ValueError("No open attendance session")
                 c.execute(
                     "UPDATE attendance_sessions SET exit_time=?,exit_camera=?,exit_confidence=?,"
-                    "exit_snapshot=?,status='CLOSED',break_started_at=NULL WHERE id=?",
-                    (stamp, camera_id, ev.confidence, action_snapshot, session["id"]),
+                    "exit_snapshot=?,status='CLOSED',break_started_at=NULL,last_break_end=? WHERE id=?",
+                    (stamp, camera_id, ev.confidence, action_snapshot, logout_update(dict(session),stamp),session["id"]),
                 )
             elif action == "START_BREAK":
                 if not session:
@@ -180,7 +179,11 @@ class AttendanceStation:
             metadata = {
                 "action": action,
                 "source": "local_attendance_station",
+                "reason": "Operator-confirmed attendance",
                 "prior_state": expected_state,
+                "new_state":new_state,
+                "attendance_policy_snapshot":store.attendance_policy_snapshot(person_id,self.engine.store_id),
+                "break_closed_by_checkout":bool(action=='CHECK_OUT' and session and session['break_started_at']),
                 "candidate_token": token,
                 "confidence": ev.confidence,
                 "evidence_path": action_snapshot,
@@ -213,5 +216,5 @@ class AttendanceStation:
                 "store_id": self.engine.store_id, "camera_id": camera_id,
                 "event_type": event_type, "event_time": stamp, "metadata": metadata,
             })
-            return {"applied": True, "duplicate": False, "state_before": expected_state,
+            return {"applied": True, "duplicate": False, "state_before": expected_state,"state_after":new_state,
                     "session_id": session_id, "event_id": "manual:" + request_id}

@@ -758,6 +758,11 @@
     }
   }
   async function loadAttendance(){
+    if(document.getElementById('attendance-workspace')&&window.AttendanceWorkspace){
+      const scope=requireScope(['tenant_id']);
+      document.querySelectorAll('.attendance-content > .attendance-card:not(#attendance-station),.attendance-heading button').forEach(node=>node.hidden=true);
+      window.AttendanceWorkspace.mount(document.getElementById('attendance-workspace'),{base:'/portal/v2/tenants/'+encodeURIComponent(scope.tenant_id)+'/attendance',peopleEndpoint:'/portal/v2/tenants/'+encodeURIComponent(scope.tenant_id)+'/attendance/personnel',fetcher:authFetch}).load();return;
+    }
     if(!document.getElementById("attendance-records-body"))return;
     const scope=requireScope(["tenant_id"]); const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance");
     const data=await response.json(); if(!response.ok)throw new Error(data.detail||"Unable to load attendance."); renderAttendance(data);
@@ -787,10 +792,10 @@
   }
   function renderStationCandidate(candidate){
     attendanceStationCandidate=candidate||null;const box=document.getElementById("station-candidate"),expiry=document.getElementById("station-expiry");
-    document.querySelectorAll(".station-action").forEach(b=>b.disabled=!candidate||!candidate.crm_mapped||(b.dataset.action==="BREAK_START"&&!candidate.break_configured));
+    document.querySelectorAll(".station-action").forEach(b=>b.disabled=!candidate||!candidate.crm_mapped||!(candidate.actions||[]).includes(b.dataset.action)||(b.dataset.action==="BREAK_START"&&!candidate.break_configured));
     if(!candidate){box.innerHTML="<p>No person selected. Ask the employee to face the attendance camera.</p>";expiry.textContent="Waiting for a fresh recognition.";return;}
     box.innerHTML="<div style='font-size:20px;font-weight:700'>"+escapeHtml(candidate.full_name||"Recognized person")+"</div><div style='margin-top:8px'>"+escapeHtml(candidate.employee_code||"—")+" · "+escapeHtml(candidate.role||"—")+"</div><div style='margin-top:8px'>Confidence: "+(candidate.confidence!=null?Math.round(Number(candidate.confidence)*100)+"%":"—")+"</div><div style='margin-top:8px'>Detected: "+escapeHtml(new Date(candidate.detected_at).toLocaleString())+"</div>"+(!candidate.crm_mapped?"<p style='color:#b91c1c'>CRM mapping required before an attendance action can be confirmed.</p>":"");
-    expiry.textContent="Recognition valid for "+candidate.expires_in_seconds+" seconds.";
+    expiry.textContent=(candidate.state_label||'Needs Review')+" · Recognition valid for "+candidate.expires_in_seconds+" seconds.";
   }
   async function pollAttendanceStation(){
     const generation=attendancePollGeneration;
@@ -846,7 +851,7 @@
   async function confirmAttendanceStationAction(action){
     const candidate=attendanceStationCandidate,value=document.getElementById("station-camera")?.value||"";if(!candidate||!value){showMessage("Recognition expired. Ask the employee to face the camera again.",true);return;}
     const [edgeId,cameraId]=value.split("::");const scope=requireScope(["tenant_id"]);document.querySelectorAll(".station-action").forEach(b=>b.disabled=true);
-    try{const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-station/action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:cameraId,edge_id:edgeId,recognition_event_id:candidate.recognition_event_id,action})});const data=await response.json();if(!response.ok)throw new Error(data.detail||"Attendance action failed.");showMessage(String(action).replaceAll("_"," ")+" confirmed for "+candidate.full_name+".");renderStationCandidate(null);await loadAttendance();}catch(error){showMessage(error.message,true);await pollAttendanceStation();}
+    try{const response=await authFetch("/portal/v2/tenants/"+encodeURIComponent(scope.tenant_id)+"/attendance-station/action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_id:cameraId,edge_id:edgeId,recognition_event_id:candidate.recognition_event_id,action})});const data=await response.json();if(!response.ok||data.ok!==true)throw new Error(data.detail||("Attendance not confirmed: "+(data.delivery||"Needs Review")));showMessage(String(action).replaceAll("_"," ")+" confirmed for "+candidate.full_name+".");renderStationCandidate(null);await loadAttendance();}catch(error){showMessage(error.message,true);await pollAttendanceStation();}
   }
   function wireAttendanceStation(){
     if(!document.getElementById("attendance-station"))return;loadAttendanceStationCameras().catch(error=>showMessage(error.message,true));

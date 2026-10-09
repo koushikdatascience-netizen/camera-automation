@@ -27,6 +27,7 @@ class NotificationService:
     """
 
     def __init__(self) -> None:
+        self.test_mode=os.getenv('CAMERA_EYE_NOTIFICATIONS_TEST_MODE','false').lower()=='true'
         self.smtp_host = os.getenv("SNAPKEY_SMTP_HOST", "").strip()
         self.smtp_port = int(os.getenv("SNAPKEY_SMTP_PORT", "587"))
         self.smtp_user = os.getenv("SNAPKEY_SMTP_USER", "").strip()
@@ -38,6 +39,7 @@ class NotificationService:
         self.whatsapp_api_version = os.getenv("SNAPKEY_WHATSAPP_API_VERSION", "v23.0").strip()
 
     def send_email(self, recipients: Iterable[str], subject: str, body: str) -> NotificationResult:
+        if self.test_mode:return NotificationResult('email',False,'test_mode_no_delivery')
         recipients = [x.strip() for x in recipients if x and x.strip()]
         if not recipients:
             return NotificationResult("email", False, "no_recipients")
@@ -58,10 +60,11 @@ class NotificationService:
             logger.info("NOTIFICATION_SENT channel=email recipient_count=%s", len(recipients))
             return NotificationResult("email", True, "sent")
         except Exception as exc:
-            logger.exception("NOTIFICATION_FAILED channel=email error_type=%s", type(exc).__name__)
+            logger.warning("NOTIFICATION_FAILED channel=email error_type=%s", type(exc).__name__)
             return NotificationResult("email", False, type(exc).__name__)
 
     def send_whatsapp_text(self, recipients: Iterable[str], body: str) -> list[NotificationResult]:
+        if self.test_mode:return [NotificationResult('whatsapp',False,'test_mode_no_delivery')]
         recipients = [x.strip() for x in recipients if x and x.strip()]
         if not recipients:
             return [NotificationResult("whatsapp", False, "no_recipients")]
@@ -82,7 +85,7 @@ class NotificationService:
                 logger.info("NOTIFICATION_SENT channel=whatsapp recipient_suffix=%s", recipient[-4:])
                 results.append(NotificationResult("whatsapp", True, "sent"))
             except Exception as exc:
-                logger.exception("NOTIFICATION_FAILED channel=whatsapp recipient_suffix=%s error_type=%s",
+                logger.warning("NOTIFICATION_FAILED channel=whatsapp recipient_suffix=%s error_type=%s",
                                  recipient[-4:], type(exc).__name__)
                 results.append(NotificationResult("whatsapp", False, type(exc).__name__))
         return results

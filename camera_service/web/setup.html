@@ -998,6 +998,7 @@
 
         <!-- Attendance Section -->
         <div id="attendance-section" class="main-content">
+            <div id="attendance-workspace"></div>
             <div class="section-header">
                 <h2 class="section-title">Attendance Records</h2>
             </div>
@@ -2723,6 +2724,11 @@
 
         // Attendance
         async function loadAttendance() {
+            if(window.AttendanceWorkspace){
+                window.AttendanceWorkspace.mount(document.getElementById('attendance-workspace'),{base:'/api/v2/attendance',peopleEndpoint:'/api/v2/attendance/personnel'}).load();
+                document.querySelectorAll('#attendance-section > .section-header,#attendance-section > .table-container,#attendance-section > h3').forEach(node=>node.hidden=true);
+                return;
+            }
             try {
                 const response = await fetch(`${API_BASE}/attendance`);
                 const data = await response.json();
@@ -3185,5 +3191,7 @@
             }
         }, 5000);
     </script>
+    <link rel="stylesheet" href="/attendance-assets/workspace.css">
+    <script src="/attendance-assets/workspace.js"></script>
 </body>
 </html>

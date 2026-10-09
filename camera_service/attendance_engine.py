@@ -25,6 +25,11 @@ class AttendanceEngine:
         with self._lock:
             self.identities[(ev.camera_id, ev.track_id)] = ev
             p = self.presence.get(ev.person_id) or Presence(person_id=ev.person_id, first_seen_today=ev.timestamp)
+            saved=self.store.open_session(ev.person_id,self.store_id)
+            if saved and saved.get('entry_confirmed') and saved.get('break_started_at'):
+                p.status='BREAK';p.break_started_at=datetime.fromisoformat(saved['break_started_at'])
+            elif p.status=='BREAK':
+                p.status='PRESENT';p.break_started_at=None
             if mode == "AUTO" and p.status != "BREAK":
                 session, _ = self.store.create_arrival(
                     ev.person_id, self.store_id, ev.timestamp, ev.camera_id,
@@ -57,9 +62,12 @@ class AttendanceEngine:
         ts = timestamp or datetime.now().astimezone()
         with self._lock:
             p = self.presence.get(person_id)
-            if not p or p.status != 'PRESENT':
+            saved=self.store.open_session(person_id,self.store_id)
+            if not saved or not saved.get('entry_confirmed') or saved.get('break_started_at'):
                 raise ValueError('person must be present before starting a break')
-            metadata = {'crm_confirmed_break': True,'snapshot_path':p.last_snapshot_path}
+            p=p or Presence(person_id=person_id)
+            self.presence[person_id]=p
+            metadata = {'crm_confirmed_break': True,'snapshot_path':None}
             if break_master_id:
                 metadata['break_master_id'] = break_master_id
             event_id = self.store.record_attendance_break(person_id,self.store_id,camera_id,'BREAK_START',ts,metadata)
@@ -73,12 +81,14 @@ class AttendanceEngine:
         ts = timestamp or datetime.now().astimezone()
         with self._lock:
             p = self.presence.get(person_id)
-            if not p or p.status != 'BREAK':
+            saved=self.store.open_session(person_id,self.store_id)
+            if not saved or not saved.get('break_started_at'):
                 raise ValueError('person is not currently on break')
-            started = p.break_started_at
+            p=p or Presence(person_id=person_id);self.presence[person_id]=p
+            started = datetime.fromisoformat(saved['break_started_at'])
             event_id = self.store.record_attendance_break(person_id,self.store_id,camera_id,'BREAK_END',ts,{
                 'crm_confirmed_break': True,
-                'snapshot_path':p.last_snapshot_path,
+                'snapshot_path':None,
                 'break_started_at': started.isoformat() if started else None,
             })
             p.status = 'PRESENT'

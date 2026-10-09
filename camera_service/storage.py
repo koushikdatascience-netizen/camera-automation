@@ -37,6 +37,8 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_security_alerts_status ON security_alerts(status,event_time);
             CREATE TABLE IF NOT EXISTS object_security_events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, object_class TEXT NOT NULL, confidence REAL NOT NULL, track_id TEXT, detected_at TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, alert_sent INTEGER NOT NULL DEFAULT 0, snapshot_path TEXT, model_version TEXT, metadata_json TEXT);
             CREATE INDEX IF NOT EXISTS idx_object_security_events_time ON object_security_events(detected_at);
+            CREATE TABLE IF NOT EXISTS attendance_workspace_policies(store_id TEXT NOT NULL,person_id TEXT NOT NULL DEFAULT '',policy_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(store_id,person_id));
+            CREATE INDEX IF NOT EXISTS idx_person_activity_scope ON person_events(store_id,person_id,event_time);
             ''')
             self._ensure_column(c,'face_profiles','image_path','TEXT')
             self._ensure_column(c,'face_profiles','model_key','TEXT')
@@ -271,6 +273,10 @@ class SQLiteStore:
     def open_session(self,person_id,store_id):
         with self._conn() as c:
             r=c.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? AND status='OPEN' ORDER BY arrival_time DESC LIMIT 1",(person_id,store_id)).fetchone(); return dict(r) if r else None
+    def attendance_policy_snapshot(self,person_id,store_id):
+        from camera_service.attendance_workspace_api import local_policy
+        from camera_service.attendance_workspace import policy_snapshot
+        return policy_snapshot(local_policy(self,store_id,person_id))
     def attendance_sync_metadata(self, conn, person_id, session_id, mode, legacy_session_root=False):
         previous = conn.execute("""SELECT id FROM edge_event_queue
             WHERE json_extract(payload_json,'$.person_id')=?
@@ -296,9 +302,14 @@ class SQLiteStore:
             else:
                 c.execute("INSERT INTO attendance_sessions(id,person_id,store_id,arrival_time,arrival_camera,arrival_confidence,arrival_snapshot,status,entry_confirmed) VALUES(?,?,?,?,?,?,?, 'OPEN',?)",(sid,person_id,store_id,ts.isoformat(),camera,confidence,snapshot_path,1 if confirmed else 0))
             if confirmed:
+                from camera_service.attendance_state import transition
+                transition('OUT','CHECK_IN')
                 metadata={**self.attendance_sync_metadata(c,person_id,sid,'AUTO'),
                           'confidence':confidence,'snapshot_path':snapshot_path,
+                          'prior_state':'OUT','new_state':'IN',
+                          'attendance_policy_snapshot':self.attendance_policy_snapshot(person_id,store_id),
                           'attendance_action_evidence':True}
+                c.execute('INSERT OR IGNORE INTO person_events VALUES(?,?,?,?,?,?,?)',(sid,person_id,store_id,camera,'ATTENDANCE_ENTRY',ts.isoformat(),json.dumps(metadata)))
                 self._enqueue_edge_event(c,sid,'ATTENDANCE_ENTRY',{'event_id':sid,'person_id':person_id,'store_id':store_id,'camera_id':camera,'event_type':'ATTENDANCE_ENTRY','event_time':ts.isoformat(),'metadata':metadata})
             result=dict(c.execute("SELECT * FROM attendance_sessions WHERE id=?",(sid,)).fetchone())
             return result,not bool(existing)
@@ -320,6 +331,8 @@ class SQLiteStore:
             starting=event_type=='BREAK_START'
             if starting==bool(session['break_started_at']):
                 raise ValueError('Break state changed')
+            from camera_service.attendance_state import session_state,transition
+            before=session_state(dict(session));after=transition(before,'START_BREAK' if starting else 'END_BREAK')
             stamp=ts.isoformat()
             if starting:
                 conn.execute('UPDATE attendance_sessions SET break_started_at=?,last_break_start=?,last_break_end=NULL WHERE id=?',
@@ -328,6 +341,8 @@ class SQLiteStore:
                 conn.execute('UPDATE attendance_sessions SET break_started_at=NULL,last_break_end=? WHERE id=?',
                              (stamp,session['id']))
             evidence={**metadata,**self.attendance_sync_metadata(conn,person_id,session['id'],'MANUAL'),
+                      'prior_state':before,'new_state':after,
+                      'attendance_policy_snapshot':self.attendance_policy_snapshot(person_id,store_id),
                       'crm_confirmed_break':True,'attendance_action_evidence':True}
             event_id=str(uuid.uuid4())
             conn.execute('INSERT INTO person_events VALUES(?,?,?,?,?,?,?)',
