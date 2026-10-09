@@ -1,5 +1,10 @@
 #define MyAppName "Madhushala Camera AI"
-#define MyAppVersion "1.0.0"
+#define EnvAppVersion GetEnv("CAMERA_EDGE_VERSION")
+#if EnvAppVersion == ""
+  #define MyAppVersion "1.0.0"
+#else
+  #define MyAppVersion EnvAppVersion
+#endif
 #define MyAppPublisher "Madhushala Software"
 #define MyAppExeName "SnapKeyVisionAI.exe"
 
@@ -16,8 +21,11 @@ OutputBaseFilename=MadhushalaCameraAISetup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+CloseApplications=yes
+CloseApplicationsFilter=SnapKeyVisionAI.exe
+RestartApplications=no
 PrivilegesRequired=admin
 SetupIconFile=..\..\assets\brand\app.ico
 WizardImageFile=..\..\assets\brand\installer-wizard.bmp
@@ -47,3 +55,41 @@ Name: "launchafterinstall"; Description: "Launch Madhushala Camera AI after inst
 
 [Run]
 Filename: "{app}\START_MADHUSHALA_CAMERA_AI.bat"; Description: "Launch Madhushala Camera AI"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Tasks: launchafterinstall
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--background"; WorkingDir: "{app}"; Flags: nowait runhidden; Check: WizardSilent
+
+[Registry]
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SnapKeyVisionAI"; ValueData: """{app}\{#MyAppExeName}"" --background"; Flags: uninsdeletevalue
+
+[Code]
+function HasCommandLineSwitch(const SwitchName: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), SwitchName) = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
+
+function ShouldLaunchSilentBackground: Boolean;
+begin
+  { Production silent upgrades restart the edge app. CI smoke installs pass
+    /NOAUTOSTART so PowerShell -Wait does not wait on the background child. }
+  Result := WizardSilent and (not HasCommandLineSwitch('/NOAUTOSTART'));
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  { AppMutex previously caused silent upgrades to exit before replacing files.
+    Stop the background edge process explicitly before [Files] runs. }
+  Exec(ExpandConstant('{sys}\taskkill.exe'),
+       '/F /IM SnapKeyVisionAI.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(750);
+  Result := '';
+end;

@@ -12,6 +12,19 @@ $BuildScript = Join-Path $ProjectRoot "packaging\windows\build_windows.ps1"
 $InstallerScript = Join-Path $ProjectRoot "packaging\windows\CameraAutomationInstaller.iss"
 $ExpectedAppExe = Join-Path $ProjectRoot "dist\SnapKeyVisionAI\SnapKeyVisionAI.exe"
 $ExpectedInstaller = Join-Path $ProjectRoot "dist\installer\MadhushalaCameraAISetup.exe"
+$BuildInfo = Join-Path $ProjectRoot "camera_service\build_info.py"
+
+# CI releases must embed immutable version/build metadata so the updater can
+# distinguish the installed build from the published registry entry.
+if ($env:GITHUB_SHA -and $env:GITHUB_RUN_NUMBER) {
+    $EdgeVersion = "1.0.$($env:GITHUB_RUN_NUMBER)"
+    $BuildInfoText = '"""Build metadata stamped by CI before packaging the Windows edge release."""' + [Environment]::NewLine +
+        ('VERSION = "' + $EdgeVersion + '"') + [Environment]::NewLine +
+        ('BUILD_ID = "' + $env:GITHUB_SHA + '"') + [Environment]::NewLine
+    Set-Content -Path $BuildInfo -Value $BuildInfoText -Encoding UTF8
+    $env:CAMERA_EDGE_VERSION = $EdgeVersion
+    Write-Host "Stamped Camera Eye build metadata: $EdgeVersion / $($env:GITHUB_SHA)"
+}
 
 Write-Host "Building application package..."
 & $BuildScript -CleanBuild $CleanBuild
@@ -21,6 +34,43 @@ if ($LASTEXITCODE -ne 0) {
 
 if (-not (Test-Path $ExpectedAppExe)) {
     throw "Expected application EXE not found: $ExpectedAppExe"
+}
+
+# PyInstaller pulls PyTorch's C/C++ development SDK into the onedir bundle.
+# Camera Eye needs the PyTorch runtime DLLs/Python package, not headers/CMake
+# metadata. Remove those trees physically before Inno Setup scans the bundle.
+$RuntimeRoot = Join-Path $ProjectRoot "dist\SnapKeyVisionAI\_internal"
+$DevelopmentOnlyPaths = @(
+    (Join-Path $RuntimeRoot "torch\include"),
+    (Join-Path $RuntimeRoot "torch\share\cmake")
+)
+foreach ($DevelopmentPath in $DevelopmentOnlyPaths) {
+    if (Test-Path $DevelopmentPath) {
+        Write-Host "Removing development-only payload: $DevelopmentPath"
+        Remove-Item -LiteralPath $DevelopmentPath -Recurse -Force
+    }
+}
+
+# Fail closed: a future packaging change must never silently reintroduce the
+# huge PyTorch SDK into the production installer.
+$ForbiddenDevelopmentFiles = Get-ChildItem -Path $RuntimeRoot -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.FullName -like "*\torch\include\*" -or
+        $_.FullName -like "*\torch\share\cmake\*"
+    } |
+    Select-Object -First 1
+if ($ForbiddenDevelopmentFiles) {
+    throw "Development-only PyTorch payload still present: $($ForbiddenDevelopmentFiles.FullName)"
+}
+Write-Host "Verified production bundle excludes PyTorch headers/CMake metadata."
+
+if ($env:GITHUB_SHA -and $env:GITHUB_RUN_NUMBER) {
+    $ExpectedIdentity = "1.0.$($env:GITHUB_RUN_NUMBER) $($env:GITHUB_SHA)"
+    $ActualIdentity = (& $ExpectedAppExe --version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $ActualIdentity -ne $ExpectedIdentity) {
+        throw "Packaged EXE identity mismatch. Expected '$ExpectedIdentity', got '$ActualIdentity'."
+    }
+    Write-Host "Verified packaged EXE identity: $ActualIdentity"
 }
 
 $IsccCommand = @(
@@ -61,3 +111,16 @@ $InstallerInfo = Get-Item $ExpectedInstaller
 Write-Host "Installer created:"
 Write-Host $ExpectedInstaller
 Write-Host ("Size: {0:N2} MB" -f ($InstallerInfo.Length / 1MB))
+
+
+
+# Do not execute the 460+ MB installer inside the build step. Inno Setup may
+# keep the CI process tree attached after a silent install, which previously
+# discarded otherwise valid expensive builds. We already verified the exact
+# stamped EXE before packaging; end-to-end install/upgrade is validated on the
+# controlled Camera Eye client during bootstrap/release acceptance.
+if ($env:GITHUB_SHA -and $env:GITHUB_RUN_NUMBER) {
+    $InstallerSha = (Get-FileHash $ExpectedInstaller -Algorithm SHA256).Hash.ToLower()
+    Write-Host "Verified release build completed without executing installer."
+    Write-Host "Installer SHA256: $InstallerSha"
+}

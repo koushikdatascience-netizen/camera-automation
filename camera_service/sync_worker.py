@@ -5,6 +5,8 @@ import threading
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from camera_service.camera.onvif import probe_onvif, select_profile
 
 
@@ -19,10 +21,19 @@ def _safe_camera_test_result(result: dict[str, Any], *, source_was_secret: bool)
 
 
 def _redact_source(source: str) -> str:
-    if "://" not in source or "@" not in source:
+    if "://" not in source:
         return source
-    scheme, rest = source.split("://", 1)
-    return f"{scheme}://***@{rest.split('@', 1)[1]}"
+    parsed = urlsplit(source)
+    host = parsed.netloc.split('@')[-1]
+    return urlunsplit((parsed.scheme, f"***@{host}" if '@' in parsed.netloc else host, parsed.path, '', ''))
+
+
+def _redact_result(value):
+    if isinstance(value, dict):
+        return {key:_redact_result(item) for key,item in value.items()}
+    if isinstance(value, list):
+        return [_redact_result(item) for item in value]
+    return _redact_source(value) if isinstance(value,str) else value
 
 
 @dataclass
@@ -54,6 +65,7 @@ class EdgeSyncWorker:
         self.license_manager = license_manager
         self.camera_manager = camera_manager
         self.camera_supervisor = camera_supervisor
+        self._live_view_publisher = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -74,7 +86,10 @@ class EdgeSyncWorker:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            self.run_once()
+            try:
+                self.run_once()
+            except Exception:
+                self._remember(SyncRunResult(enabled=True, failed=1, message="Sync attempt failed; retrying automatically."))
             delay = min(5.0, max(2.0, float(getattr(self.sync_config, "interval_seconds", 15.0))))
             self._stop.wait(delay)
 
@@ -89,6 +104,10 @@ class EdgeSyncWorker:
             if not license_status.active:
                 result = SyncRunResult(enabled=True, blocked=True, message=license_status.reason)
                 self._remember(result, {"license": license_status.model_dump()})
+                return result
+            if hasattr(license_status,'allows_feature') and not license_status.allows_feature('cloud_sync'):
+                result = SyncRunResult(enabled=True,blocked=True,message='Cloud sync is not enabled for this license.')
+                self._remember(result)
                 return result
 
             synced = 0
@@ -134,20 +153,38 @@ class EdgeSyncWorker:
                     for camera in items:
                         try:
                             self.camera_manager.apply_cloud_camera(camera)
+                            detection=camera.get("detection_config") or {"version":0}
+                            camera_id=str(camera.get("camera_id") or "")
+                            local=self.camera_manager.get_detection_config(camera_id,
+                                bool((camera.get("features") or {}).get("unknown_detection") or (camera.get("features") or {}).get("unknown_person_detection")))
+                            local_override=bool(local.get("local_override"))
+                            incoming_version=int(detection.get("version") or 0)
+                            ack_status="LOCAL_OVERRIDE" if local_override else (
+                                "APPLIED" if int(local.get("cloud_version") or 0)>=incoming_version else "FAILED")
+                            if ack_status=="FAILED": camera_sync["failed"]+=1
+                            acknowledge=getattr(self.cloud_client,"acknowledge_detection_config",None)
+                            if acknowledge:
+                                try: acknowledge(camera_id,incoming_version,ack_status,local_override)
+                                except Exception as ack_exc:
+                                    camera_sync["failed"]+=1
+                                    camera_sync.setdefault("ack_errors",[]).append({"camera_id":camera_id,"error":str(ack_exc)[:240]})
                             camera_sync["applied"] += 1
-                        except Exception:
+                        except Exception as exc:
                             camera_sync["failed"] += 1
+                            camera_sync.setdefault("errors", []).append({"camera_id": str(camera.get("camera_id") or ""), "error": str(exc)[:300]})
                     if self.camera_supervisor is not None:
                         self.camera_supervisor.reconcile()
                 except Exception as exc:
                     camera_sync["error"] = str(exc)
-            personnel_sync={"fetched":0,"applied":0,"failed":0}
+            personnel_sync={"fetched":0,"applied":0,"deactivated":0,"failed":0}
             try:
                 roster=self.cloud_client.personnel_config()
                 people=roster.get("items") or []
                 personnel_sync["fetched"]=len(people)
                 applied=self.store.apply_cloud_personnel(people)
                 personnel_sync["applied"]=int(applied.get("applied") or 0)
+                personnel_sync["deactivated"]=int(applied.get("deactivated") or 0)
+                personnel_sync["authoritative"]=bool(applied.get("authoritative",False))
             except Exception as exc:
                 personnel_sync["failed"]+=1
                 personnel_sync["error"]=str(exc)
@@ -155,14 +192,56 @@ class EdgeSyncWorker:
                 try:
                     event = json.loads(row["payload_json"])
                     metadata = event.get("metadata") or {}
-                    snapshot_path = (
-                        metadata.get("snapshot_path")
-                        or metadata.get("person_path")
-                        or metadata.get("face_path")
-                    )
-                    if snapshot_path:
-                        evidence = self.cloud_client.upload_event_evidence(str(event.get("event_id") or row["id"]), snapshot_path)
-                        event["metadata"] = {**metadata, "cloud_evidence": evidence}
+                    # Alert events deliberately wait for their post-event clip to finish
+                    # so image + video evidence reach the cloud in one durable event.
+                    if metadata.get("evidence_pending"):
+                        continue
+                    # Face login must use the current recognition face crop when one
+                    # exists. Other event types keep their normal snapshot priority.
+                    if str(event.get("event_type") or "") == "PERSON_RECOGNIZED":
+                        snapshot_path = metadata.get("face_path") or metadata.get("snapshot_path") or metadata.get("person_path")
+                    else:
+                        snapshot_path = metadata.get("snapshot_path") or metadata.get("person_path") or metadata.get("face_path")
+                    clip_path = metadata.get("clip_path")
+                    cloud_metadata = dict(metadata)
+                    event_id=str(event.get("event_id") or row["id"])
+                    is_attendance_evidence=(str(event.get("event_type") or "")=="PERSON_RECOGNIZED"
+                                            or bool(metadata.get("attendance_action_evidence")))
+                    if snapshot_path and Path(snapshot_path).is_file():
+                        cloud_metadata["cloud_evidence"] = self.cloud_client.upload_event_evidence(event_id, snapshot_path)
+                    elif snapshot_path:
+                        cloud_metadata["evidence_unavailable"] = True
+                        cloud_metadata.setdefault("evidence_missing",{})["primary_snapshot"]="local_file_missing"
+                    if clip_path and Path(clip_path).is_file() and not is_attendance_evidence:
+                        cloud_metadata["cloud_clip"] = self.cloud_client.upload_event_evidence(event_id, clip_path)
+                    elif clip_path:
+                        cloud_metadata["clip_unavailable"] = True
+                        cloud_metadata.setdefault("evidence_missing",{})["clip"]="local_file_missing"
+
+                    if is_attendance_evidence:
+                        uploaded=[];missing=dict(cloud_metadata.get("evidence_missing") or {})
+                        paths=metadata.get("snapshot_paths") or ([snapshot_path] if snapshot_path else [])
+                        for index,path_value in enumerate(paths[:3]):
+                            if path_value and Path(path_value).is_file():
+                                ref=self.cloud_client.upload_event_evidence(
+                                    f"{event_id}:attendance-snapshot-{index+1}",str(path_value))
+                                uploaded.append({"index":index,"evidence":ref})
+                            else:
+                                missing[f"snapshot_{index+1}"]="not_captured" if not path_value else "local_file_missing"
+                        if len(uploaded)<3:
+                            missing["snapshots"]=f"expected_3_received_{len(uploaded)}"
+                        if clip_path and Path(clip_path).is_file():
+                            cloud_metadata["cloud_clip"]=self.cloud_client.upload_event_evidence(
+                                f"{event_id}:attendance-video",str(clip_path))
+                        elif not cloud_metadata.get("cloud_clip"):
+                            missing["clip"]=(metadata.get("evidence_missing") or {}).get("clip") or "not_captured"
+                        cloud_metadata["cloud_evidence_snapshots"]=uploaded
+                        cloud_metadata["evidence_missing"]=missing
+                        cloud_metadata["evidence_status"]=("COMPLETE" if len(uploaded)==3 and cloud_metadata.get("cloud_clip")
+                                                           else "PARTIAL" if uploaded or cloud_metadata.get("cloud_clip")
+                                                           else "UNAVAILABLE")
+                    event["metadata"] = {key:value for key,value in cloud_metadata.items()
+                        if key not in {'snapshot_path','person_path','face_path','clip_path','snapshot_paths','evidence_pending'}}
                     self.cloud_client.post_event(self.edge_config, event)
                     self.store.mark_event_synced(row["id"])
                     synced += 1
@@ -195,6 +274,8 @@ class EdgeSyncWorker:
                     "last_frame_at": runtime.last_frame_at if runtime else None,
                     "capture_fps": runtime.capture_fps if runtime else 0.0,
                     "ai_fps": runtime.ai_fps if runtime else 0.0,
+                    "frame_width":runtime.frame_width if runtime else None,
+                    "frame_height":runtime.frame_height if runtime else None,
                     "last_error": runtime.last_error if runtime else None,
                 })
         personnel = []
@@ -213,8 +294,10 @@ class EdgeSyncWorker:
             # Heartbeat must remain available even if an older local database is
             # temporarily unable to provide the optional personnel inventory.
             personnel = []
+        from camera_service.updater import current_build
         return {
             "service": "SnapKeyVisionAI",
+            "build": current_build(),
             "license": {
                 "active": bool(license_status.active),
                 "plan": license_status.plan,
@@ -230,11 +313,42 @@ class EdgeSyncWorker:
     def _execute_command(self, command: dict[str, Any]) -> dict[str, Any]:
         command_type=str(command.get("command_type") or "")
         request=command.get("request") or {}
+        if command_type == "CAMERA_DELETE":
+            camera_id = str(request.get("camera_id") or "")
+            if self.camera_manager is None:
+                raise RuntimeError("Camera manager is unavailable")
+            self.camera_manager.delete_camera(camera_id)
+            self.camera_manager.delete_camera_status(camera_id)
+            if self.camera_supervisor is not None:
+                self.camera_supervisor.reconcile()
+            return {"deleted": True, "camera_id": camera_id}
+        if command_type=="LIVE_VIEW_START":
+            import json
+            import logging
+            logging.getLogger(__name__).info("[LIVE_VIEW] edge command received %s", json.dumps({
+                "command_id":command.get("id"),"session_id":request.get("session_id"),
+                "camera_id":request.get("camera_id"),"room":request.get("room")}))
+            if self.camera_manager is None:
+                raise RuntimeError("Camera manager is unavailable")
+            from camera_service.livekit_publisher import LiveKitCameraPublisher
+            if self._live_view_publisher is None:
+                self._live_view_publisher = LiveKitCameraPublisher(self.camera_manager)
+            return self._live_view_publisher.start(
+                session_id=str(request.get("session_id") or ""),
+                camera_id=str(request.get("camera_id") or ""),
+                url=str(request.get("url") or ""),
+                token=str(request.get("publisher_token") or ""),
+                ttl_seconds=int(request.get("ttl_seconds") or 600),
+            )
+        if command_type=="LIVE_VIEW_STOP":
+            if self._live_view_publisher is None:
+                return {"stopped": True, "session_id": str(request.get("session_id") or ""), "already_stopped": True}
+            return self._live_view_publisher.stop(str(request.get("session_id") or ""))
         if command_type=="ONVIF_PROBE":
             result=probe_onvif(str(request.get("host") or ""),int(request.get("port") or 80),
                                str(request.get("username") or ""),str(request.get("password") or ""))
             result["recommended_profile"]=select_profile(result.get("profiles") or [],str(request.get("purpose") or "ai"))
-            return result
+            return _redact_result(result)
         if command_type=="CAMERA_TEST":
             if self.camera_manager is None: raise RuntimeError("camera manager is unavailable")
             camera_id=str(request.get("camera_id") or "").strip()
@@ -251,7 +365,11 @@ class EdgeSyncWorker:
                 source=str(request.get("source") or "").strip()
             if not source:
                 raise RuntimeError("Camera source is required")
-            result=self.camera_manager.test_rtsp_connection(source)
+            runtime = self.camera_manager.get_camera_status(camera_id) if camera_id and hasattr(self.camera_manager, "get_camera_status") else None
+            if runtime and runtime.online:
+                result = {"success": True, "message": "Camera runtime is receiving frames", "frames_received": runtime.frames_received, "fps": runtime.capture_fps}
+            else:
+                result=self.camera_manager.test_rtsp_connection(source)
             if not isinstance(result,dict):
                 result={"connected":bool(result)}
             result=_safe_camera_test_result(result, source_was_secret=source_was_secret)

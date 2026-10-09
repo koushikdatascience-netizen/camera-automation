@@ -23,3 +23,5 @@ eval-type-backport>=0.4.0
 
 # Build dependencies
 pyinstaller>=6.0
+# On-demand attendance-camera WebRTC publishing
+livekit>=1.0

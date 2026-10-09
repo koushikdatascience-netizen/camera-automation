@@ -42,12 +42,73 @@ class SQLiteStore:
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','entry_confirmed','INTEGER NOT NULL DEFAULT 0')
+            for column in ('break_started_at', 'last_break_start', 'last_break_end'):
+                self._ensure_column(c,'attendance_sessions',column,'TEXT')
             self._ensure_column(c,'edge_event_queue','next_attempt_at','TEXT')
             self._ensure_column(c,'edge_event_queue','claimed_at','TEXT')
+            # Provenance is required for safe authoritative CRM reconciliation. Existing
+            # databases predate this column, so those rows are quarantinable legacy
+            # identities rather than being misclassified as intentional local-only users.
+            self._ensure_column(c,'personnel','managed_source',"TEXT NOT NULL DEFAULT 'legacy'")
+            self._recover_interrupted_attendance_evidence(c)
+            self._release_stalled_unknown_incidents(c)
     def _ensure_column(self,conn,table,column,definition):
         existing={row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    def _recover_interrupted_attendance_evidence(self,conn):
+        cutoff=datetime.now(timezone.utc).timestamp()-30
+        rows=conn.execute("SELECT id,payload_json,created_at FROM edge_event_queue WHERE status='PENDING'").fetchall()
+        for row in rows:
+            try:
+                created=datetime.fromisoformat(str(row['created_at']).replace('Z','+00:00'))
+                metadata=json.loads(row['payload_json']).get('metadata') or {}
+                if not metadata.get('evidence_pending') or created.timestamp()>cutoff:
+                    continue
+                metadata['evidence_pending']=False
+                metadata['evidence_status']='PARTIAL' if metadata.get('snapshot_paths') else 'UNAVAILABLE'
+                missing=metadata.get('evidence_missing') if isinstance(metadata.get('evidence_missing'),dict) else {}
+                missing.setdefault('clip','capture_interrupted_by_edge_restart')
+                if len(metadata.get('snapshot_paths') or [])<3:
+                    missing.setdefault('snapshots','capture_interrupted_by_edge_restart')
+                metadata['evidence_missing']=missing
+                payload=json.loads(row['payload_json']);payload['metadata']=metadata
+                conn.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),row['id']))
+                conn.execute("UPDATE person_events SET metadata_json=? WHERE id=?",(json.dumps(metadata),row['id']))
+            except (ValueError,TypeError,json.JSONDecodeError):
+                continue
+    def _release_stalled_unknown_incidents(self, conn):
+        """Unblock legacy unknown alerts queued without any clip producer.
+
+        Unknown incidents must reach the cloud even when only a snapshot exists.
+        Preserve existing media references and allow a later clip upload if present.
+        """
+        rows = conn.execute(
+            "SELECT id,payload_json FROM edge_event_queue "
+            "WHERE status='PENDING' AND event_type='UNKNOWN_INCIDENT'"
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+                metadata = payload.get("metadata") or {}
+                if not metadata.get("evidence_pending"):
+                    continue
+                metadata["evidence_pending"] = False
+                metadata["evidence_status"] = (
+                    "PARTIAL" if metadata.get("person_path") or metadata.get("face_path")
+                    else "UNAVAILABLE"
+                )
+                metadata.setdefault("evidence_missing", {}).setdefault(
+                    "clip", "not_captured"
+                )
+                payload["metadata"] = metadata
+                conn.execute(
+                    "UPDATE edge_event_queue SET payload_json=? WHERE id=?",
+                    (json.dumps(payload), row["id"]),
+                )
+            except (ValueError, TypeError, AttributeError):
+                continue
+
     @staticmethod
     def now(): return datetime.now(timezone.utc).isoformat()
     def _enqueue_edge_event(self,conn,event_id,event_type,payload):
@@ -64,24 +125,35 @@ class SQLiteStore:
         return {**payload,'scope':{**scope,'camera_id':str(camera_id or 'system')}}
 
     def apply_cloud_personnel(self, items):
-        """Idempotently mirror the shop-scoped cloud roster into local recognition tables."""
+        """Mirror the authoritative CRM roster without deleting intentional local-only identities.
+
+        managed_source values:
+          crm    - created/confirmed by an authoritative cloud personnel snapshot
+          local  - intentionally created on this edge
+          legacy - row created before provenance tracking existed
+
+        Legacy rows absent from CRM are deactivated (and therefore excluded from
+        recognition) but their biometric/history data is retained for safe migration.
+        Confirmed CRM rows absent from a later snapshot are deactivated and their face
+        templates are removed so stale CRM identities can never win recognition.
+        """
         now=self.now(); seen=set()
         with self._lock,self._conn() as c:
             for item in items:
                 pid=str(item["person_id"]); seen.add(pid)
-                legacy=c.execute("SELECT id FROM personnel WHERE employee_code=? AND id<>?",(str(item["employee_code"]),pid)).fetchone()
+                legacy=c.execute("SELECT id,managed_source FROM personnel WHERE employee_code=? AND id<>?",(str(item["employee_code"]),pid)).fetchone()
                 if legacy:
                     old_id=str(legacy["id"])
                     c.execute("UPDATE face_profiles SET person_id=? WHERE person_id=?",(pid,old_id))
                     c.execute("UPDATE attendance_sessions SET person_id=? WHERE person_id=?",(pid,old_id))
                     c.execute("UPDATE person_events SET person_id=? WHERE person_id=?",(pid,old_id))
                     c.execute("DELETE FROM personnel WHERE id=?",(old_id,))
-                c.execute("""INSERT INTO personnel(id,employee_code,full_name,role,phone,email,active,created_at,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee_code=excluded.employee_code,
+                c.execute("""INSERT INTO personnel(id,employee_code,full_name,role,phone,email,active,created_at,updated_at,managed_source)
+                    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee_code=excluded.employee_code,
                     full_name=excluded.full_name,role=excluded.role,phone=excluded.phone,email=excluded.email,
-                    active=excluded.active,updated_at=excluded.updated_at""",
+                    active=excluded.active,updated_at=excluded.updated_at,managed_source='crm'""",
                     (pid,str(item["employee_code"]),str(item["full_name"]),str(item["role"]),item.get("phone"),item.get("email"),
-                     1 if item.get("active",True) else 0,now,now))
+                     1 if item.get("active",True) else 0,now,now,'crm'))
                 cloud_face_ids=set()
                 for face in item.get("faces") or []:
                     fid=str(face["face_id"]); cloud_face_ids.add(fid)
@@ -89,16 +161,28 @@ class SQLiteStore:
                         VALUES(?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET person_id=excluded.person_id,
                         embedding_json=excluded.embedding_json,quality=excluded.quality""",
                         (fid,pid,json.dumps(face["embedding"]),float(face.get("quality") or 0),now))
-                # Once a person is cloud-managed, the cloud face set is authoritative.
                 existing=c.execute("SELECT id FROM face_profiles WHERE person_id=?",(pid,)).fetchall()
                 for row in existing:
                     if row["id"] not in cloud_face_ids:
                         c.execute("DELETE FROM face_profiles WHERE id=?",(row["id"],))
-        return {"applied":len(seen)}
+
+            # Only CRM-owned or pre-provenance legacy identities are reconciled.
+            # Explicit local-only identities remain untouched.
+            stale_rows=c.execute("SELECT id,managed_source FROM personnel WHERE active=1 AND managed_source IN ('crm','legacy')").fetchall()
+            stale_ids=[str(row["id"]) for row in stale_rows if str(row["id"]) not in seen]
+            removed_faces=0
+            for row in stale_rows:
+                stale_id=str(row["id"])
+                if stale_id in seen:
+                    continue
+                c.execute("UPDATE personnel SET active=0,updated_at=? WHERE id=?",(now,stale_id))
+                if str(row["managed_source"]) == 'crm':
+                    removed_faces += c.execute("DELETE FROM face_profiles WHERE person_id=?",(stale_id,)).rowcount
+        return {"applied":len(seen),"deactivated":len(stale_ids),"removed_faces":removed_faces,"authoritative":True}
 
     def create_person(self, d):
         pid=str(uuid.uuid4()); now=self.now()
-        with self._lock,self._conn() as c: c.execute("INSERT INTO personnel VALUES(?,?,?,?,?,?,?,?,?)",(pid,d.employee_code,d.full_name,d.role.value,d.phone,d.email,1,now,now))
+        with self._lock,self._conn() as c: c.execute("INSERT INTO personnel(id,employee_code,full_name,role,phone,email,active,created_at,updated_at,managed_source) VALUES(?,?,?,?,?,?,?,?,?,?)",(pid,d.employee_code,d.full_name,d.role.value,d.phone,d.email,1,now,now,'local'))
         return self.get_person(pid)
     def list_people(self):
         with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM personnel ORDER BY full_name")]
@@ -159,10 +243,14 @@ class SQLiteStore:
             return self.get_attendance_id(s['id']),True
     def get_attendance_id(self,sid):
         with self._conn() as c: r=c.execute("SELECT * FROM attendance_sessions WHERE id=?",(sid,)).fetchone(); return dict(r) if r else None
-    def attendance(self,person_id=None):
+    def attendance(self,person_id=None,limit=None,camera_id=None):
         q='''SELECT a.*,p.employee_code,p.full_name,p.role FROM attendance_sessions a JOIN personnel p ON p.id=a.person_id'''; args=[]
-        if person_id: q+=' WHERE a.person_id=?'; args.append(person_id)
+        filters=[]
+        if person_id: filters.append('a.person_id=?'); args.append(person_id)
+        if camera_id: filters.append('(a.arrival_camera=? OR a.exit_camera=?)'); args.extend([camera_id,camera_id])
+        if filters: q+=' WHERE '+' AND '.join(filters)
         q+=' ORDER BY a.arrival_time DESC'
+        if limit is not None: q+=' LIMIT ?'; args.append(int(limit))
         with self._conn() as c: return [dict(r) for r in c.execute(q,args)]
     def add_person_event(self,person_id,store_id,camera_id,event_type,ts,metadata=None):
         eid=str(uuid.uuid4())
@@ -171,6 +259,37 @@ class SQLiteStore:
             c.execute("INSERT INTO person_events VALUES(?,?,?,?,?,?,?)",(eid,person_id,store_id,camera_id,event_type,ts.isoformat(),json.dumps(metadata or {})))
             self._enqueue_edge_event(c,eid,event_type,payload)
         return eid
+
+    def update_person_event_evidence(self,event_id,snapshot_paths=None,clip_path=None,
+                                     evidence_missing=None,evidence_pending=None):
+        """Persist attendance evidence completion to both history and queued sync."""
+        with self._lock,self._conn() as c:
+            row=c.execute("SELECT metadata_json FROM person_events WHERE id=?",(event_id,)).fetchone()
+            if not row:
+                return False
+            metadata=json.loads(row["metadata_json"] or "{}")
+            paths=[str(path) for path in (snapshot_paths or metadata.get("snapshot_paths") or []) if path]
+            if paths:
+                metadata["snapshot_paths"]=paths[:3]
+                metadata["snapshot_path"]=paths[0]
+            if clip_path:
+                metadata["clip_path"]=str(clip_path)
+                (metadata.get("evidence_missing") or {}).pop("clip",None)
+            missing=metadata.get("evidence_missing") if isinstance(metadata.get("evidence_missing"),dict) else {}
+            missing.update(evidence_missing or {})
+            metadata["evidence_missing"]=missing
+            if evidence_pending is not None:
+                metadata["evidence_pending"]=bool(evidence_pending)
+            complete=len(paths)>=3 and bool(metadata.get("clip_path"))
+            metadata["evidence_status"]=("PENDING_CAPTURE" if metadata.get("evidence_pending") else
+                "COMPLETE" if complete else "PARTIAL" if paths or metadata.get("clip_path") else "UNAVAILABLE")
+            c.execute("UPDATE person_events SET metadata_json=? WHERE id=?",(json.dumps(metadata),event_id))
+            queued=c.execute("SELECT payload_json,status FROM edge_event_queue WHERE id=?",(event_id,)).fetchone()
+            if queued and queued["status"]=="PENDING":
+                payload=json.loads(queued["payload_json"])
+                payload["metadata"]={**(payload.get("metadata") or {}),**metadata}
+                c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),event_id))
+        return True
     def person_events(self,person_id=None):
         q='''SELECT e.*,p.employee_code,p.full_name,p.role FROM person_events e LEFT JOIN personnel p ON p.id=e.person_id'''
         args=[]
@@ -186,11 +305,25 @@ class SQLiteStore:
                     c.execute("UPDATE unknown_incidents SET last_seen=?,recognition_attempts=?,best_similarity=COALESCE(?,best_similarity),best_face_snapshot=COALESCE(?,best_face_snapshot),best_person_snapshot=COALESCE(?,best_person_snapshot),clip_path=COALESCE(?,clip_path) WHERE id=?",(last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path,row['id']))
                     return row['id'],False
                 iid=str(uuid.uuid4()); c.execute("INSERT INTO unknown_incidents(id,store_id,camera_id,track_id,first_seen,confirmed_unknown_at,last_seen,recognition_attempts,best_similarity,best_face_snapshot,best_person_snapshot,clip_path,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')",(iid,store_id,camera_id,track_id,first_seen.isoformat(),confirmed.isoformat(),last_seen.isoformat(),attempts,best_similarity,face_path,person_path,clip_path))
-                payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path}}
+                payload={'event_id':iid,'store_id':store_id,'camera_id':camera_id,'track_id':track_id,'event_type':'UNKNOWN_INCIDENT','event_time':confirmed.isoformat(),'metadata':{'first_seen':first_seen.isoformat(),'last_seen':last_seen.isoformat(),'attempts':attempts,'best_similarity':best_similarity,'face_path':face_path,'person_path':person_path,'clip_path':clip_path,'evidence_pending':False,'evidence_status':'PARTIAL' if person_path or face_path else 'UNAVAILABLE'}}
                 self._enqueue_edge_event(c,iid,'UNKNOWN_INCIDENT',payload)
                 return iid,True
-    def unknowns(self):
-        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM unknown_incidents ORDER BY confirmed_unknown_at DESC")]
+    def update_unknown_clip(self,iid,clip_path):
+        with self._lock,self._conn() as c:
+            c.execute("UPDATE unknown_incidents SET clip_path=? WHERE id=?",(clip_path,iid))
+            # The original queued UNKNOWN_INCIDENT payload may have been created before
+            # the asynchronous evidence clip finished. Keep pending queue payloads in
+            # sync so cloud/CRM delivery receives the final evidence path.
+            row=c.execute("SELECT payload_json,status FROM edge_event_queue WHERE id=?",(iid,)).fetchone()
+            if row and row["status"]=="PENDING":
+                payload=json.loads(row["payload_json"])
+                payload.setdefault("metadata",{})["clip_path"]=clip_path
+                payload["metadata"]["evidence_pending"]=False
+                c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),iid))
+        return self.unknown(iid)
+
+    def unknowns(self,limit=None):
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM unknown_incidents ORDER BY confirmed_unknown_at DESC LIMIT ?",(limit if limit is not None else -1,))]
     def unknown(self,iid):
         with self._conn() as c: r=c.execute("SELECT * FROM unknown_incidents WHERE id=?",(iid,)).fetchone(); return dict(r) if r else None
     def acknowledge_unknown(self,iid):
@@ -198,17 +331,26 @@ class SQLiteStore:
         return self.unknown(iid)
     def create_security_alert(self,store_id,camera_id,alert_type,object_label,confidence,event_time,snapshot_path=None,clip_path=None,metadata=None):
         aid=str(uuid.uuid4())
-        payload={'event_id':aid,'store_id':store_id,'camera_id':camera_id,'event_type':alert_type,'event_time':event_time.isoformat(),'metadata':{**(metadata or {}),'object_label':object_label,'confidence':confidence,'snapshot_path':snapshot_path,'clip_path':clip_path}}
+        payload={'event_id':aid,'store_id':store_id,'camera_id':camera_id,'event_type':alert_type,'event_time':event_time.isoformat(),'metadata':{**(metadata or {}),'object_label':object_label,'confidence':confidence,'snapshot_path':snapshot_path,'clip_path':clip_path,'evidence_pending':clip_path is None}}
         with self._lock,self._conn() as c:
             c.execute("INSERT INTO security_alerts(id,store_id,camera_id,alert_type,object_label,confidence,event_time,snapshot_path,clip_path,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)",(aid,store_id,camera_id,alert_type,object_label,confidence,event_time.isoformat(),snapshot_path,clip_path,json.dumps(metadata or {})))
             self._enqueue_edge_event(c,aid,alert_type,payload)
         return self.security_alert(aid)
-    def security_alerts(self):
-        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM security_alerts ORDER BY event_time DESC")]
+    def security_alerts(self,limit=None):
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT * FROM security_alerts ORDER BY event_time DESC LIMIT ?",(limit if limit is not None else -1,))]
     def security_alert(self,aid):
         with self._conn() as c: r=c.execute("SELECT * FROM security_alerts WHERE id=?",(aid,)).fetchone(); return dict(r) if r else None
     def update_security_alert_clip(self,aid,clip_path):
-        with self._lock,self._conn() as c: c.execute("UPDATE security_alerts SET clip_path=? WHERE id=?",(clip_path,aid))
+        with self._lock,self._conn() as c:
+            c.execute("UPDATE security_alerts SET clip_path=? WHERE id=?",(clip_path,aid))
+            # Clip generation is asynchronous. Update a still-pending queue payload so
+            # cloud/CRM sync includes the completed evidence instead of a null clip.
+            row=c.execute("SELECT payload_json,status FROM edge_event_queue WHERE id=?",(aid,)).fetchone()
+            if row and row["status"]=="PENDING":
+                payload=json.loads(row["payload_json"])
+                payload.setdefault("metadata",{})["clip_path"]=clip_path
+                payload["metadata"]["evidence_pending"]=False
+                c.execute("UPDATE edge_event_queue SET payload_json=? WHERE id=?",(json.dumps(payload),aid))
         return self.security_alert(aid)
     def acknowledge_security_alert(self,aid):
         with self._lock,self._conn() as c: c.execute("UPDATE security_alerts SET status='ACKNOWLEDGED',acknowledged_at=? WHERE id=?",(self.now(),aid))

@@ -15,6 +15,23 @@ services:
       retries: 10
     networks: [vision]
 
+  # Isolated, disposable database for the local PostgreSQL integration test.
+  # This profile is opt-in and never shares the cloud portal's data volume.
+  postgres-test:
+    image: postgres:17
+    profiles: [integration-test]
+    environment:
+      POSTGRES_DB: camera_eye_test
+      POSTGRES_USER: camera_eye_test
+      POSTGRES_PASSWORD: camera-eye-test-only
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U camera_eye_test -d camera_eye_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   portal:
     build:
       context: .
@@ -28,28 +45,57 @@ services:
       SNAPKEY_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-snapkey}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-snapkey_vision}
       SNAPKEY_EDGE_API_TOKEN: ${SNAPKEY_EDGE_API_TOKEN:-}
       SNAPKEY_CRM_INTEGRATION_KEY: ${SNAPKEY_CRM_INTEGRATION_KEY:?set SNAPKEY_CRM_INTEGRATION_KEY}
+      # Tenant/shop identities are supplied dynamically by the authenticated CRM backend.
       SNAPKEY_CRM_API_BASE_URL: ${SNAPKEY_CRM_API_BASE_URL:-https://apis.snapkey.in}
       SNAPKEY_CRM_API_TOKEN: ${SNAPKEY_CRM_API_TOKEN:-}
-      # Keep roster mutation disabled until the customer's LoginLogout payload
-      # contract is smoke-tested against SnapKey CRM.
-      SNAPKEY_CRM_ATTENDANCE_ENABLED: ${SNAPKEY_CRM_ATTENDANCE_ENABLED:-0}
+      SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON: '${SNAPKEY_CRM_API_TOKENS_BY_TENANT_JSON:-}'
+      # Automatic camera attendance posts the current face crop to the CRM
+      # face-login service. Override this while that service is hosted separately.
+      SNAPKEY_CRM_FACE_LOGIN_URL: ${SNAPKEY_CRM_FACE_LOGIN_URL:-https://apis.snapkey.in/api/Auth/loginUsingFaceTenant}
+      # Auto-logout stays disabled until its business rule is explicitly confirmed.
+      SNAPKEY_CRM_AUTO_LOGIN_ENABLED: ${SNAPKEY_CRM_AUTO_LOGIN_ENABLED:-1}
+      SNAPKEY_CRM_AUTO_LOGOUT_ENABLED: ${SNAPKEY_CRM_AUTO_LOGOUT_ENABLED:-0}
+      # V2 uses a different CRM endpoint; keep off until staging contract approval.
+      CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED: ${CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED:-false}
+      CAMERA_EYE_TOKEN_ENCRYPTION_KEY: ${CAMERA_EYE_TOKEN_ENCRYPTION_KEY:-}
       SNAPKEY_PUBLIC_BASE_URL: ${SNAPKEY_PUBLIC_BASE_URL:-https://camera.snapkey.ai}
+      SNAPKEY_LIVEKIT_URL: ${SNAPKEY_LIVEKIT_URL:-wss://livekit.snapkeystudio.com}
+      SNAPKEY_LIVEKIT_API_KEY: ${SNAPKEY_LIVEKIT_API_KEY:-}
+      SNAPKEY_LIVEKIT_API_SECRET: ${SNAPKEY_LIVEKIT_API_SECRET:-}
       SNAPKEY_EDGE_ACTIVATION_CODE: ${SNAPKEY_EDGE_ACTIVATION_CODE:?set SNAPKEY_EDGE_ACTIVATION_CODE}
       SNAPKEY_LICENSE_PRIVATE_KEY: ${SNAPKEY_LICENSE_PRIVATE_KEY:?set SNAPKEY_LICENSE_PRIVATE_KEY}
       SNAPKEY_LICENSE_PUBLIC_KEY: ${SNAPKEY_LICENSE_PUBLIC_KEY:?set SNAPKEY_LICENSE_PUBLIC_KEY}
       SNAPKEY_PORTAL_SESSION_TTL_MINUTES: ${SNAPKEY_PORTAL_SESSION_TTL_MINUTES:-60}
       SNAPKEY_EVIDENCE_ROOT: /app/data/evidence
+      SNAPKEY_UPDATE_ROOT: /app/data/updates
+      SNAPKEY_UPDATE_PUBLISH_KEY: ${SNAPKEY_UPDATE_PUBLISH_KEY:-}
+      SNAPKEY_MODEL_ROOT: /app/data/models
+      SNAPKEY_MODEL_PUBLISH_KEY: ${SNAPKEY_MODEL_PUBLISH_KEY:-}
+      # Cloud notifications. Keep provider secrets only in the server .env / secret store.
+      SNAPKEY_SMTP_HOST: ${SNAPKEY_SMTP_HOST:-}
+      SNAPKEY_SMTP_PORT: ${SNAPKEY_SMTP_PORT:-587}
+      SNAPKEY_SMTP_USER: ${SNAPKEY_SMTP_USER:-}
+      SNAPKEY_SMTP_PASSWORD: ${SNAPKEY_SMTP_PASSWORD:-}
+      SNAPKEY_SMTP_FROM: ${SNAPKEY_SMTP_FROM:-}
+      SNAPKEY_SMTP_STARTTLS: ${SNAPKEY_SMTP_STARTTLS:-1}
+      SNAPKEY_WHATSAPP_PHONE_NUMBER_ID: ${SNAPKEY_WHATSAPP_PHONE_NUMBER_ID:-}
+      SNAPKEY_WHATSAPP_ACCESS_TOKEN: ${SNAPKEY_WHATSAPP_ACCESS_TOKEN:-}
+      SNAPKEY_WHATSAPP_API_VERSION: ${SNAPKEY_WHATSAPP_API_VERSION:-v23.0}
     command: uvicorn cloud_portal.api:app --host 0.0.0.0 --port 8000
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - vision_evidence_data:/app/data/evidence
+      - vision_update_data:/app/data/updates
+      - vision_model_data:/app/data/models
       - vision_face_models:/root/.insightface
     networks: [vision]
 
 volumes:
   vision_postgres_data:
   vision_evidence_data:
+  vision_update_data:
+  vision_model_data:
   vision_face_models:
 
 networks:

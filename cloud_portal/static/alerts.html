@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SnapKey Eye | Alerts</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="logo"><img src="/static/assets/snapkey.png" alt="SnapKey Eye"><div class="logo-text"><strong>SnapKey Eye</strong><span>Camera monitoring</span></div></div>
+    <nav class="nav-menu">
+      <a href="/portal" class="nav-item">Overview</a>
+      <a href="/portal/live.html" class="nav-item">Live Cameras</a>
+      <a href="/portal/cameras.html" class="nav-item">Camera Setup</a>
+      <a href="/portal/alerts.html" class="nav-item active">Alerts</a>
+      <a href="/portal/verification.html" class="nav-item">Verification</a>
+      <a href="/portal/attendance.html" class="nav-item">Attendance</a>
+      <a href="/portal/personnel.html" class="nav-item">Personnel</a>
+    </nav>
+  </aside>
+  <main class="main">
+    <header class="header"><div class="header-date"></div><div class="profile-info"><strong>Camera Eye User</strong><span>User</span></div></header>
+    <section class="content">
+      <div class="page-title"><h1>Alerts</h1><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-light" id="enable-alert-sound" type="button">Enable sound & notifications</button><button class="btn btn-light" id="refresh-alerts" type="button">Refresh</button></div></div>
+      <div class="table-wrapper"><table class="attendance-table"><thead><tr><th>Time</th><th>Camera</th><th>Type</th><th>Person / Object</th><th>Evidence</th></tr></thead><tbody id="alerts-body"><tr><td colspan="5">Loading alerts...</td></tr></tbody></table></div>
+    </section>
+  </main>
+  <script src="/static/js/main.js"></script>
+</body>
+</html>

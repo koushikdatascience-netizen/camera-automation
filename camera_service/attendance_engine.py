@@ -37,12 +37,13 @@ class AttendanceEngine:
             if ident and abs((ev.timestamp-ident.timestamp).total_seconds())<=self.pending_window_seconds: return self._apply(ident,ev)
         return None
     def _apply(self, ident:IdentitySeen, cross:LineCrossingEvent):
+        snapshot_path = cross.snapshot_path or ident.snapshot_path
         if cross.direction=='ENTRY':
-            s,created=self.store.create_arrival(ident.person_id,self.store_id,cross.timestamp,cross.camera_id,ident.confidence,ident.snapshot_path,confirmed=True)
+            s,created=self.store.create_arrival(ident.person_id,self.store_id,cross.timestamp,cross.camera_id,ident.confidence,snapshot_path,confirmed=True)
             p=self.presence[ident.person_id]; p.attendance_session_id=s['id']; p.status='PRESENT'
             return {'type':'ARRIVAL' if created else 'PRESENCE','session':s}
         if cross.direction=='EXIT':
-            s,closed=self.store.close_exit(ident.person_id,self.store_id,cross.timestamp,cross.camera_id,ident.confidence,ident.snapshot_path)
+            s,closed=self.store.close_exit(ident.person_id,self.store_id,cross.timestamp,cross.camera_id,ident.confidence,snapshot_path)
             p=self.presence[ident.person_id]; p.status='ABSENT'; p.attendance_session_id=None
             if not closed:
                 self.store.add_person_event(ident.person_id,self.store_id,cross.camera_id,'EXIT_WITHOUT_OPEN_SESSION',cross.timestamp)

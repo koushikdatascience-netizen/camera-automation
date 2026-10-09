@@ -31,7 +31,7 @@ def test_camera_manager_can_use_normalized_runtime_backend(tmp_path, monkeypatch
     monkeypatch.setenv("SNAPKEY_INFERENCE_ROUTER_ENABLED", "1")
     manager = CameraManager(str(tmp_path / "camera.db"))
     backend = FakeBackend()
-    manager._inference_backends["fake.pt"] = backend
+    manager._inference_backends[("fake.pt", "cam-1")] = backend
     config = CameraConfig(
         camera_id="cam-1",
         name="Test",

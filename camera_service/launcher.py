@@ -1,4 +1,5 @@
 import os
+import json
 import argparse
 import sys
 import threading
@@ -29,9 +30,9 @@ def configure_frozen_ca_bundle() -> None:
 
 configure_frozen_ca_bundle()
 
-from camera_service.api import app
-
 _LOG_STREAM = None
+_INSTANCE_HANDLE = None
+_UPDATER = None
 
 
 def _runtime_log_dir() -> Path:
@@ -92,12 +93,46 @@ def open_browser_when_ready(host: str, port: int) -> None:
         try:
             open_browser(setup_url)
         except Exception as exc:
-            print(f"Failed to open browser: {exc}")
+            print(f"Failed to open browser: {exc}", flush=True)
     else:
-        print(f"Server health check did not become ready: {health_url}")
+        print(f"Server health check did not become ready: {health_url}", flush=True)
+
+
+def existing_instance_healthy(host: str, port: int) -> bool:
+    """Identify our edge service, not just any HTTP listener on this port."""
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=2) as response:
+            data = json.loads(response.read(65536))
+            return isinstance(data, dict) and response.status == 200 and data.get('status') == 'ok' and 'store_id' in data and isinstance(data.get('runtime'), dict)
+    except (OSError, ValueError, urllib.error.URLError):
+        return False
+
+
+def acquire_instance_lock(port: int) -> bool:
+    """Windows kernel mutex survives startup races and is released on process exit."""
+    global _INSTANCE_HANDLE
+    if os.name != 'nt':
+        return True
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    name = 'Global\\SnapKeyVisionAI' if port == 8091 else f'Global\\SnapKeyVisionAI-{port}'
+    ctypes.set_last_error(0)
+    handle = kernel.CreateMutexW(None, False, name)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), 'Could not create application instance lock')
+    if ctypes.get_last_error() == 183:
+        kernel.CloseHandle(handle)
+        return False
+    _INSTANCE_HANDLE = handle
+    return True
 
 
 def main() -> None:
+    global _UPDATER
     ensure_console_streams()
     parser = argparse.ArgumentParser(description="Madhushala Camera AI edge service")
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
@@ -105,7 +140,13 @@ def main() -> None:
     parser.add_argument("--background", action="store_true", help="Run without opening the setup browser.")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the setup browser.")
     parser.add_argument("--open-ui", action="store_true", help="Open the setup UI and exit.")
+    parser.add_argument("--version", action="store_true", help="Print immutable build metadata and exit.")
     args = parser.parse_args()
+
+    if args.version:
+        from camera_service.build_info import BUILD_ID, VERSION
+        print(f"{VERSION} {BUILD_ID}", flush=True)
+        return
 
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
@@ -118,7 +159,35 @@ def main() -> None:
         open_browser(setup_url)
         return
 
-    print(f"Starting SnapKey Vision AI on http://{host}:{port}")
+    foreground = env_bool("AUTO_OPEN_BROWSER", True) and not args.background and not args.no_browser
+    if existing_instance_healthy(host, port):
+        if foreground:
+            open_browser(setup_url)
+        return
+    if not acquire_instance_lock(port):
+        if foreground:
+            open_browser_when_ready(host, port)
+        return
+    if existing_instance_healthy(host, port):
+        if foreground:
+            open_browser(setup_url)
+        return
+
+    from camera_service.api import app
+    try:
+        from camera_service.api import cloud_client
+        from camera_service.updater import EdgeUpdater, current_build
+        print(f"Camera Eye build metadata: {current_build()}", flush=True)
+        _UPDATER = EdgeUpdater(
+            cloud_client,
+            interval_seconds=float(os.environ.get("CAMERA_UPDATE_INTERVAL_SECONDS", "1800")),
+        )
+        started = _UPDATER.start()
+        print(f"Camera Eye updater startup result: started={started}", flush=True)
+    except Exception as exc:
+        print(f"Camera Eye updater startup failed: {type(exc).__name__}: {exc}", flush=True)
+
+    print(f"Starting SnapKey Vision AI on http://{host}:{port}", flush=True)
 
     auto_open_browser = env_bool("AUTO_OPEN_BROWSER", True) and not args.background and not args.no_browser
     if auto_open_browser:
@@ -130,13 +199,19 @@ def main() -> None:
         )
         browser_thread.start()
 
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level=log_level,
-    )
+    try:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level=log_level,
+        )
+    finally:
+        if _UPDATER is not None:
+            _UPDATER.stop()
 
+
+ensure_console_streams()
 
 if __name__ == "__main__":
     main()

@@ -5,14 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SnapKey Vision AI</title>
     <style>
+        @font-face { font-family:Outfit; src:url('/static/fonts/outfit.woff2') format('woff2'); font-weight:100 900; font-display:swap; }
+        [hidden] { display:none !important; }
         :root {
             --ink: #202327;
             --muted: #686d74;
             --line: #e5e2d9;
             --surface: #ffffff;
-            --soft: #faf7ee;
-            --cream: #faf7ee;
-            --cream-alt: #fffbef;
+            --soft: #f2f5f3;
+            --cream: #f5f7f5;
+            --cream-alt: #f9fbf9;
             --brand: #ffcc32;
             --brand-dark: #161a1d;
             --brand-soft: #fff3bb;
@@ -175,6 +177,7 @@
         .btn:hover {
             transform: translateY(-1px);
         }
+        .btn:disabled { opacity:.45; cursor:not-allowed; transform:none; box-shadow:none; }
 
         .btn-primary {
             background: var(--brand);
@@ -524,35 +527,123 @@
                 padding: 16px;
             }
         }
-    </style>
+
+        .operator-camera-tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; margin-bottom:18px; }
+        .operator-camera-tile { display:flex; justify-content:space-between; align-items:center; gap:10px; min-height:74px; padding:13px 14px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink); text-align:left; cursor:pointer; }
+        .operator-camera-tile:hover { border-color:#e3b526; background:var(--brand-soft); }
+        .operator-camera-tile strong,.operator-camera-tile small { display:block; margin:0; }
+        .operator-camera-tile .live-status.online { color:var(--success); }
+        .operator-camera-tile .live-status.offline { color:var(--danger); }
+        .operator-records-toolbar { display:flex; justify-content:space-between; align-items:end; gap:12px; flex-wrap:wrap; }
+        .operator-records-toolbar .form-control { min-width:190px; }
+        #operator-records-table .btn { min-height:30px; padding:6px 9px; text-decoration:none; display:inline-flex; align-items:center; }
+        @media (max-width:650px){ .operator-records-toolbar{align-items:stretch}.operator-records-toolbar .live-toolbar-actions{width:100%}.operator-records-toolbar .form-control{min-width:0;flex:1} }
+
+        /* Camera Eye professional live workspace */
+        .live-toolbar { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+        .live-toolbar-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .live-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+        .live-grid.single { grid-template-columns:1fr; }
+        .live-grid.dense { grid-template-columns:repeat(3,minmax(0,1fr)); }
+        .live-tile { position:relative; overflow:hidden; min-height:250px; border:1px solid var(--line); border-radius:8px; background:#111827; box-shadow:0 8px 24px rgba(15,23,42,.10); }
+        .live-tile img { display:block; width:100%; aspect-ratio:16/9; object-fit:contain; background:#0b0f14; }
+        .live-tile-head { display:flex; justify-content:space-between; gap:8px; padding:10px 12px; color:white; background:#101519; }
+        .live-tile-head strong { font-size:13px; }
+        .live-status { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:750; }
+        .live-status.online { color:#86efac; } .live-status.offline { color:#fca5a5; }
+        .live-tile-foot { display:flex; justify-content:space-between; gap:8px; align-items:center; padding:10px 12px; background:#fff; }
+        .live-tile-foot small { margin:0; }
+        .camera-card { border:1px solid var(--line); border-radius:6px; padding:16px; margin-bottom:8px; background:#fff; display:flex; justify-content:space-between; align-items:center; gap:16px; }
+        .camera-card .camera-info h3 { margin:0 0 5px; }
+        .camera-card .camera-actions { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
+        .camera-card .danger-menu { opacity:.86; }
+        .camera-meta { color:var(--muted); font-size:12px; margin-top:3px; }
+        .feature-pills { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+        .feature-pill { background:var(--cream-alt); border:1px solid var(--line); border-radius:999px; padding:4px 8px; font-size:10px; font-weight:700; }
+        .camera-wall-empty { padding:44px 20px; text-align:center; border:1px dashed var(--line); border-radius:12px; color:var(--muted); background:var(--cream-alt); }
+        @media (max-width:900px){ .live-grid,.live-grid.dense{grid-template-columns:1fr}.live-tile{min-height:180px}.edge-overview-grid{grid-template-columns:1fr !important} }
+        #live-section { box-shadow:none; border:0; background:transparent; padding:0; }
+        #cameras-section { box-shadow:none; border:0; background:transparent; padding:0; }
+        .workspace-tabs { display:flex; gap:6px; align-items:center; }
+        .workspace-tabs button[aria-selected="true"], .activity-tabs button[aria-selected="true"] { background:var(--brand); color:var(--brand-dark); border-color:var(--brand); }
+        .focus-workspace { display:grid; grid-template-columns:minmax(170px,210px) minmax(0,1fr) minmax(240px,280px); gap:14px; align-items:start; }
+        .camera-rail, .focus-detail, .activity-band { background:var(--surface); border:1px solid var(--line); border-radius:8px; }
+        .camera-rail { padding:12px; display:grid; gap:6px; }
+        .camera-rail h3, .focus-detail h3 { margin:0 0 8px; font-size:13px; }
+        .camera-rail button { width:100%; min-height:58px; text-align:left; background:transparent; border:1px solid transparent; border-radius:6px; padding:8px 10px; cursor:pointer; color:var(--ink); }
+        .camera-rail button[aria-current="true"] { border-color:#e3b526; background:#fff5ca; }
+        .camera-rail button strong, .camera-rail button small { display:block; margin:0; overflow-wrap:anywhere; }
+        .camera-rail button small { font-weight:500; }
+        .focus-stage { background:#101519; border-radius:8px; overflow:hidden; min-width:0; }
+        .focus-stage img, .focus-placeholder { width:100%; aspect-ratio:16/9; object-fit:contain; display:block; background:#101519; }
+        .focus-placeholder { display:grid; place-items:center; color:#d1d5db; text-align:center; padding:20px; }
+        .focus-stage-bar { padding:10px 12px; color:#f9fafb; display:flex; justify-content:space-between; gap:10px; align-items:center; }
+        .focus-stage-bar strong { font-size:13px; overflow-wrap:anywhere; }
+        .focus-detail { padding:14px; min-height:260px; }
+        .focus-detail dl { display:grid; grid-template-columns:1fr auto; gap:8px; font-size:12px; margin:0 0 14px; }
+        .focus-detail dt { color:var(--muted); }.focus-detail dd { margin:0; text-align:right; font-weight:700; overflow-wrap:anywhere; }
+        .recognized-person { display:flex; gap:10px; align-items:center; border-top:1px solid var(--line); padding:12px 0; margin-top:4px; min-height:60px; }
+        #station-panel .recognized-person { flex-wrap:wrap; }
+        #station-panel .recognized-person img { width:100px; height:100px; }
+        .recognized-person img { width:44px; height:44px; border-radius:6px; object-fit:cover; background:var(--soft); }
+        .recognized-person strong { display:block; font-size:12px; }.recognized-person small { margin:0; }
+        .focus-detail .camera-actions { display:flex; flex-wrap:wrap; gap:7px; }
+        .focus-detail .camera-actions .btn { flex:1 1 46%; }
+        .focus-detail .camera-actions .btn:disabled { opacity:.45; cursor:not-allowed; }
+        .activity-band { margin-top:14px; padding:14px; min-height:170px; }
+        .activity-tabs { display:flex; gap:7px; border-bottom:1px solid var(--line); padding-bottom:10px; }
+        .activity-list { display:grid; gap:0; max-height:260px; overflow-y:auto; }
+        .activity-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:11px 2px; border-bottom:1px solid var(--line); font-size:12px; }
+        .activity-row strong { display:block; overflow-wrap:anywhere; }.activity-row small { margin:0; }.activity-row time { white-space:nowrap; color:var(--muted); }
+        .activity-empty { padding:24px 0; color:var(--muted); font-size:13px; }
+        #live-wall-view[hidden], #live-focus-view[hidden], .focus-stage img[hidden], .focus-placeholder[hidden] { display:none; }
+        #live-layout-controls[hidden], .recognized-person img[hidden] { display:none; }
+        @media (max-width:1050px) { .focus-workspace { grid-template-columns:160px minmax(0,1fr); }.focus-detail { grid-column:1 / -1; min-height:0; } }
+        @media (max-width:650px) { .focus-workspace { grid-template-columns:1fr; }.camera-rail { display:block; }.camera-rail h3 { display:none; }#focus-camera-list { display:flex; gap:6px; overflow-x:auto; }.camera-rail button { min-width:145px; }.focus-detail { grid-column:auto; }.live-toolbar { align-items:flex-start; } }
+    
+        .focus-stage { position:relative; }
+        #security-zone-layer { position:absolute; inset:42px 0 0 0; z-index:5; pointer-events:auto; }
+        .security-zone-box { position:absolute; border:2px solid #ffcc32; background:rgba(255,204,50,.10); min-width:8px; min-height:8px; }
+        .security-zone-box span { position:absolute; left:0; top:0; transform:translateY(-100%); background:#161a1d; color:#fff; padding:2px 6px; font-size:11px; white-space:nowrap; }
+        .security-zone-resize { position:absolute; right:-6px; bottom:-6px; width:14px; height:14px; border-radius:50%; background:#ffcc32; border:2px solid #161a1d; cursor:nwse-resize; }
+</style>
 </head>
 <body>
     <header>
         <div class="header-content">
             <div class="brand-lockup">
-                <div class="brand-mark">SK</div>
+                <img class="brand-mark" src="/static/snapkey.png" alt="SnapKey">
                 <div>
                     <h1>SnapKey Vision AI</h1>
-                    <div class="brand-subtitle">Edge security and retail intelligence</div>
+                    <div class="brand-subtitle">Camera intelligence</div>
                 </div>
             </div>
             <nav>
-                <a href="#" class="active" data-section="system">System Status</a>
-                <a href="#" data-section="cameras">Cameras</a>
-                <a href="#" data-section="personnel">Personnel</a>
-                <a href="#" data-section="attendance">Attendance</a>
-                <a href="#" data-section="objectSecurity">Object Security Test</a>
-                <a href="#" data-section="security">Security Alerts</a>
-                <a href="#" data-section="unknown">Unknown Persons</a>
+                <a href="#" class="active" data-section="overview">Overview</a>
+                <a href="#" data-section="live">Live View</a>
+                <a href="#" data-section="cameras">Camera Setup</a>
+                <a href="#" data-section="system">System Status</a>
             </nav>
         </div>
     </header>
 
     <div class="container">
+        <div id="operator-notice" role="status" hidden></div>
         <div id="unknown-alert-banner" class="alert-banner"></div>
 
+        <section id="overview-section" class="main-content active">
+            <div class="section-header"><div><h2 class="section-title">Overview</h2><small id="overview-summary">Loading cameras...</small></div><button class="btn btn-secondary" id="overview-refresh" type="button">Refresh</button></div>
+            <div id="operator-camera-tiles" class="operator-camera-tiles"></div>
+            <div class="operator-records-toolbar">
+                <div class="activity-tabs" role="tablist" aria-label="Records"><button class="btn btn-secondary" id="operator-attendance-tab" role="tab" aria-selected="true" type="button">Attendance</button><button class="btn btn-secondary" id="operator-alerts-tab" role="tab" aria-selected="false" type="button">Alerts</button></div>
+                <div class="live-toolbar-actions"><select id="operator-camera-filter" class="form-control" aria-label="Filter by camera"><option value="">All cameras</option></select><button id="operator-manage-people" class="btn btn-secondary" type="button">Manage people</button></div>
+            </div>
+            <div class="table-container"><table id="operator-records-table"><thead id="operator-records-head"></thead><tbody id="operator-records-body"></tbody></table></div>
+            <small id="operator-records-status" role="status"></small>
+        </section>
+
         <!-- System Status Section -->
-        <div id="system-section" class="main-content active">
+        <div id="system-section" class="main-content">
             <div class="section-header">
                 <h2 class="section-title">System Status</h2>
             </div>
@@ -604,6 +695,18 @@
                 </div>
             </div>
 
+
+            <details class="operator-advanced"><summary>Device details</summary><div id="system-diagnostics-grid" class="system-status"></div></details>
+            <div hidden style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px;margin:20px 0" class="edge-overview-grid">
+                <div class="camera-card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><h3 style="margin:0">Camera Health</h3><small>Current status of cameras connected to this Edge PC.</small></div><button class="btn btn-primary" type="button" id="overview-open-live">Open Live Cameras</button></div>
+                    <div id="edge-overview-cameras" style="margin-top:10px">Loading cameras...</div>
+                </div>
+                <div class="camera-card">
+                    <h3 style="margin:0">Edge Health</h3><small>Cloud sync and local processing status.</small>
+                    <div id="edge-overview-health" style="margin-top:14px">Loading...</div>
+                </div>
+            </div>
             <div class="activation-panel">
                 <h3>Cloud Activation</h3>
                 <form id="activation-form">
@@ -618,10 +721,61 @@
             </div>
         </div>
 
+
+        <!-- Live Cameras Section -->
+        <div id="live-section" class="main-content">
+            <div class="section-header">
+                <div>
+                    <h2 class="section-title">Live View</h2>
+                </div>
+                <div class="live-toolbar-actions">
+                    <button class="btn btn-secondary" id="live-refresh-btn" type="button">Refresh</button>
+                    <button class="btn btn-primary" id="live-overlay-btn" type="button">AI Overlay: On</button>
+                </div>
+            </div>
+            <div class="live-toolbar">
+                <div><strong id="live-camera-summary">Loading cameras...</strong></div>
+                <div class="workspace-tabs" role="tablist" aria-label="Camera view">
+                    <button class="btn btn-secondary" id="live-focus-tab" type="button" role="tab" aria-selected="true">Focus</button>
+                    <button class="btn btn-secondary" id="live-wall-tab" type="button" role="tab" aria-selected="false">Wall</button>
+                </div>
+                <div class="live-toolbar-actions" id="live-layout-controls" hidden>
+                    <button class="btn btn-secondary live-layout-btn" data-layout="single" type="button">1</button>
+                    <button class="btn btn-secondary live-layout-btn" data-layout="grid" type="button">4</button>
+                    <button class="btn btn-secondary live-layout-btn" data-layout="dense" type="button">9</button>
+                </div>
+            </div>
+            <button id="close-live-view" class="btn btn-secondary" type="button">Close Live View</button>
+            <div id="live-focus-view" class="focus-workspace" role="tabpanel">
+                <aside class="camera-rail"><h3>Cameras</h3><div id="focus-camera-list"></div></aside>
+                <div class="focus-stage">
+                    <div class="focus-stage-bar"><strong id="focus-camera-name">Select a camera</strong><span id="focus-camera-status" class="live-status offline">OFFLINE</span></div>
+                    <img id="focus-camera-image" alt="Selected live camera" hidden>
+                    <div id="security-zone-layer" hidden></div>
+                    <div id="focus-camera-placeholder" class="focus-placeholder"><span id="focus-camera-placeholder-text">Select an online camera</span><button id="focus-open-live-btn" class="btn btn-primary" type="button" hidden>Open Live View</button></div>
+                </div>
+                <aside class="focus-detail">
+                    <h3 id="focus-purpose">Attendance</h3>
+                    <dl><dt>Camera role</dt><dd id="focus-camera-role">-</dd><dt>Monitoring</dt><dd id="focus-camera-monitoring">-</dd></dl>
+                    <span id="focus-camera-zone" hidden></span><span id="focus-camera-features" hidden></span>
+                    <div id="station-panel"><div class="recognized-person"><img id="focus-person-photo" alt="Latest attendance snapshot" hidden><div><strong id="focus-person-name">No attendance yet</strong><small id="focus-person-time"></small></div></div>
+                    <dl id="focus-attendance-details"><dt>Recognition</dt><dd id="focus-time-in">-</dd><dt>State</dt><dd id="focus-time-out">-</dd><dt>Validity</dt><dd id="focus-duration">-</dd></dl>
+                    <div id="station-actions" class="camera-actions"></div>
+                    <div class="camera-actions"><button class="btn btn-success" id="attendance-start" type="button">Start Attendance</button><button class="btn btn-danger" id="attendance-stop" type="button">Stop Attendance</button></div>
+                    <h3>Recent attendance</h3><div id="station-recent" class="activity-list" style="max-height:300px;overflow:auto"></div></div>
+                    <div id="security-panel" hidden><strong>Unknown-person detection area</strong><small>Full Frame is the default. Custom Zones limits alerts to enabled rectangles.</small><label>Detection mode <select id="security-zone-mode"><option value="FULL_FRAME">Full Frame</option><option value="CUSTOM_ZONES">Custom Zones</option></select></label><small id="security-zone-status" role="status"></small><div class="camera-actions"><button class="btn btn-primary" id="security-add-zone" type="button">Add Detection Zone</button><button class="btn btn-secondary" id="security-refresh-zones" type="button">Refresh Zones</button></div><div id="security-zone-list" class="activity-list"></div><small id="security-zone-message" role="status"></small><h3>Safety detection</h3><small id="safety-capability">Fire / smoke: checking model capability…</small></div>
+                    <div class="camera-actions"><button class="btn btn-success" id="focus-camera-start" type="button">Start Camera</button><button class="btn btn-secondary" id="focus-camera-stop" type="button">Stop Camera</button><button class="btn btn-secondary" id="focus-camera-capture" type="button">Capture</button><button class="btn btn-secondary" id="focus-camera-settings" type="button">Settings</button><button class="btn btn-secondary" id="focus-camera-fullscreen" type="button">Full Screen</button></div>
+                    <small id="focus-control-message" role="status"></small>
+                </aside>
+            </div>
+            <div id="live-wall-view" role="tabpanel" hidden><div id="live-camera-grid" class="live-grid"></div></div>
+            <div class="activity-band" hidden><div class="activity-tabs" role="tablist" aria-label="Recent activity"><button class="btn btn-secondary" id="live-attendance-tab" type="button" role="tab" aria-selected="true">Attendance</button><button class="btn btn-secondary" id="live-alerts-tab" type="button" role="tab" aria-selected="false">Alerts</button></div><div id="live-activity-list" class="activity-list" aria-live="polite"></div></div>
+        </div>
+
         <!-- Cameras Section -->
         <div id="cameras-section" class="main-content">
             <div class="section-header">
-                <h2 class="section-title">Camera Configuration</h2>
+                <h2 class="section-title">Camera Setup</h2>
                 <button class="btn btn-primary" id="add-camera-btn">Add Camera</button>
             </div>
 
@@ -635,10 +789,10 @@
                                 <input type="text" id="camera-name" class="form-control" required>
                             </div>
                         </div>
-                        <div class="form-col">
+                        <div class="form-col" hidden>
                             <div class="form-group">
                                 <label for="camera-id">Camera ID</label>
-                                <input type="text" id="camera-id" class="form-control" required>
+                                <input type="text" id="camera-id" class="form-control">
                             </div>
                         </div>
                     </div>
@@ -646,19 +800,19 @@
                     <div class="form-group">
                         <label for="rtsp-url">Camera Source</label>
                         <input type="text" id="rtsp-url" class="form-control" placeholder="RTSP URL or webcam index, for example 0" required>
-                        <small>Use a Hikvision RTSP substream like rtsp://user:pass@ip:554/Streaming/Channels/102, 0/1 for OpenCV webcam, or dshow:USB Camera for Windows USB camera.</small>
                     </div>
 
                     <div class="form-group">
                         <label for="camera-role">Camera Role</label>
                         <select id="camera-role" class="form-control">
-                            <option value="ENTRANCE_EXIT">Entrance / Exit</option>
-                            <option value="GENERAL">General</option>
-                            <option value="SECURITY">Security</option>
-                            <option value="SHOPLIFTING">Shoplifting</option>
+                            <option value="ENTRANCE_EXIT">Attendance</option>
+                            <option value="SECURITY">Security / unknown persons</option>
+                            <option value="GENERAL">General monitoring</option>
+                            <option value="SHOPLIFTING">Object security</option>
                         </select>
                     </div>
 
+                    <details class="operator-advanced" id="camera-advanced"><summary>Advanced settings</summary>
                     <div class="form-row">
                         <div class="form-col">
                             <div class="form-group">
@@ -679,23 +833,23 @@
 
                     <div class="form-group">
                         <label>Features</label>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-attendance">
                             <input type="checkbox" id="feature-attendance" checked>
                             <label for="feature-attendance">Attendance</label>
                         </div>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-face-recognition">
                             <input type="checkbox" id="feature-face-recognition" checked>
                             <label for="feature-face-recognition">Face Recognition</label>
                         </div>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-unknown-detection">
                             <input type="checkbox" id="feature-unknown-detection" checked>
                             <label for="feature-unknown-detection">Unknown Person Detection</label>
                         </div>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-shoplifting">
                             <input type="checkbox" id="feature-shoplifting">
                             <label for="feature-shoplifting">Shoplifting</label>
                         </div>
-                        <div class="checkbox-group">
+                        <div class="checkbox-group" id="feature-row-object-security">
                             <input type="checkbox" id="feature-object-security">
                             <label for="feature-object-security">Object Security</label>
                         </div>
@@ -705,7 +859,7 @@
                         <label>Tracking Performance</label>
                         <div class="form-row">
                             <div class="form-col">
-                                <select id="tracking-mode" class="form-control">
+                                <label for="camera-rotation">Rotation</label><select id="camera-rotation" class="form-control"><option value="0">Normal (0°)</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select><select id="tracking-mode" class="form-control">
                                     <option value="detect" selected>Detection only</option>
                                     <option value="track">ByteTrack IDs</option>
                                 </select>
@@ -731,6 +885,7 @@
                         </div>
                     </div>
 
+                    </details>
                     <div class="form-group">
                         <button type="button" class="btn btn-secondary" id="test-connection-btn">
                             <span id="test-btn-text">TEST CONNECTION</span>
@@ -761,8 +916,8 @@
         <!-- Personnel Section -->
         <div id="personnel-section" class="main-content">
             <div class="section-header">
-                <h2 class="section-title">Personnel Management</h2>
-                <button class="btn btn-primary" id="add-person-btn">Add Person</button>
+                <h2 class="section-title">Manage People</h2>
+                <div class="live-toolbar-actions"><button class="btn btn-secondary" id="people-back" type="button">Back to overview</button><button class="btn btn-primary" id="add-person-btn">Add person</button></div>
             </div>
 
             <div id="person-form-panel" style="display: none;">
@@ -1088,6 +1243,7 @@
         </div>
     </div>
 
+    <script src="/static/station.js"></script>
     <script>
         // API Base URL
         const API_BASE = '/api/v1';
@@ -1097,7 +1253,9 @@
 
         // DOM Elements
         const sections = {
+            overview: document.getElementById('overview-section'),
             system: document.getElementById('system-section'),
+            live: document.getElementById('live-section'),
             cameras: document.getElementById('cameras-section'),
             personnel: document.getElementById('personnel-section'),
             attendance: document.getElementById('attendance-section'),
@@ -1120,6 +1278,7 @@
                 // Show selected section
                 const sectionId = link.getAttribute('data-section');
                 Object.values(sections).forEach(section => section.classList.remove('active'));
+                if (!sections[sectionId]) return;
                 sections[sectionId].classList.add('active');
 
                 // Load section data
@@ -1151,7 +1310,7 @@
                     if (!response.ok) {
                         throw new Error(typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail || body));
                     }
-                    message.textContent = `Activated: ${body.edge.edge_id}. Cloud sync is ready.`;
+                    message.textContent = body.sync?.blocked ? `Activated: ${body.edge.edge_id}. Sync blocked: ${body.sync.message}` : `Activated: ${body.edge.edge_id}. Cloud sync configured; check Cloud Sync status for delivery.`;
                     message.className = 'activation-message status-ok';
                     document.getElementById('activation-code').value = '';
                     await loadSystemStatus();
@@ -1167,9 +1326,27 @@
 
         // Load section data
         function loadSectionData(sectionId) {
+            if (sectionId !== 'live') {
+                livePreviewOpen = false;
+                liveView = 'focus';
+                clearStationCandidate();
+                document.querySelectorAll('#live-camera-grid img').forEach(img => img.removeAttribute('src'));
+                document.getElementById('focus-camera-image').removeAttribute('src');
+                clearInterval(liveRefreshTimer);
+                liveRefreshTimer = null;
+                clearInterval(liveActivityTimer);
+                liveActivityTimer = null;
+            }
             switch(sectionId) {
+                case 'overview':
+                    loadOperatorOverview();
+                    break;
                 case 'system':
                     loadSystemStatus();
+                    break;
+                case 'live':
+                    switchLiveView('focus');
+                    loadLiveCameras();
                     break;
                 case 'cameras':
                     loadCameras();
@@ -1192,6 +1369,110 @@
             }
         }
 
+        let operatorRecordMode = 'attendance';
+        let operatorCameras = [];
+
+        function openOperatorSection(sectionId) {
+            const link = document.querySelector(`nav a[data-section="${sectionId}"]`);
+            if (link) { link.click(); return; }
+            Object.values(sections).forEach(section => section?.classList.remove('active'));
+            sections[sectionId]?.classList.add('active');
+            loadSectionData(sectionId);
+        }
+        function operatorCameraName(cameraId) {
+            return operatorCameras.find(camera => camera.camera_id === cameraId)?.name || cameraId || '-';
+        }
+       
+        function formatDateTime(value) {
+            if (!value) return '-';
+
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return '-';
+
+            return date.toLocaleString([], {
+                year: 'numeric',
+                month: 'short',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit'
+        });
+    }
+
+        function formatOperatorDuration(arrival, exit) {
+            if (!arrival) return '-';
+            if (!exit) return 'Present';
+            const ms = new Date(exit).getTime() - new Date(arrival).getTime();
+            if (!Number.isFinite(ms) || ms < 0) return '-';
+            const minutes = Math.floor(ms / 60000), hours = Math.floor(minutes / 60);
+            return hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
+        }
+        function renderOperatorCameraTiles() {
+            const tiles=document.getElementById('operator-camera-tiles');
+            const online=operatorCameras.filter(camera=>camera.status?.online).length;
+            document.getElementById('overview-summary').textContent=`${operatorCameras.length} cameras · ${online} online`;
+            tiles.innerHTML=operatorCameras.length?operatorCameras.map(camera=>{
+                const isOnline=!!camera.status?.online;
+                return `<button class="operator-camera-tile" type="button" data-camera-id="${escapeHtmlLocal(camera.camera_id)}"><span><strong>${escapeHtmlLocal(camera.name||camera.camera_id)}</strong><small>${escapeHtmlLocal(camera.camera_role||'GENERAL')}</small></span><span class="live-status ${isOnline?'online':'offline'}">${isOnline?'LIVE':'OFFLINE'}</span></button>`;
+            }).join(''):'<div class="activity-empty">No cameras configured. Open Camera Setup to add one.</div>';
+            tiles.querySelectorAll('[data-camera-id]').forEach(button=>button.addEventListener('click',()=>{selectedLiveCameraId=button.dataset.cameraId;livePreviewOpen=true;openOperatorSection('live');}));
+        }
+        function populateOperatorCameraFilter() {
+            const select=document.getElementById('operator-camera-filter'), selected=select.value;
+            select.innerHTML='<option value="">All cameras</option>'+operatorCameras.map(camera=>`<option value="${escapeHtmlLocal(camera.camera_id)}">${escapeHtmlLocal(camera.name||camera.camera_id)}</option>`).join('');
+            if(operatorCameras.some(camera=>camera.camera_id===selected))select.value=selected;
+        }
+        function operatorEvidenceLink(url,label) {
+            return `<a class="btn btn-secondary" href="${url}" target="_blank" rel="noopener">${label}</a>`;
+        }
+        async function loadOperatorRecords() {
+            const body=document.getElementById('operator-records-body'),head=document.getElementById('operator-records-head'),status=document.getElementById('operator-records-status');
+            const cameraId=document.getElementById('operator-camera-filter').value;
+            status.textContent='Loading records...';
+            try {
+                if(operatorRecordMode==='attendance'){
+                    const params=new URLSearchParams({limit:'100'});if(cameraId)params.set('camera_id',cameraId);
+                    const response=await fetch(`${API_BASE}/attendance?${params}`);if(!response.ok)throw new Error('Attendance records unavailable');
+                    const data=await response.json();
+                    head.innerHTML='<tr><th>Person</th><th>Camera</th><th>Time in</th><th>Time out</th><th>Duration</th><th>Evidence</th></tr>';
+                    body.innerHTML=(data.items||[]).length?data.items.map(item=>{
+                        const evidence=[item.arrival_snapshot?operatorEvidenceLink(`${API_BASE}/attendance/${encodeURIComponent(item.id)}/snapshots/arrival`,'Entry'):'',item.exit_snapshot?operatorEvidenceLink(`${API_BASE}/attendance/${encodeURIComponent(item.id)}/snapshots/exit`,'Exit'):''].filter(Boolean).join(' ');
+                        return `<tr><td><strong>${escapeHtmlLocal(item.full_name||item.person_id||'-')}</strong><small>${escapeHtmlLocal(item.employee_code||'')}</small></td><td>${escapeHtmlLocal(operatorCameraName(item.arrival_camera||item.exit_camera))}</td><td>${escapeHtmlLocal(formatDateTime(item.arrival_time))}</td><td>${escapeHtmlLocal(item.exit_time?formatDateTime(item.exit_time):'Present')}</td><td>${escapeHtmlLocal(formatOperatorDuration(item.arrival_time,item.exit_time))}</td><td>${evidence||'-'}</td></tr>`;
+                    }).join(''):'<tr><td colspan="6">No attendance records yet.</td></tr>';
+                    status.textContent=`${(data.items||[]).length} attendance record(s)`;
+                } else {
+                    const [securityResponse,unknownResponse]=await Promise.all([fetch(`${API_BASE}/security-alerts?limit=100`),fetch(`${API_BASE}/unknown-incidents?limit=100`)]);
+                    if(!securityResponse.ok||!unknownResponse.ok)throw new Error('Alert records unavailable');
+                    const security=await securityResponse.json(),unknown=await unknownResponse.json();
+                    let records=[...(security.items||[]).map(item=>({...item,recordType:'security',stamp:item.event_time})),...(unknown.items||[]).map(item=>({...item,recordType:'unknown',stamp:item.confirmed_unknown_at||item.first_seen}))];
+                    if(cameraId)records=records.filter(item=>item.camera_id===cameraId);
+                    records.sort((a,b)=>new Date(b.stamp||0)-new Date(a.stamp||0));
+                    head.innerHTML='<tr><th>Alert</th><th>Camera</th><th>Time</th><th>Status</th><th>Evidence</th></tr>';
+                    body.innerHTML=records.length?records.slice(0,100).map(item=>{
+                        const label=item.recordType==='unknown'?'Unknown person':(item.object_label||item.alert_type||'Security alert');
+                        const hasSnapshot=item.recordType==='unknown'?(item.best_face_snapshot||item.best_person_snapshot):item.snapshot_path;
+                        const snapshotUrl=item.recordType==='unknown'?`${API_BASE}/unknown-incidents/${encodeURIComponent(item.id)}/snapshot`:`${API_BASE}/security-alerts/${encodeURIComponent(item.id)}/snapshot`;
+                        const clipUrl=item.recordType==='unknown'?`${API_BASE}/unknown-incidents/${encodeURIComponent(item.id)}/clip`:`${API_BASE}/security-alerts/${encodeURIComponent(item.id)}/clip`;
+                        const evidence=[hasSnapshot?operatorEvidenceLink(snapshotUrl,'Snapshot'):'',item.clip_path?operatorEvidenceLink(clipUrl,'Video'):''].filter(Boolean).join(' ');
+                        return `<tr><td><strong>${escapeHtmlLocal(label)}</strong></td><td>${escapeHtmlLocal(operatorCameraName(item.camera_id))}</td><td>${escapeHtmlLocal(formatDateTime(item.stamp))}</td><td>${escapeHtmlLocal(item.status||'OPEN')}</td><td>${evidence||'-'}</td></tr>`;
+                    }).join(''):'<tr><td colspan="5">No alerts yet.</td></tr>';
+                    status.textContent=`${records.length} alert record(s)`;
+                }
+            } catch(error){body.innerHTML=`<tr><td colspan="6">${escapeHtmlLocal(error.message)}</td></tr>`;status.textContent=error.message;}
+        }
+        async function loadOperatorOverview() {
+            try {
+                const response=await fetch(`${API_BASE}/cameras`);if(!response.ok)throw new Error('Camera status unavailable');
+                const data=await response.json();operatorCameras=data.items||[];renderOperatorCameraTiles();populateOperatorCameraFilter();await loadOperatorRecords();
+            } catch(error){document.getElementById('overview-summary').textContent=error.message;document.getElementById('operator-camera-tiles').innerHTML=`<div class="activity-empty">${escapeHtmlLocal(error.message)}</div>`;}
+        }
+        document.getElementById('overview-refresh')?.addEventListener('click',loadOperatorOverview);
+        document.getElementById('operator-camera-filter')?.addEventListener('change',loadOperatorRecords);
+        document.getElementById('operator-manage-people')?.addEventListener('click',()=>openOperatorSection('personnel'));
+        document.getElementById('people-back')?.addEventListener('click',()=>openOperatorSection('overview'));
+        for(const [id,mode] of [['operator-attendance-tab','attendance'],['operator-alerts-tab','alerts']]){
+            document.getElementById(id)?.addEventListener('click',()=>{operatorRecordMode=mode;document.getElementById('operator-attendance-tab').setAttribute('aria-selected',String(mode==='attendance'));document.getElementById('operator-alerts-tab').setAttribute('aria-selected',String(mode==='alerts'));loadOperatorRecords();});
+        }
+
         // System Status
         async function loadSystemStatus() {
             try {
@@ -1211,6 +1492,13 @@
                 document.getElementById('camera-count').textContent = camerasData.items.length;
 
                 document.getElementById('online-cameras').textContent = camerasData.items.filter(camera => camera.status && camera.status.online).length;
+                const overview=document.getElementById('edge-overview-cameras');
+                if(overview){
+                    overview.innerHTML=(camerasData.items||[]).length?(camerasData.items||[]).slice(0,5).map(camera=>{
+                        const online=!!camera.status?.online;
+                        return `<div style="display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)"><div><strong>${escapeHtmlLocal(camera.name||camera.camera_id)}</strong><small>${escapeHtmlLocal(camera.camera_role||'GENERAL')}</small></div><span class="${online?'status-ok':'status-error'}">● ${online?'Online':'Offline'}</span></div>`;
+                    }).join(''):'<small>No cameras configured yet.</small>';
+                }
 
                 // Load personnel count
                 const personnelResponse = await fetch(`${API_BASE}/personnel`);
@@ -1226,6 +1514,8 @@
                 document.getElementById('license-status').textContent = edgeData.license.active ? `${edgeData.license.mode} (${edgeData.license.plan})` : 'Activation required';
                 document.getElementById('license-status').className = edgeData.license.active ? 'status-ok' : 'status-error';
                 document.getElementById('machine-code').textContent = edgeData.license.machine_code;
+                const health=document.getElementById('edge-overview-health');
+                if(health) health.innerHTML=`<div style="display:grid;gap:8px"><div><strong>Cloud Sync</strong><small>${edgeData.cloud_sync_allowed?'Connected and allowed':'Not currently allowed'}</small></div><div><strong>AI Runtime</strong><small>${escapeHtmlLocal(edgeData.runtime?.inference_backend||'AUTO')} · ${escapeHtmlLocal(edgeData.runtime?.profile||'auto')}</small></div><div><strong>License</strong><small>${edgeData.license.active?'Active':'Action required'}</small></div></div>`;
 
                 await refreshUnknownAlert();
 
@@ -1297,6 +1587,440 @@
             }
         }
 
+
+        let liveAiOverlay = true;
+        let liveRefreshTimer = null;
+        let liveActivityTimer = null;
+        let liveView = 'focus';
+        let liveActivity = 'attendance';
+        let selectedLiveCameraId = null;
+        let livePreviewOpen = false;
+        let stationCandidate = null;
+        let stationBusy = false;
+        let liveCameras = [];
+        let recognizedCameraId = null;
+        let securityZones = [];
+        let securityZoneMode = 'FULL_FRAME';
+        let securityZoneVersion = 0;
+        let drawingSecurityZone = false;
+        let liveStreamRetryTimer = null;
+
+        function clearStationCandidate() {
+            stationCandidate = null;
+            const photo=document.getElementById('focus-person-photo');
+            photo.hidden=true; photo.removeAttribute('src');
+            document.getElementById('focus-person-name').textContent='Waiting for a recognized employee';
+            document.getElementById('focus-person-time').textContent='';
+            document.getElementById('focus-time-in').textContent='-';
+            document.getElementById('focus-time-out').textContent='-';
+            document.getElementById('focus-duration').textContent='-';
+            document.getElementById('station-actions').innerHTML='';
+        }
+
+        function attendanceActionLabel(action) {
+            return ({CHECK_IN:'Log In',CHECK_OUT:'Log Out',START_BREAK:'Break In',END_BREAK:'Break Out'})[action] || action;
+        }
+
+        async function submitStationAction(action) {
+            if (!stationCandidate || stationBusy || !selectedLiveCameraId) return;
+            stationBusy=true;
+            const requestId=crypto.randomUUID();
+            try {
+                const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/attendance-station/action`,{
+                    method:'POST',headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({person_id:stationCandidate.person_id,token:stationCandidate.token,action,expected_state:stationCandidate.state,request_id:requestId})
+                });
+                const body=await response.json();
+                if(!response.ok) throw new Error(body.detail||'Attendance action failed');
+                document.getElementById('focus-control-message').textContent=`${attendanceActionLabel(action)} recorded at ${new Date().toLocaleTimeString()}`;
+                await loadAttendanceStation();
+            } catch(error) {
+                document.getElementById('focus-control-message').textContent=error.message;
+            } finally { stationBusy=false; }
+        }
+
+        function restartFocusedStream() {
+            const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+            if(!camera?.status?.online || !livePreviewOpen || liveView!=='focus') return;
+            const image=document.getElementById('focus-camera-image');
+            image.removeAttribute('src');
+            image.hidden=false;
+            requestAnimationFrame(()=>{ image.src=`${liveStreamUrl(camera.camera_id)}?t=${Date.now()}`; });
+        }
+
+        async function setAttendanceActive(active) {
+            if(!selectedLiveCameraId || stationBusy) return;
+            stationBusy=true;
+            const start=document.getElementById('attendance-start'), stop=document.getElementById('attendance-stop');
+            start.disabled=true; stop.disabled=true;
+            try {
+                const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/attendance-station/${active?'start':'stop'}`,{method:'POST'});
+                const body=await response.json();
+                if(!response.ok) throw new Error(body.detail||'Attendance command failed');
+                document.getElementById('focus-control-message').textContent=active?'Attendance is active':'Attendance stopped — live video remains available';
+                if(!active) clearStationCandidate();
+                await loadLiveCameras();
+                await loadAttendanceStation();
+                // Attendance is a processing mode, not ownership of the live preview.
+                // Reconnect the MJPEG element in case the browser dropped the long-lived request.
+                restartFocusedStream();
+            } catch(error) {
+                document.getElementById('focus-control-message').textContent=error.message;
+            } finally {
+                stationBusy=false;
+                const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+                if(camera?.camera_role==='ENTRANCE_EXIT') {
+                    start.disabled=!!camera.attendance_active;
+                    stop.disabled=!camera.attendance_active;
+                }
+            }
+        }
+
+        async function loadAttendanceStation() {
+            const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+            if(!camera || camera.camera_role!=='ENTRANCE_EXIT' || !livePreviewOpen) return;
+            try {
+                const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/attendance-station`);
+                const body=await response.json();
+                if(!response.ok) throw new Error(body.detail||'Attendance station unavailable');
+                document.getElementById('attendance-start').disabled=!!body.attendance_active;
+                document.getElementById('attendance-stop').disabled=!body.attendance_active;
+                stationCandidate=body.candidate||null;
+                if(!stationCandidate){ clearStationCandidate(); document.getElementById('focus-person-name').textContent=body.attendance_active?'Person not recognized':'Attendance stopped'; }
+                else {
+                    const p=stationCandidate, photo=document.getElementById('focus-person-photo');
+                    document.getElementById('focus-person-name').textContent=`${p.full_name} · ${p.employee_code}`;
+                    document.getElementById('focus-person-time').textContent=p.role||'Employee';
+                    document.getElementById('focus-time-in').textContent=`${Math.round((p.confidence||0)*100)}% · ${new Date(p.detected_at).toLocaleTimeString()}`;
+                    document.getElementById('focus-time-out').textContent=p.state;
+                    document.getElementById('focus-duration').textContent=`Valid until ${new Date(p.expires_at).toLocaleTimeString()}`;
+                    if(p.profile_image_url){photo.src=p.profile_image_url+`?t=${Date.now()}`;photo.hidden=false;}else{photo.hidden=true;photo.removeAttribute('src');}
+                    document.getElementById('station-actions').innerHTML=(p.actions||[]).map(a=>`<button class="btn btn-primary station-action" data-action="${a}" type="button">${attendanceActionLabel(a)}</button>`).join('');
+                    document.querySelectorAll('.station-action').forEach(btn=>btn.addEventListener('click',()=>submitStationAction(btn.dataset.action)));
+                }
+                document.getElementById('station-recent').innerHTML=(body.recent||[]).slice(0,10).map(item=>`<div class="activity-row"><div><strong>${escapeHtmlLocal(item.full_name||item.person_id||'Employee')}</strong><small>${escapeHtmlLocal(item.employee_code||'')} · ${escapeHtmlLocal(item.attendance_state||'')}</small></div><time>${escapeHtmlLocal(formatDateTime(item.arrival_time))}</time></div>`).join('')||'<div class="activity-empty">No attendance records yet.</div>';
+            } catch(error) { document.getElementById('focus-control-message').textContent=error.message; }
+        }
+
+        async function loadSecurityZones() {
+            const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+            if(!camera || !['SECURITY','ENTRANCE_EXIT'].includes(camera.camera_role)) return;
+            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/detection-config`);
+            const body=await response.json(); if(!response.ok) throw new Error(body.detail||'Unable to load detection zones');
+            securityZones=body.zones||[]; securityZoneMode=body.mode||'FULL_FRAME'; securityZoneVersion=body.version||0;
+            document.getElementById('security-zone-mode').value=securityZoneMode;
+            document.getElementById('security-zone-status').textContent=`Effective: ${body.effective_mode||securityZoneMode} · ${body.sync_status||'LOCAL'}${body.local_override?' · local override':''}`;
+            renderSecurityZones();
+        }
+        async function persistSecurityZone(zone) {
+            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones/${encodeURIComponent(zone.id)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(zone)});
+            const body=await response.json();
+            if(!response.ok) throw new Error(body.detail||'Unable to save zone');
+            document.getElementById('security-zone-message').textContent='Zone saved locally.';
+            return body;
+        }
+        function zoneContentRect() {
+            const layer=document.getElementById('security-zone-layer'),image=document.getElementById('focus-camera-image');
+            const r=layer.getBoundingClientRect(),nw=image.naturalWidth||16,nh=image.naturalHeight||9,scale=Math.min(r.width/nw,r.height/nh),w=nw*scale,h=nh*scale;
+            return {x:(r.width-w)/2,y:(r.height-h)/2,w,h,layer:r};
+        }
+        function zonePoint(clientX,clientY) {
+            const c=zoneContentRect(),rx=(clientX-c.layer.left-c.x)/c.w,ry=(clientY-c.layer.top-c.y)/c.h,x=Math.max(0,Math.min(1,rx)),y=Math.max(0,Math.min(1,ry));
+            return {x,y,inside:rx>=0&&rx<=1&&ry>=0&&ry<=1,px:c.x+x*c.w,py:c.y+y*c.h,content:c};
+        }
+        async function persistDetectionConfig(mode,zones) {
+            const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/detection-config`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,zones,expected_version:securityZoneVersion})});
+            const body=await response.json(); if(!response.ok) throw new Error(body.detail||'Unable to save detection configuration');
+            securityZoneMode=body.mode;securityZoneVersion=body.version;securityZones=body.zones||[];renderSecurityZones();
+            document.getElementById('security-zone-message').textContent='Detection configuration saved.';await loadSecurityZones();
+        }
+        function renderSecurityZones() {
+            const layer=document.getElementById('security-zone-layer');
+            const c=zoneContentRect();layer.innerHTML=securityZoneMode==='FULL_FRAME'?`<div class="security-zone-box" style="left:${c.x}px;top:${c.y}px;width:${c.w}px;height:${c.h}px;pointer-events:none"><span>Full Frame</span></div>`:securityZones.map(z=>`<div class="security-zone-box" data-zone-id="${escapeHtmlLocal(z.id)}" style="left:${c.x+z.x*c.w}px;top:${c.y+z.y*c.h}px;width:${z.width*c.w}px;height:${z.height*c.h}px;opacity:${z.enabled?1:.45}"><span>${escapeHtmlLocal(z.name)}${z.enabled?'':' (disabled)'}</span><i class="security-zone-resize" title="Resize"></i></div>`).join('');
+            document.getElementById('security-add-zone').disabled=securityZoneMode!=='CUSTOM_ZONES';
+            document.getElementById('security-zone-list').innerHTML=securityZoneMode==='FULL_FRAME'?'<div class="activity-empty">The entire camera frame is monitored.</div>':securityZones.map(z=>`<div class="activity-row"><strong>${escapeHtmlLocal(z.name)}</strong><label><input type="checkbox" class="security-zone-enabled" data-zone-id="${escapeHtmlLocal(z.id)}" ${z.enabled?'checked':''}> Enabled</label><button class="btn btn-danger security-zone-delete" data-zone-id="${escapeHtmlLocal(z.id)}">Delete</button></div>`).join('')||'<div class="activity-empty">No custom zones: detection is disabled until you add one.</div>';
+            document.querySelectorAll('.security-zone-enabled').forEach(btn=>btn.addEventListener('change',async()=>{const z=securityZones.find(item=>item.id===btn.dataset.zoneId);if(z){z.enabled=btn.checked;try{await persistSecurityZone(z);}catch(error){document.getElementById('security-zone-message').textContent=error.message;await loadSecurityZones();}}}));
+            document.querySelectorAll('.security-zone-delete').forEach(btn=>btn.addEventListener('click',async()=>{const response=await fetch(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/security-zones/${encodeURIComponent(btn.dataset.zoneId)}`,{method:'DELETE'});if(!response.ok){document.getElementById('security-zone-message').textContent='Unable to delete zone.';return;}await loadSecurityZones();}));
+            layer.querySelectorAll('.security-zone-box').forEach(box=>{
+                const zone=securityZones.find(z=>z.id===box.dataset.zoneId); if(!zone)return;
+                box.addEventListener('pointerdown',ev=>{
+                    if(ev.target.classList.contains('security-zone-resize'))return;
+                    ev.preventDefault(); const start=zonePoint(ev.clientX,ev.clientY),sx=ev.clientX,sy=ev.clientY,ox=zone.x,oy=zone.y;
+                    const move=e=>{const p=zonePoint(e.clientX,e.clientY);zone.x=Math.max(0,Math.min(1-zone.width,ox+(e.clientX-sx)/start.content.w));zone.y=Math.max(0,Math.min(1-zone.height,oy+(e.clientY-sy)/start.content.h));box.style.left=(start.content.x+zone.x*start.content.w)+'px';box.style.top=(start.content.y+zone.y*start.content.h)+'px';};
+                    const up=async()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);try{await persistSecurityZone(zone);}catch(error){document.getElementById('security-zone-message').textContent=error.message;}};
+                    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
+                });
+                box.querySelector('.security-zone-resize').addEventListener('pointerdown',ev=>{
+                    ev.stopPropagation();ev.preventDefault();const c=zoneContentRect(),sx=ev.clientX,sy=ev.clientY,ow=zone.width,oh=zone.height;
+                    const move=e=>{zone.width=Math.max(.02,Math.min(1-zone.x,ow+(e.clientX-sx)/c.w));zone.height=Math.max(.02,Math.min(1-zone.y,oh+(e.clientY-sy)/c.h));box.style.width=(zone.width*c.w)+'px';box.style.height=(zone.height*c.h)+'px';};
+                    const up=async()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);try{await persistSecurityZone(zone);}catch(error){document.getElementById('security-zone-message').textContent=error.message;}};
+                    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
+                });
+            });
+        }
+        async function beginSecurityZoneDraw() {
+            const layer=document.getElementById('security-zone-layer');
+            if(!selectedLiveCameraId || layer.hidden) return;
+            drawingSecurityZone=true; document.getElementById('security-zone-message').textContent='Drag a rectangle over the camera image.';
+            const down=ev=>{
+                if(!drawingSecurityZone)return;
+                const sp=zonePoint(ev.clientX,ev.clientY);if(!sp.inside){document.getElementById('security-zone-message').textContent='Start drawing inside the visible camera image.';drawingSecurityZone=false;return;}const sx=sp.x,sy=sp.y,draft=document.createElement('div');draft.className='security-zone-box';draft.style.left=sp.px+'px';draft.style.top=sp.py+'px';layer.appendChild(draft);
+                const move=e=>{const p=zonePoint(e.clientX,e.clientY),x=Math.min(sx,p.x),y=Math.min(sy,p.y),w=Math.abs(p.x-sx),h=Math.abs(p.y-sy);draft.style.left=(sp.content.x+x*sp.content.w)+'px';draft.style.top=(sp.content.y+y*sp.content.h)+'px';draft.style.width=(w*sp.content.w)+'px';draft.style.height=(h*sp.content.h)+'px';};
+                const up=async e=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);drawingSecurityZone=false;const ep=zonePoint(e.clientX,e.clientY),zone={id:crypto.randomUUID(),name:prompt('Zone name','Detection Zone')||'Detection Zone',x:Math.min(sx,ep.x),y:Math.min(sy,ep.y),width:Math.abs(ep.x-sx),height:Math.abs(ep.y-sy),enabled:true};draft.remove();if(zone.width<0.02||zone.height<0.02){document.getElementById('security-zone-message').textContent='Zone was too small.';return;}try{await persistSecurityZone(zone);await loadSecurityZones();}catch(error){document.getElementById('security-zone-message').textContent=error.message;}};
+                window.addEventListener('pointermove',move);window.addEventListener('pointerup',up,{once:true});
+            };
+            layer.addEventListener('pointerdown',down,{once:true});
+        }
+
+        function liveStreamUrl(cameraId) {
+            const endpoint = liveAiOverlay ? 'tracking-stream' : 'stream';
+            return `${API_BASE}/cameras/${encodeURIComponent(cameraId)}/${endpoint}`;
+        }
+        function renderFocusedCamera() {
+            const camera = liveCameras.find(item => item.camera_id === selectedLiveCameraId);
+            const online = !!camera?.status?.online;
+            const entrance = camera?.camera_role === 'ENTRANCE_EXIT';
+            const security = camera?.camera_role === 'SECURITY';
+            document.getElementById('focus-purpose').textContent = entrance ? 'Attendance Station' : security ? 'Security Monitor' : 'Camera workspace';
+            document.getElementById('station-panel').hidden = !entrance;
+            const unknownDetectionEnabled = !!camera?.features?.unknown_detection || !!camera?.features?.unknown_person_detection;
+            const unknownZoneRole = security || entrance;
+            document.getElementById('security-panel').hidden = !security && !(entrance && unknownDetectionEnabled);
+            document.getElementById('security-zone-layer').hidden = !unknownZoneRole || !unknownDetectionEnabled || !livePreviewOpen;
+            for (const id of ['focus-camera-start','focus-camera-stop']) document.getElementById(id).hidden = entrance;
+            if (entrance && livePreviewOpen) loadAttendanceStation();
+            if (unknownZoneRole && unknownDetectionEnabled && livePreviewOpen) loadSecurityZones();
+            if (security && livePreviewOpen) fetch(`${API_BASE}/safety/capabilities`).then(r=>r.json()).then(s=>{document.getElementById('safety-capability').textContent=`Fire: ${s.fire.available?'Available':s.fire.reason}; Smoke: ${s.smoke.available?'Available':s.smoke.reason}`;}).catch(()=>{});
+            if (!entrance || !livePreviewOpen) clearStationCandidate();
+            const image = document.getElementById('focus-camera-image');
+            const placeholder = document.getElementById('focus-camera-placeholder');
+            const placeholderText = document.getElementById('focus-camera-placeholder-text');
+            const openLiveButton = document.getElementById('focus-open-live-btn');
+            document.getElementById('focus-camera-name').textContent = camera?.name || 'Select a camera';
+            const status = document.getElementById('focus-camera-status');
+            status.textContent = online ? 'LIVE' : 'OFFLINE';
+            status.className = `live-status ${online ? 'online' : 'offline'}`;
+            document.getElementById('focus-camera-role').textContent = camera?.camera_role || '-';
+            document.getElementById('focus-camera-zone').textContent = camera?.camera_zone || '-';
+            document.getElementById('focus-camera-monitoring').textContent = camera ? (camera.enabled === false ? 'Stopped' : 'Enabled') : '-';
+            const features = Object.entries(camera?.features || {}).filter(([, enabled]) => enabled).map(([name]) => name.replaceAll('_', ' '));
+            document.getElementById('focus-camera-features').textContent = features.length ? features.join(', ') : '-';
+            document.getElementById('focus-camera-settings').disabled = !camera;
+            document.getElementById('focus-camera-fullscreen').disabled = !online;
+            document.getElementById('focus-camera-capture').disabled = !online;
+            document.getElementById('focus-camera-start').disabled = !camera || camera.enabled !== false;
+            document.getElementById('focus-camera-stop').disabled = !camera || camera.enabled === false;
+            if (recognizedCameraId !== selectedLiveCameraId) {
+                recognizedCameraId = selectedLiveCameraId;
+                document.getElementById('focus-person-name').textContent = 'No recognition yet';
+                document.getElementById('focus-person-time').textContent = '';
+                document.getElementById('focus-time-in').textContent = '-';
+                document.getElementById('focus-time-out').textContent = '-';
+                document.getElementById('focus-duration').textContent = '-';
+                document.getElementById('focus-person-photo').hidden = true;
+                document.getElementById('focus-person-photo').removeAttribute('src');
+                document.getElementById('focus-control-message').textContent = '';
+            }
+            image.hidden = !online || !livePreviewOpen || liveView !== 'focus';
+            placeholder.hidden = online && livePreviewOpen && liveView === 'focus';
+            if (!online || !livePreviewOpen || liveView !== 'focus') {
+                image.removeAttribute('src');
+                placeholderText.textContent = camera?.status?.last_error || (camera ? 'Live preview is closed' : 'Select a camera');
+                openLiveButton.hidden = !online || !camera;
+            } else {
+                openLiveButton.hidden = true;
+                const url = liveStreamUrl(camera.camera_id);
+                if (!image.getAttribute('src')?.startsWith(url)) image.src = url;
+            }
+            document.getElementById('focus-camera-list').innerHTML = liveCameras.length
+                ? liveCameras.map(item => `<button type="button" data-camera-id="${escapeHtmlLocal(item.camera_id)}" aria-current="${item.camera_id === selectedLiveCameraId}"><strong>${escapeHtmlLocal(item.name || item.camera_id)}</strong><small>${item.status?.online ? 'Live' : 'Offline'} · ${escapeHtmlLocal(item.camera_role || 'General')} · AI ${item.enabled === false ? 'Stopped' : 'Monitoring'}</small><span>Open Live View</span></button>`).join('')
+                : '<div class="activity-empty">No cameras configured</div>';
+            document.querySelectorAll('#focus-camera-list button').forEach(button => button.addEventListener('click', () => {
+                document.getElementById('focus-camera-image').removeAttribute('src');
+                selectedLiveCameraId = button.dataset.cameraId;
+                livePreviewOpen = true;
+                clearStationCandidate();
+                renderFocusedCamera();
+                loadLiveActivity();
+            }));
+        }
+        function renderCameraWall() {
+            const grid = document.getElementById('live-camera-grid');
+            if (liveView !== 'wall') {
+                grid.innerHTML = '';
+                return;
+            }
+            const signature = JSON.stringify(liveCameras.map(c => [c.camera_id,c.name,c.camera_role,!!c.status?.online,liveAiOverlay]));
+            if (grid.dataset.signature === signature && grid.querySelector('.live-tile')) return;
+            grid.dataset.signature = signature;
+            if (!liveCameras.length) {
+                grid.innerHTML = '<div class="camera-wall-empty">No cameras configured yet. Open Camera Setup to add your first camera.</div>';
+                return;
+            }
+            grid.innerHTML = liveCameras.map(camera => {
+                const isOnline = !!camera.status?.online;
+                return `<article class="live-tile" data-camera-id="${escapeHtmlLocal(camera.camera_id)}">
+                    <div class="live-tile-head"><strong>${escapeHtmlLocal(camera.name || camera.camera_id)}</strong><span class="live-status ${isOnline?'online':'offline'}">${isOnline?'LIVE':'OFFLINE'}</span></div>
+                    ${isOnline ? `<img src="${liveStreamUrl(camera.camera_id)}" alt="${escapeHtmlLocal(camera.name || camera.camera_id)} live camera">` : '<div class="focus-placeholder">Camera offline</div>'}
+                    <div class="live-tile-foot"><small>${escapeHtmlLocal(camera.camera_role || 'GENERAL')}</small><button class="btn btn-secondary live-fullscreen" type="button" ${isOnline?'':'disabled'}>Full Screen</button></div>
+                </article>`;
+            }).join('');
+            grid.querySelectorAll('.live-fullscreen').forEach(button => button.addEventListener('click', () => {
+                const tile = button.closest('.live-tile');
+                if (tile?.requestFullscreen) tile.requestFullscreen();
+            }));
+        }
+        async function loadLiveCameras() {
+            try {
+                const response = await fetch(`${API_BASE}/cameras`);
+                if (!response.ok) throw new Error('Camera status unavailable');
+                const data = await response.json();
+                if (!sections.live.classList.contains('active')) return;
+                liveCameras = data.items || [];
+                if (!liveRefreshTimer) liveRefreshTimer = setInterval(loadLiveCameras, 5000);
+                const firstActivityLoad = !liveActivityTimer;
+                if (!liveActivityTimer) {
+                    liveActivityTimer = setInterval(loadLiveActivity, 2000);
+                }
+                if (!liveCameras.some(item => item.camera_id === selectedLiveCameraId)) {
+                    selectedLiveCameraId = null;
+                    livePreviewOpen = false;
+                }
+                const online = liveCameras.filter(camera => camera.status?.online).length;
+                document.getElementById('live-camera-summary').textContent = `${liveCameras.length} cameras · ${online} online`;
+                renderFocusedCamera();
+                renderCameraWall();
+                if (firstActivityLoad) loadLiveActivity();
+            } catch (error) {
+                document.getElementById('live-camera-summary').textContent = `Unable to load cameras: ${error.message}`;
+            }
+        }
+        async function loadLiveActivity() {
+            if (!sections.live.classList.contains('active')) return;
+            const list = document.getElementById('live-activity-list');
+            try {
+                const endpoints = liveActivity === 'attendance' ? ['attendance?limit=50'] : ['security-alerts?limit=50', 'unknown-incidents?limit=50'];
+                const responses = await Promise.all(endpoints.map(endpoint => fetch(`${API_BASE}/${endpoint}`)));
+                if (responses.some(response => !response.ok)) throw new Error('Recent activity unavailable');
+                const bodies = await Promise.all(responses.map(response => response.json()));
+                let records = bodies.flatMap((body, index) => (body.items || []).map(item => ({...item, kind:endpoints[index]})));
+                if (liveView === 'focus') records = records.filter(item => (item.camera_id || item.arrival_camera) === selectedLiveCameraId || item.exit_camera === selectedLiveCameraId);
+                if (liveActivity === 'attendance' && liveView === 'focus') await loadAttendanceStation();
+                records.sort((a,b) => new Date(b.arrival_time || b.event_time || b.confirmed_unknown_at || b.first_seen || b.detected_at || b.created_at || 0) - new Date(a.arrival_time || a.event_time || a.confirmed_unknown_at || a.first_seen || a.detected_at || a.created_at || 0));
+                records = records.slice(0, 12);
+                list.innerHTML = records.length ? records.map(item => {
+                    const label = liveActivity === 'attendance' ? `${item.full_name || item.person_id || 'Unidentified person'} · ${item.exit_time ? 'Exited' : 'Present'}` : `${item.object_label || (item.kind === 'unknown-incidents' ? 'Unknown person' : 'Security alert')} · ${item.status || 'Open'}`;
+                    const stamp = item.arrival_time || item.event_time || item.confirmed_unknown_at || item.first_seen || item.detected_at || item.created_at;
+                    const time = stamp && !Number.isNaN(new Date(stamp).getTime()) ? new Date(stamp).toLocaleString() : '-';
+                    return `<div class="activity-row"><div><strong>${escapeHtmlLocal(label)}</strong><small>${escapeHtmlLocal(item.camera_id || '-')}</small></div><time>${escapeHtmlLocal(time)}</time></div>`;
+                }).join('') : `<div class="activity-empty">No ${liveActivity === 'attendance' ? 'attendance events' : 'alerts'} for ${liveView === 'focus' ? 'this camera' : 'these cameras'} yet.</div>`;
+            } catch (error) {
+                list.innerHTML = `<div class="activity-empty">${escapeHtmlLocal(error.message)}</div>`;
+            }
+        }
+        function switchLiveView(view) {
+            document.querySelectorAll('#live-camera-grid img, #focus-camera-image').forEach(img => img.removeAttribute('src'));
+            liveView = view;
+            document.getElementById('live-focus-view').hidden = view !== 'focus';
+            document.getElementById('live-wall-view').hidden = view !== 'wall';
+            document.getElementById('live-layout-controls').hidden = view !== 'wall';
+            document.getElementById('live-focus-tab').setAttribute('aria-selected', String(view === 'focus'));
+            document.getElementById('live-wall-tab').setAttribute('aria-selected', String(view === 'wall'));
+            renderFocusedCamera();
+            renderCameraWall();
+            loadLiveActivity();
+        }
+        function escapeHtmlLocal(value) {
+            const node=document.createElement('div'); node.textContent=String(value ?? ''); return node.innerHTML.replaceAll('"','&quot;').replaceAll("'",'&#39;');
+        }
+        document.getElementById('overview-open-live')?.addEventListener('click', () => {
+            const link=document.querySelector('nav a[data-section="live"]'); if(link) link.click();
+        });
+        document.getElementById('live-refresh-btn')?.addEventListener('click', loadLiveCameras);
+        document.getElementById('focus-open-live-btn')?.addEventListener('click', () => {
+            if(!selectedLiveCameraId) return;
+            livePreviewOpen=true;
+            renderFocusedCamera();
+            restartFocusedStream();
+            loadLiveActivity();
+        });
+        document.getElementById('close-live-view')?.addEventListener('click', () => {
+            livePreviewOpen=false;
+            clearTimeout(liveStreamRetryTimer);
+            liveStreamRetryTimer=null;
+            document.getElementById('focus-camera-image').removeAttribute('src');
+            renderFocusedCamera();
+        });
+        document.getElementById('focus-camera-image')?.addEventListener('error', () => {
+            const camera=liveCameras.find(item=>item.camera_id===selectedLiveCameraId);
+            if(!camera?.status?.online || !livePreviewOpen || liveView!=='focus') return;
+            const placeholder=document.getElementById('focus-camera-placeholder');
+            const placeholderText=document.getElementById('focus-camera-placeholder-text');
+            placeholder.hidden=false;
+            placeholderText.textContent='Live stream interrupted — reconnecting…';
+            document.getElementById('focus-open-live-btn').hidden=false;
+            clearTimeout(liveStreamRetryTimer);
+            liveStreamRetryTimer=setTimeout(restartFocusedStream, 1500);
+        });
+        document.getElementById('live-overlay-btn')?.addEventListener('click', event => {
+            liveAiOverlay=!liveAiOverlay;
+            event.currentTarget.textContent=`AI Overlay: ${liveAiOverlay?'On':'Off'}`;
+            renderFocusedCamera();
+            renderCameraWall();
+        });
+        document.getElementById('live-focus-tab').addEventListener('click', () => switchLiveView('focus'));
+        document.getElementById('live-wall-tab').addEventListener('click', () => switchLiveView('wall'));
+        document.getElementById('focus-camera-fullscreen').addEventListener('click', () => document.querySelector('.focus-stage')?.requestFullscreen?.());
+        document.getElementById('focus-camera-settings').addEventListener('click', () => {
+            const camera = liveCameras.find(item => item.camera_id === selectedLiveCameraId);
+            if (!camera) return;
+            document.querySelector('nav a[data-section="cameras"]').click();
+            editCamera(camera);
+        });
+        async function setFocusedMonitoring(action) {
+            const cameraId = selectedLiveCameraId;
+            if (!cameraId) return;
+            const message = document.getElementById('focus-control-message');
+            message.textContent = action === 'start' ? 'Starting camera...' : 'Stopping camera...';
+            try {
+                const response = await fetch(`${API_BASE}/cameras/${encodeURIComponent(cameraId)}/${action}`, {method:'POST'});
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.detail || 'Camera command failed');
+                message.textContent = action === 'start' ? (result.diagnostics?.success ? 'Camera started' : (result.diagnostics?.message || 'Camera is reconnecting')) : 'Camera stopped';
+                await loadLiveCameras();
+            } catch (error) {
+                message.textContent = error.message;
+            }
+        }
+        document.getElementById('attendance-start').addEventListener('click', () => setAttendanceActive(true));
+        document.getElementById('attendance-stop').addEventListener('click', () => setAttendanceActive(false));
+        document.getElementById('security-add-zone').addEventListener('click', beginSecurityZoneDraw);
+        document.getElementById('security-refresh-zones').addEventListener('click', loadSecurityZones);
+        document.getElementById('security-zone-mode').addEventListener('change', async event=>{
+            const mode=event.target.value;
+            try{await persistDetectionConfig(mode,mode==='CUSTOM_ZONES'?securityZones:[]);}
+            catch(error){document.getElementById('security-zone-message').textContent=error.message;event.target.value=securityZoneMode;}
+        });
+        document.getElementById('focus-camera-image').addEventListener('load',()=>{if(selectedLiveCameraId)renderSecurityZones();});
+        window.addEventListener('resize',()=>{if(selectedLiveCameraId&&livePreviewOpen)renderSecurityZones();});
+        document.getElementById('focus-camera-start').addEventListener('click', () => setFocusedMonitoring('start'));
+        document.getElementById('focus-camera-stop').addEventListener('click', () => setFocusedMonitoring('stop'));
+        document.getElementById('focus-camera-capture').addEventListener('click', () => {
+            if (selectedLiveCameraId) window.open(`${API_BASE}/cameras/${encodeURIComponent(selectedLiveCameraId)}/snapshot?t=${Date.now()}`, '_blank', 'noopener');
+        });
+        for (const [tab, activity] of [['live-attendance-tab','attendance'],['live-alerts-tab','alerts']]) {
+            document.getElementById(tab).addEventListener('click', () => {
+                liveActivity = activity;
+                document.getElementById('live-attendance-tab').setAttribute('aria-selected', String(activity === 'attendance'));
+                document.getElementById('live-alerts-tab').setAttribute('aria-selected', String(activity === 'alerts'));
+                loadLiveActivity();
+            });
+        }
+        document.querySelectorAll('.live-layout-btn').forEach(button => button.addEventListener('click', () => {
+            const grid=document.getElementById('live-camera-grid');
+            grid.className='live-grid'+(button.dataset.layout==='single'?' single':button.dataset.layout==='dense'?' dense':'');
+        }));
+
         // Camera Management
         async function loadCameras() {
             try {
@@ -1321,11 +2045,12 @@
                     cameraName.textContent = camera.name;
 
                     const cameraDetails = document.createElement('p');
-                    cameraDetails.textContent = `${camera.camera_id} | ${camera.camera_role} | ${camera.camera_zone || 'inside'} | crowd>${camera.crowd_threshold || 10} | ${camera.tracking_mode || 'detect'} ${camera.tracking_fps || 3}fps ${camera.tracking_imgsz || 384}px q${camera.tracking_quality || 65}`;
+                    cameraDetails.className = 'camera-meta';
+                    cameraDetails.textContent = `${camera.camera_id} · ${camera.camera_role} · ${camera.camera_zone || 'inside'}`;
 
                     const cameraUrl = document.createElement('p');
-                    cameraUrl.textContent = camera.rtsp_url;
-                    cameraUrl.style.fontFamily = 'monospace';
+                    cameraUrl.textContent = 'Camera source stored securely';
+                    cameraUrl.className = 'camera-meta';
                     cameraUrl.style.fontSize = '12px';
                     cameraUrl.style.color = '#666';
 
@@ -1348,49 +2073,38 @@
                     const startBtn = document.createElement('button');
                     startBtn.className = 'btn btn-success';
                     startBtn.textContent = 'START';
+                    startBtn.disabled = camera.enabled !== false;
                     startBtn.addEventListener('click', () => startCamera(camera.camera_id));
 
                     const stopBtn = document.createElement('button');
                     stopBtn.className = 'btn btn-danger';
                     stopBtn.textContent = 'STOP';
+                    stopBtn.disabled = camera.enabled === false;
                     stopBtn.addEventListener('click', () => stopCamera(camera.camera_id));
 
-                    const snapshotBtn = document.createElement('button');
-                    snapshotBtn.className = 'btn btn-secondary';
-                    snapshotBtn.textContent = 'SNAPSHOT';
-                    snapshotBtn.addEventListener('click', () => {
-                        window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/snapshot?t=${Date.now()}`, '_blank');
-                    });
-
-                    const streamBtn = document.createElement('button');
-                    streamBtn.className = 'btn btn-primary';
-                    streamBtn.textContent = 'LIVE';
-                    streamBtn.addEventListener('click', () => {
-                        window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/stream`, '_blank');
-                    });
-
-                    const trackingBtn = document.createElement('button');
-                    trackingBtn.className = 'btn btn-primary';
-                    trackingBtn.textContent = 'TRACKING';
-                    trackingBtn.addEventListener('click', () => {
-                        window.open(`${API_BASE}/cameras/${encodeURIComponent(camera.camera_id)}/tracking-stream`, '_blank');
+                    const liveBtn = document.createElement('button');
+                    liveBtn.className = 'btn btn-primary';
+                    liveBtn.textContent = 'Live';
+                    liveBtn.addEventListener('click', () => {
+                        selectedLiveCameraId = camera.camera_id;
+                        switchLiveView('focus');
+                        document.querySelector('nav a[data-section="live"]').click();
                     });
 
                     const editBtn = document.createElement('button');
                     editBtn.className = 'btn btn-secondary';
-                    editBtn.textContent = 'EDIT';
+                    editBtn.textContent = 'Settings';
                     editBtn.addEventListener('click', () => editCamera(camera));
 
                     const deleteBtn = document.createElement('button');
                     deleteBtn.className = 'btn btn-danger';
-                    deleteBtn.textContent = 'DELETE';
+                    deleteBtn.textContent = 'Delete';
+                    deleteBtn.classList.add('danger-menu');
                     deleteBtn.addEventListener('click', () => deleteCamera(camera.camera_id));
 
                     cameraActions.appendChild(startBtn);
                     cameraActions.appendChild(stopBtn);
-                    cameraActions.appendChild(snapshotBtn);
-                    cameraActions.appendChild(streamBtn);
-                    cameraActions.appendChild(trackingBtn);
+                    cameraActions.appendChild(liveBtn);
                     cameraActions.appendChild(editBtn);
                     cameraActions.appendChild(deleteBtn);
 
@@ -1410,6 +2124,9 @@
             editingCameraId = null;
             document.getElementById('camera-setup-form').reset();
             document.getElementById('camera-id').disabled = false;
+            // Camera ID is intentionally hidden from operators. Generate it here
+            // instead of relying on browser validation for an invisible required field.
+            document.getElementById('camera-id').value = 'camera-' + crypto.randomUUID();
             document.getElementById('test-result').innerHTML = '';
             document.getElementById('preview-container').style.display = 'none';
             document.getElementById('camera-form').style.display = 'block';
@@ -1445,7 +2162,7 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ rtsp_url: rtspUrl })
+                    body: JSON.stringify({ rtsp_url: rtspUrl, camera_id: editingCameraId || undefined })
                 });
 
                 const result = await response.json();
@@ -1466,7 +2183,12 @@
 
                     // Show preview container
                     document.getElementById('preview-container').style.display = 'block';
-                    document.getElementById('camera-preview').src = `${API_BASE}/cameras/test/snapshot?url=` + encodeURIComponent(rtspUrl) + '&t=' + Date.now();
+                    const previewResponse = await fetch(`${API_BASE}/cameras/test/snapshot`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rtsp_url:rtspUrl,camera_id:editingCameraId||undefined})});
+                    if (previewResponse.ok) {
+                        const preview=document.getElementById('camera-preview');
+                        if(preview.src.startsWith('blob:'))URL.revokeObjectURL(preview.src);
+                        preview.src=URL.createObjectURL(await previewResponse.blob());
+                    }
                 } else {
                     testResult.className = 'test-result test-failure';
                     const attempts = (result.attempts || [])
@@ -1474,7 +2196,7 @@
                         .join('<br>');
                     testResult.innerHTML = `
                         <strong>Connection Failed:</strong> ${result.message}<br>
-                        Source: ${result.source || rtspUrl}
+                        Source: ${escapeHtmlLocal(result.source || 'Camera source hidden')}
                         ${attempts ? '<br><br>' + attempts : ''}
                     `;
                     document.getElementById('preview-container').style.display = 'none';
@@ -1489,31 +2211,81 @@
             }
         });
 
+        function syncCameraRoleFeatures() {
+            const role=document.getElementById('camera-role').value;
+            const show=(id,visible)=>{document.getElementById(id).hidden=!visible;};
+            const set=(id,value)=>{document.getElementById(id).checked=value;};
+
+            // A camera profile owns its relevant feature set. Do not make operators
+            // reason about security features while configuring attendance.
+            if(role==='ENTRANCE_EXIT'){
+                set('feature-attendance',true);
+                set('feature-face-recognition',true);
+                set('feature-shoplifting',false);
+                set('feature-object-security',false);
+                show('feature-row-attendance',true);
+                show('feature-row-face-recognition',true);
+                show('feature-row-unknown-detection',true);
+                show('feature-row-shoplifting',false);
+                show('feature-row-object-security',false);
+            } else if(role==='SECURITY'){
+                set('feature-attendance',false);
+                set('feature-shoplifting',false);
+                show('feature-row-attendance',false);
+                show('feature-row-face-recognition',true);
+                show('feature-row-unknown-detection',true);
+                show('feature-row-shoplifting',false);
+                show('feature-row-object-security',true);
+            } else if(role==='SHOPLIFTING'){
+                set('feature-attendance',false);
+                set('feature-unknown-detection',false);
+                set('feature-shoplifting',true);
+                show('feature-row-attendance',false);
+                show('feature-row-face-recognition',true);
+                show('feature-row-unknown-detection',false);
+                show('feature-row-shoplifting',true);
+                show('feature-row-object-security',true);
+            } else {
+                set('feature-attendance',false);
+                set('feature-unknown-detection',false);
+                set('feature-shoplifting',false);
+                set('feature-object-security',false);
+                show('feature-row-attendance',false);
+                show('feature-row-face-recognition',true);
+                show('feature-row-unknown-detection',false);
+                show('feature-row-shoplifting',false);
+                show('feature-row-object-security',false);
+            }
+        }
+        document.getElementById('camera-role').addEventListener('change',syncCameraRoleFeatures);
+
         // Save Camera
         document.getElementById('camera-setup-form').addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const cameraData = {
-                camera_id: document.getElementById('camera-id').value.trim(),
+                camera_id: document.getElementById('camera-id').value.trim() || ('camera-' + crypto.randomUUID()),
                 name: document.getElementById('camera-name').value.trim(),
-                source_type: /^\d+$/.test(document.getElementById('rtsp-url').value.trim()) ? 'webcam' : 'rtsp',
+                source_type: editingCameraId && document.getElementById('rtsp-url').value === document.getElementById('rtsp-url').dataset.storedSource ? document.getElementById('rtsp-url').dataset.sourceType : (/^\d+$/.test(document.getElementById('rtsp-url').value.trim()) ? 'webcam' : 'rtsp'),
                 rtsp_url: document.getElementById('rtsp-url').value.trim(),
-                enabled: true,
+                enabled: !editingCameraId || document.getElementById('camera-id').dataset.enabled !== 'false',
                 camera_role: document.getElementById('camera-role').value,
                 camera_zone: document.getElementById('camera-zone').value,
                 crowd_threshold: Number(document.getElementById('crowd-threshold').value || 10),
                 tracking_fps: Number(document.getElementById('tracking-fps').value || 3),
                 tracking_imgsz: Number(document.getElementById('tracking-imgsz').value || 384),
                 tracking_quality: Number(document.getElementById('tracking-quality').value || 65),
+                rotation_degrees: Number(document.getElementById('camera-rotation').value),
                 tracking_mode: document.getElementById('tracking-mode').value,
+                attendance_active: document.getElementById('camera-role').value === 'ENTRANCE_EXIT' && (editingCameraId ? document.getElementById('camera-id').dataset.attendanceActive !== 'false' : true),
                 features: {
-                    attendance: document.getElementById('feature-attendance').checked,
-                    face_recognition: document.getElementById('feature-face-recognition').checked,
-                    unknown_detection: document.getElementById('feature-unknown-detection').checked,
-                    unknown_person_detection: document.getElementById('feature-unknown-detection').checked,
-                    shoplifting: document.getElementById('feature-shoplifting').checked,
-                    shoplifting_detection: document.getElementById('feature-shoplifting').checked,
-                    object_security: document.getElementById('feature-object-security').checked
+                    attendance: document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
+                    face_recognition: document.getElementById('feature-face-recognition').checked || document.getElementById('camera-role').value === 'ENTRANCE_EXIT',
+                    unknown_detection: ['SECURITY','ENTRANCE_EXIT'].includes(document.getElementById('camera-role').value) && document.getElementById('feature-unknown-detection').checked,
+                    unknown_person_detection: ['SECURITY','ENTRANCE_EXIT'].includes(document.getElementById('camera-role').value) && document.getElementById('feature-unknown-detection').checked,
+                    shoplifting: document.getElementById('camera-role').value === 'SHOPLIFTING' && document.getElementById('feature-shoplifting').checked,
+                    shoplifting_detection: document.getElementById('camera-role').value === 'SHOPLIFTING' && document.getElementById('feature-shoplifting').checked,
+                    object_security: ['SECURITY','SHOPLIFTING'].includes(document.getElementById('camera-role').value) && document.getElementById('feature-object-security').checked
                 }
             };
 
@@ -1539,6 +2311,8 @@
                         tracking_fps: cameraData.tracking_fps,
                         tracking_imgsz: cameraData.tracking_imgsz,
                         tracking_quality: cameraData.tracking_quality,
+                        rotation_degrees: cameraData.rotation_degrees,
+                        attendance_active: cameraData.attendance_active,
                         tracking_mode: cameraData.tracking_mode,
                         features: cameraData.features
                     } : cameraData)
@@ -1595,18 +2369,24 @@
                 document.getElementById('camera-id').disabled = true;
                 document.getElementById('camera-name').value = fullCamera.name || '';
                 document.getElementById('rtsp-url').value = fullCamera.rtsp_url || '';
+                document.getElementById('rtsp-url').dataset.storedSource = fullCamera.rtsp_url || '';
+                document.getElementById('rtsp-url').dataset.sourceType = fullCamera.source_type || 'rtsp';
+                document.getElementById('camera-id').dataset.enabled = String(fullCamera.enabled !== false);
+                document.getElementById('camera-id').dataset.attendanceActive = String(fullCamera.attendance_active !== false);
                 document.getElementById('camera-role').value = fullCamera.camera_role || 'GENERAL';
                 document.getElementById('camera-zone').value = fullCamera.camera_zone || 'inside';
                 document.getElementById('crowd-threshold').value = fullCamera.crowd_threshold || 10;
                 document.getElementById('tracking-fps').value = fullCamera.tracking_fps || 3;
                 document.getElementById('tracking-imgsz').value = fullCamera.tracking_imgsz || 384;
                 document.getElementById('tracking-quality').value = fullCamera.tracking_quality || 65;
+                document.getElementById('camera-rotation').value = String(fullCamera.rotation_degrees || 0);
                 document.getElementById('tracking-mode').value = fullCamera.tracking_mode || 'detect';
                 document.getElementById('feature-attendance').checked = !!(fullCamera.features && fullCamera.features.attendance);
                 document.getElementById('feature-face-recognition').checked = !!(fullCamera.features && fullCamera.features.face_recognition);
                 document.getElementById('feature-unknown-detection').checked = !!(fullCamera.features && fullCamera.features.unknown_detection);
                 document.getElementById('feature-shoplifting').checked = !!(fullCamera.features && fullCamera.features.shoplifting);
                 document.getElementById('feature-object-security').checked = !!(fullCamera.features && fullCamera.features.object_security);
+                syncCameraRoleFeatures();
                 document.getElementById('test-result').innerHTML = '';
                 document.getElementById('preview-container').style.display = 'none';
                 document.getElementById('camera-form').style.display = 'block';
@@ -2233,7 +3013,7 @@
                         link.textContent = 'Open clip';
                         clipCell.appendChild(link);
                     } else {
-                        clipCell.textContent = 'Recording...';
+                        clipCell.textContent = 'No completed video';
                     }
 
                     const objectCell = document.createElement('td');
@@ -2305,9 +3085,9 @@
                     const row = document.createElement('tr');
 
                     const snapshotCell = document.createElement('td');
-                    if (incident.best_face_snapshot) {
+                    if (incident.snapshot_available) {
                         const img = document.createElement('img');
-                        img.src = incident.best_face_snapshot;
+                        img.src = incident.snapshot_url;
                         img.style.width = '100px';
                         img.style.height = '100px';
                         img.style.objectFit = 'cover';
@@ -2338,6 +3118,9 @@
                     similarityCell.textContent = incident.best_similarity ? incident.best_similarity.toFixed(2) : 'N/A';
 
                     const actionsCell = document.createElement('td');
+                    if (incident.clip_available) {
+                        const video = document.createElement('a'); video.href = incident.clip_url; video.textContent = 'Video'; actionsCell.appendChild(video);
+                    }
                     if (incident.status === 'OPEN') {
                         const ackBtn = document.createElement('button');
                         ackBtn.className = 'btn btn-primary';
@@ -2385,7 +3168,7 @@
         }
 
         // Initialize
-        loadSystemStatus();
+        loadOperatorOverview();
         setInterval(refreshUnknownAlert, 5000);
         setInterval(() => {
             if (sections.security.classList.contains('active')) {

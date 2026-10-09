@@ -25,11 +25,15 @@ if (Test-Path $RepoVenvPython) {
 # Clean previous build if requested
 if ($CleanBuild) {
     Write-Host "Cleaning previous build..."
-    if (Test-Path "$OutputDir") {
-        Remove-Item "$OutputDir" -Recurse -Force
-    }
-    if (Test-Path "build") {
-        Remove-Item "build" -Recurse -Force
+    $RootPath = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\') + '\'
+    foreach ($Target in @((Join-Path $OutputDir $ProjectName), 'build')) {
+        $TargetPath = [IO.Path]::GetFullPath((Join-Path $ProjectRoot $Target))
+        if (-not $TargetPath.StartsWith($RootPath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing cleanup outside the repository: $TargetPath"
+        }
+        if (Test-Path -LiteralPath $TargetPath) {
+            Remove-Item -LiteralPath $TargetPath -Recurse -Force -ErrorAction Stop
+        }
     }
 }
 
@@ -82,10 +86,12 @@ try {
         $AppDistDir = Split-Path $ExpectedExePath -Parent
         $InternalDir = Join-Path $AppDistDir "_internal"
         $RequiredFiles = @(
-            (Join-Path $InternalDir "yolo11m.pt"),
-            (Join-Path $InternalDir "config.example.yaml")
+            (Join-Path $InternalDir "config.example.yaml"),
+            (Join-Path $InternalDir "torchvision\_C.pyd")
         )
         $OptionalFiles = @(
+            (Join-Path $InternalDir "yolo11m.pt"),
+            (Join-Path $InternalDir "yolo26n.pt"),
             (Join-Path $InternalDir "kaggle-model\scissors_yolo11m_960.pt")
         )
 
@@ -100,7 +106,7 @@ try {
                 Write-Warning "Optional packaged file missing: $OptionalFile"
             }
         }
-        Write-Host "Verified bundled yolo11m.pt and default config."
+        Write-Host "Verified default config and TorchVision native operators; optional model assets are reported when absent."
 
         # Create start/stop/open scripts inside the installable app folder
         $StartScriptContent = @"

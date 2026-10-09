@@ -81,6 +81,7 @@ class RecognitionConfig(BaseModel):
     unknown_confirmation_seconds: float = 3.0
     max_recognition_attempts: int = 5
     known_recheck_seconds: float = 2.0
+    unknown_detection_diagnostics: bool = False
 
 class EdgeConfig(BaseModel):
     edge_id: str = "local-edge-01"
@@ -162,6 +163,7 @@ class CameraConfig(BaseModel):
     source_type: Literal["rtsp","file","webcam"] = "file"
     source: str
     enabled: bool = True
+    rotation_degrees: Literal[0, 90, 180, 270] = 0
     fps: float = 6.0
     camera_role: Literal["ENTRANCE_EXIT","GENERAL","SECURITY","SHOPLIFTING"] = "GENERAL"
     features: FeatureConfig = Field(default_factory=FeatureConfig)

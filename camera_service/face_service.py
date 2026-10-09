@@ -1,5 +1,7 @@
 from __future__ import annotations
 import threading
+import sys
+from pathlib import Path
 import cv2, numpy as np
 from camera_service.bbox_utils import normalize_xyxy, width, height, area
 
@@ -8,7 +10,9 @@ class FaceService:
         self.store=store; self._lock=threading.RLock(); self._app=None; self._cascade=None
         try:
             from insightface.app import FaceAnalysis
-            self._app=FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']); self._app.prepare(ctx_id=-1,det_size=det_size)
+            bundle=Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[1])) / 'face_models'
+            root=bundle if (bundle/'models'/'buffalo_l').exists() else Path.home()/'.insightface'
+            self._app=FaceAnalysis(name='buffalo_l', root=str(root), allowed_modules=['detection','recognition'], providers=['CPUExecutionProvider']); self._app.prepare(ctx_id=-1,det_size=det_size)
         except Exception:
             self._cascade=cv2.CascadeClassifier(cv2.data.haarcascades+'haarcascade_frontalface_default.xml')
     def detect(self,frame):

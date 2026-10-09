@@ -25,13 +25,10 @@
 
   <nav class="nav-menu">
 
-    <a href="/portal" class="nav-item">
-      ⚡ <span>System Status</span>
-    </a>
+    <a href="/portal" class="nav-item">⌂ <span>Overview</span></a>
 
-    <a href="/portal/cameras.html" class="nav-item active">
-      📷 <span>Cameras</span>
-    </a>
+    <a href="/portal/live.html" class="nav-item">◉ <span>Live Cameras</span></a>
+      <a href="/portal/cameras.html" class="nav-item active">📷 <span>Camera Setup</span></a>
 
     <a href="/portal/personnel.html" class="nav-item">
       👥 <span>Personnel</span>
@@ -96,12 +93,20 @@
           <div><h2>Configured Cameras</h2><p>Cameras assigned to this shop and edge device.</p></div>
         </div>
         <div id="configured-camera-list"><p>Loading cameras...</p></div>
+        <div id="detection-zone-editor" hidden style="border:1px solid #d1d5db;border-radius:10px;padding:18px;margin-top:16px;background:#fff">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><div><h3 id="zone-editor-title">Detection zones</h3><small id="zone-editor-status"></small></div><button type="button" class="btn btn-light" id="zone-editor-close">Close</button></div>
+          <label for="zone-editor-mode">Detection area</label><select id="zone-editor-mode"><option value="FULL_FRAME">Full Frame</option><option value="CUSTOM_ZONES">Custom Zones</option></select>
+          <p>Frame proportions use the latest edge-reported resolution (16:9 until the edge reports one). Drag in the preview to add a zone, drag a zone to move it, or use its corner handle to resize. An empty Custom Zones list intentionally disables unknown-person detection.</p>
+          <div id="zone-editor-canvas" style="position:relative;width:100%;max-width:960px;aspect-ratio:16/9;background:#111827;border-radius:8px;overflow:hidden;touch-action:none"><span style="position:absolute;inset:45% 0;text-align:center;color:#fff;pointer-events:none">Camera frame preview · normalized coordinates</span><div id="zone-editor-overlay" style="position:absolute;inset:0"></div></div>
+          <div style="display:flex;gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap"><button type="button" class="btn btn-primary" id="zone-editor-save">Save detection zones</button><small id="zone-editor-message" role="status"></small></div>
+          <div id="zone-editor-list" style="margin-top:12px"></div>
+        </div>
       </div>
 
       <div class="panel-heading">
         <div>
-          <h2>Camera Configuration</h2>
-          <p>Set up camera details, detection features and tracking preferences.</p>
+          <h2>Simple Camera Setup</h2>
+          <p>Choose attendance or unknown-person security. Technical settings are managed automatically.</p>
         </div>
 
         <span class="configuration-badge">
@@ -207,15 +212,13 @@
             </label>
 
             <select id="camera-role">
-              <option value="">Select role</option>
-              <option>Entry</option>
-              <option>Exit</option>
-              <option>General</option>
+              <option value="ENTRANCE_EXIT">Attendance Camera</option>
+              <option value="SECURITY">Unknown Person Security</option>
             </select>
           </div>
 
 
-          <div class="form-group">
+          <div class="form-group" style="display:none">
             <label for="camera-zone">
               Camera Zone
               <span>*</span>
@@ -229,7 +232,7 @@
           </div>
 
 
-          <div class="form-group">
+          <div class="form-group" style="display:none">
             <label for="crowd-threshold">
               Crowd Alert Threshold
               <span>*</span>
@@ -256,14 +259,15 @@
 
       <div class="form-section">
 
-        <h3>Features</h3>
+        <h3>Automatic Detection</h3>
 
         <p class="section-description">
-          Select the detection and monitoring capabilities for this camera.
+          Camera AI features are selected automatically based on camera purpose.
         </p>
 
 
-        <div class="feature-grid">
+        <p id="camera-purpose-description" role="status">Employee attendance is recorded through the configured CRM workflow.</p>
+      <div class="feature-grid" style="display:none" aria-hidden="true">
 
           <label class="feature-card">
 
@@ -314,8 +318,8 @@
             <span class="feature-icon">⚠</span>
 
             <span class="feature-text">
-              <strong>Crowd Monitoring</strong>
-              <small>Monitor crowd levels using the configured threshold.</small>
+              <strong>Unknown Person Detection</strong>
+              <small>Alert when a person cannot be matched to registered personnel.</small>
             </span>
 
           </label>
@@ -328,8 +332,8 @@
             <span class="feature-icon">◇</span>
 
             <span class="feature-text">
-              <strong>Object Detection</strong>
-              <small>Detect configured objects within the camera feed.</small>
+              <strong>Object Security</strong>
+              <small>Monitor configured security objects.</small>
             </span>
 
           </label>
@@ -341,12 +345,12 @@
 
       <!-- TRACKING PERFORMANCE -->
 
-      <div class="form-section">
+      <div class="form-section" style="display:none">
 
-        <h3>Tracking Performance</h3>
+        <h3>AI Performance</h3>
 
         <p class="section-description">
-          Fine-tune how often tracking and detection are processed.
+          Balanced is recommended for most shop PCs. Advanced controls remain available for tuning.
         </p>
 
 

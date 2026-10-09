@@ -39,18 +39,20 @@ class CloudSyncClient:
             "payload": event,
         }
 
-    def upload_event_evidence(self, event_id: str, snapshot_path: str) -> dict[str, Any]:
+    def upload_event_evidence(self, event_id: str, evidence_path: str) -> dict[str, Any]:
         if not self.enabled():
             raise RuntimeError("cloud sync is disabled")
-        path = Path(snapshot_path)
+        path = Path(evidence_path)
         if not path.is_file():
             raise FileNotFoundError(f"event evidence not found: {path}")
+        suffix=path.suffix.lower()
+        content_type={".jpg":"image/jpeg",".jpeg":"image/jpeg",".png":"image/png",".webp":"image/webp",".mp4":"video/mp4"}.get(suffix,"application/octet-stream")
         with path.open("rb") as stream:
             response = requests.post(
                 self.config.base_url.rstrip("/") + f"/edge/v1/events/{event_id}/evidence",
-                files={"file": (path.name, stream, "image/jpeg")},
+                files={"file": (path.name, stream, content_type)},
                 headers={"Authorization": f"Bearer {self.config.api_token}"},
-                timeout=max(float(self.config.timeout_seconds), 30.0),
+                timeout=max(float(self.config.timeout_seconds), 60.0 if content_type=="video/mp4" else 30.0),
             )
         response.raise_for_status()
         return response.json()
@@ -103,6 +105,13 @@ class CloudSyncClient:
         response.raise_for_status()
         return response.json() if response.content else {"items": []}
 
+    def acknowledge_detection_config(self, camera_id: str, version: int, status: str, local_override: bool = False) -> None:
+        if not self.enabled(): raise RuntimeError("cloud sync is disabled")
+        response=requests.post(self.config.base_url.rstrip("/")+f"/edge/v1/config/cameras/{camera_id}/detection-config/ack",
+            json={"version":int(version),"status":status,"local_override":bool(local_override)},
+            headers={"Authorization":f"Bearer {self.config.api_token}"},timeout=self.config.timeout_seconds)
+        response.raise_for_status()
+
 
     def personnel_config(self) -> dict[str, Any]:
         """Fetch the tenant/shop-scoped personnel roster and face embeddings."""
@@ -128,3 +137,52 @@ class CloudSyncClient:
         response=requests.post(self.config.base_url.rstrip("/")+f"/edge/v1/commands/{command_id}/result",
             json=result,headers={"Authorization":f"Bearer {self.config.api_token}"},timeout=self.config.timeout_seconds)
         response.raise_for_status()
+
+    def latest_update(self, current_build_id: str) -> dict[str, Any]:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response=requests.get(self.config.base_url.rstrip("/")+"/edge/v1/updates/latest",
+            params={"current_build_id":current_build_id},headers={"Authorization":f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds)
+        response.raise_for_status()
+        return response.json()
+
+    def download_update(self, build_id: str, destination: Path) -> None:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response=requests.get(self.config.base_url.rstrip("/")+f"/edge/v1/updates/{build_id}/download",
+            headers={"Authorization":f"Bearer {self.config.api_token}"},timeout=max(120.0,float(self.config.timeout_seconds)),stream=True)
+        response.raise_for_status()
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        temporary=destination.with_suffix(destination.suffix+".part")
+        with temporary.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=1024*1024):
+                if chunk: output.write(chunk)
+        temporary.replace(destination)
+
+    def model_manifest(self) -> dict[str, Any]:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response = requests.get(
+            self.config.base_url.rstrip("/") + "/edge/v1/models/manifest",
+            headers={"Authorization": f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def download_model(self, model_id: str, version: str, destination: Path) -> None:
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response = requests.get(
+            self.config.base_url.rstrip("/") + f"/edge/v1/models/{model_id}/{version}/download",
+            headers={"Authorization": f"Bearer {self.config.api_token}"},
+            timeout=max(300.0, float(self.config.timeout_seconds)),
+            stream=True,
+        )
+        response.raise_for_status()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    output.write(chunk)
