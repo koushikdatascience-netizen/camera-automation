@@ -123,6 +123,9 @@ def test_diagnostic_is_read_only_and_contains_no_biometrics(mirror,monkeypatch):
     result=api.personnel_diagnostics('tenant-1',portal_principal())
     import json
     assert result['items'][0]['cloud_face_count']==1
+    assert result['items'][0]['model_compatibility']=='COMPATIBLE'
+    assert result['items'][0]['template_status_counts']['COMPATIBLE']==1
+    assert result['items'][0]['templates'][0]['enrollment_model_key']=='model-v1'
     assert 'embedding' not in json.dumps(result) and 'base64' not in json.dumps(result).lower()
 
 
@@ -157,13 +160,19 @@ def test_persistent_image_cache_restart_and_change(mirror,monkeypatch):
 
 
 def test_unverified_cached_model_not_exported_until_refresh(mirror,monkeypatch):
-    _,store=mirror;refresh();pid=person_id(store);face=faces(store)[0]
+    state,store=mirror;refresh();pid=person_id(store);face=faces(store)[0]
     store.set_cloud_face_model_key('tenant-1','shop-1',pid,face['id'],None)
     monkeypatch.setattr(api,'_refresh_crm_personnel',lambda *a,**kw:None)
     principal=api.EdgePrincipal(tenant_id='tenant-1',company_code=None,shop_id='shop-1',site_id='site',edge_id='edge')
     assert api.edge_personnel_config(principal)['items'][0]['faces']==[]
     refresh()
     assert api.edge_personnel_config(principal)['items'][0]['enrollment_model_key']=='model-v1'
+    assert state.calls==2  # Actual regeneration, never an availability-only backfill.
+    legacy=next(f for f in faces(store) if f['id']==face['id'])
+    assert legacy['model_key'] is None and legacy['embedding']==face['embedding']
+    exported=api.edge_personnel_config(principal)['items'][0]['faces']
+    assert len(exported)==1 and exported[0]['model_key']=='model-v1'
+    refresh();assert state.calls==2
 
 
 def test_multiple_images_revoke_and_preserve_local(mirror):

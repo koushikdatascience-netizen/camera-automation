@@ -1058,14 +1058,10 @@ def list_people(s=Depends(get_store)):
     return {'items':items}
 
 def _personnel_diagnostic(person,faces):
-    from camera_service.face_service import enrollment_model_key
+    from camera_service.face_provenance import active_model_key,template_diagnostics
     metadata=json.loads(person.get('crm_sync_json') or '{}')
-    compatibility='UNVERIFIED'
-    if metadata.get('enrollment_model_key'):
-        try: compatibility='COMPATIBLE' if enrollment_model_key()==metadata['enrollment_model_key'] else 'INCOMPATIBLE'
-        except ValueError: compatibility='MODEL_UNAVAILABLE'
     return {'crm_user_id':metadata.get('crm_user_id'),'tenant_id':metadata.get('tenant_id'),
-        'shop_id':metadata.get('shop_id'),'edge_face_count':len(faces),'model_compatibility':compatibility}
+        'shop_id':metadata.get('shop_id'),'edge_face_count':len(faces),**template_diagnostics(faces,active_model_key())}
 
 @app.get('/api/v1/personnel/{person_id}/enrollment-image')
 def local_enrollment_preview(person_id: str, request: Request, s=Depends(get_store)):
@@ -1105,10 +1101,10 @@ async def enroll_face(person_id:str,file:UploadFile=File(...),s=Depends(get_stor
     if len(raw)>8*1024*1024: raise HTTPException(413,'Image too large')
     img=cv2.imdecode(np.frombuffer(raw,np.uint8),cv2.IMREAD_COLOR)
     if img is None: raise HTTPException(400,'Invalid image')
-    try: emb,q=get_face_service().enroll(img)
+    try: emb,q,model_key=get_face_service().enroll_with_provenance(img)
     except ValueError as e: raise HTTPException(400,str(e))
     preview_path = _save_face_preview(person_id, img)
-    face = s.add_face(person_id,emb,q,preview_path)
+    face = s.add_face(person_id,emb,q,preview_path,model_key=model_key)
     return {
         **face,
         'image_url': _face_image_url(person_id, face['id']) if preview_path else None,

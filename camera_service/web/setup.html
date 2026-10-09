@@ -2494,7 +2494,9 @@
                         const diagnostic=document.createElement('small');
                         diagnostic.style.display='block';
                         diagnostic.textContent='CRM: '+(person.sync_diagnostic.crm_user_id||'Not mapped')+
-                            ' · Templates: '+person.sync_diagnostic.edge_face_count+' · '+person.sync_diagnostic.model_compatibility;
+                            ' · Templates: '+person.sync_diagnostic.edge_face_count+' · '+person.sync_diagnostic.model_compatibility+
+                            ' · '+Object.entries(person.sync_diagnostic.template_status_counts||{}).filter(([,count])=>count>0).map(([status,count])=>count+' '+status).join(', ');
+                        diagnostic.title='COMPATIBLE: ready for recognition. INCOMPATIBLE: re-enroll with this model. MODEL_UNAVAILABLE: restore models and restart. UNVERIFIED: legacy template; re-enrollment required. Mixed templates are counted separately; only compatible templates can recognize.';
                         nameCell.appendChild(diagnostic);
                     }
 

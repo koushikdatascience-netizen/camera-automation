@@ -221,8 +221,8 @@ class PortalStore(AttendanceDeliveryStore):
 
     def add_cloud_face(self,item):
         with self._lock,self._conn() as c:
-            c.execute("INSERT INTO cloud_face_profiles(id,person_id,tenant_id,shop_id,embedding_json,quality,image_path,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (item["id"],item["person_id"],item["tenant_id"],item["shop_id"],json.dumps(item["embedding"]),item["quality"],item.get("image_path"),self.now()))
+            c.execute("INSERT INTO cloud_face_profiles(id,person_id,tenant_id,shop_id,embedding_json,quality,image_path,created_at,model_key) VALUES(?,?,?,?,?,?,?,?,?)",
+                (item["id"],item["person_id"],item["tenant_id"],item["shop_id"],json.dumps(item["embedding"]),item["quality"],item.get("image_path"),self.now(),item.get("model_key")))
         return {"id":item["id"],"person_id":item["person_id"],"quality":item["quality"],"image_path":item.get("image_path")}
     def list_cloud_faces(self,tenant_id,shop_id,person_id,include_embedding=False):
         cols="id,person_id,quality,image_path,created_at,model_key"+(",embedding_json" if include_embedding else "")

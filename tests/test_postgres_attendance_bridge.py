@@ -100,6 +100,7 @@ def test_pg_enrollment_to_edge_recognition_and_authentication(pg_bridge,tmp_path
     api._refresh_crm_personnel_locked('tenant','shop')
     principal=api.EdgePrincipal(tenant_id='tenant',company_code=None,shop_id='shop',site_id='site',edge_id='edge')
     config=api.edge_personnel_config(principal)
+    assert config['items'][0]['faces'][0]['model_key']=='synthetic-model'
     local=SQLiteStore(str(tmp_path/'edge.db'));local.configure_event_scope('tenant',None,'shop','edge')
     local.apply_cloud_personnel(config['items'])
     recognizer=face_service.FaceService.__new__(face_service.FaceService);recognizer.store=local

@@ -31,6 +31,7 @@ from cloud_portal.crm_client import crm_client
 from cloud_portal.attendance_policy import AttendancePolicy
 from cloud_portal.notifications import NotificationService
 from camera_service.face_service import FaceService, enrollment_model_key, validated_embedding
+from camera_service.face_provenance import template_diagnostics
 from cloud_portal.enrollment_worker import EnrollmentWorker
 
 logger = logging.getLogger("camera_eye.portal")
@@ -1252,7 +1253,7 @@ def edge_personnel_config(principal: EdgePrincipal = Depends(require_edge_token)
             "tenant_id":principal.tenant_id,"shop_id":principal.shop_id,
             "enrollment_model_key":next(iter(model_keys),None),
             "role":person["role"],"phone":person.get("phone"),"email":person.get("email"),"active":bool(person["active"]),
-            "faces":[{"face_id":str(f["id"]),"embedding":f["embedding"],"quality":float(f["quality"])} for f in faces]})
+            "faces":[{"face_id":str(f["id"]),"embedding":f["embedding"],"quality":float(f["quality"]),"model_key":f.get("model_key")} for f in faces]})
     return {"tenant_id":principal.tenant_id,"shop_id":principal.shop_id,"items":items}
 
 @app.post("/edge/v1/events/{event_id}/evidence")
@@ -2128,15 +2129,20 @@ def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
                 _crm_enrollment_metrics["rejected_cache_hits"]+=1
                 continue
             cached=next((face for face in existing if face["id"]==face_id),None)
+            if cached and cached.get('model_key')!=model_key:
+                # Preserve legacy bytes; regeneration is a new, separately verified template.
+                face_id+=':verified'
+                desired.add(face_id)
+                cached=next((face for face in existing if face['id']==face_id),None)
             if cached:
                 try:
                     validated_embedding(cached["embedding"])
-                    if cached.get('model_key')!=model_key:
-                        store.set_cloud_face_model_key(tenant_id,shop_id,local_person_id,face_id,model_key)
-                    _crm_enrollment_metrics["cache_hits"]+=1
-                    continue
+                    if cached.get('model_key')==model_key:
+                        _crm_enrollment_metrics["cache_hits"]+=1
+                        continue
+                    raise RuntimeError('Cached enrollment provenance requires reconciliation')
                 except ValueError:
-                    store.delete_cloud_face(tenant_id,shop_id,local_person_id,face_id)
+                    raise RuntimeError('Cached enrollment is invalid; re-enrollment required') from None
             try:
                 image=cv2.imdecode(np.frombuffer(raw_image,np.uint8),cv2.IMREAD_COLOR)
                 if image is None:
@@ -2147,11 +2153,12 @@ def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
                 if isinstance(enroller,FaceService) and enroller._app is None:
                     raise RuntimeError("InsightFace enrollment unavailable")
                 embedding,quality=enroller.enroll(image)
+                if isinstance(enroller,FaceService) and enroller.model_provenance()!=model_key:
+                    raise RuntimeError('Enrollment model changed during CRM synchronization')
                 embedding=validated_embedding(embedding)
                 store.add_cloud_face({"id":face_id,"person_id":local_person_id,
                     "tenant_id":tenant_id,"shop_id":shop_id,"embedding":embedding,
-                    "quality":quality,"image_path":None})
-                store.set_cloud_face_model_key(tenant_id,shop_id,local_person_id,face_id,model_key)
+                    "quality":quality,"image_path":None,"model_key":model_key})
             except ValueError:
                 _crm_enrollment_metrics["rejected_images"]+=1
                 store.reject_crm_enrollment(tenant_id,shop_id,crm_user_id,face_id,"invalid_face_template")
@@ -2165,6 +2172,8 @@ def _refresh_crm_personnel_locked(tenant_id: str, shop_id: str) -> None:
         # Withdraw obsolete CRM templates, keeping intentionally enrolled local images.
         # Legacy CRM vectors had no verified model provenance and must be quarantined.
         for face in existing:
+            if not face.get('model_key'):
+                continue  # Legacy templates remain explicitly UNVERIFIED; never overwritten/backfilled.
             if ((str(face["id"]).startswith("crm-image:") and face["id"] not in desired)
                     or (not str(face["id"]).startswith("crm-image:") and not face.get("image_path"))):
                 store.delete_cloud_face(tenant_id,shop_id,local_person_id,face["id"])
@@ -2244,6 +2253,8 @@ def personnel_diagnostics(tenant_id: str, principal: PortalPrincipal=Depends(req
     """Read-only mirror/heartbeat inspection: never refresh CRM or mutate the mirror."""
     _portal_scope(tenant_id,principal)
     mappings=store.list_crm_person_mappings(tenant_id,principal.shop_id)
+    try: active_key=enrollment_model_key()
+    except (ValueError,OSError): active_key=None
     items=[]
     for person in store.list_cloud_people(tenant_id,principal.shop_id):
         pid=str(person['id']); links=[m for m in mappings if m['local_person_id']==pid]
@@ -2255,12 +2266,15 @@ def personnel_diagnostics(tenant_id: str, principal: PortalPrincipal=Depends(req
                     edge_reports.append({'edge_id':edge['edge_id'],'face_count':report.get('face_count'),
                         'heartbeat_received_at':edge.get('received_at') or edge.get('last_seen_at'),
                         'model_compatibility':report.get('model_compatibility','UNVERIFIED'),
+                        'template_status_counts':report.get('template_status_counts',{}),
+                        'templates':report.get('templates',[]),
                         'templates_match':set(report.get('face_ids') or [])=={f['id'] for f in faces},
                         'heartbeat_is_historical':True})
         items.append({'person_id':pid,'crm_user_id':links[0]['crm_user_id'] if len(links)==1 else None,
             'mapping_status':'MAPPED' if len(links)==1 else 'UNMAPPED_OR_AMBIGUOUS',
             'cloud_face_count':len(faces),'enrollment_model_keys':sorted({f['model_key'] for f in faces if f.get('model_key')}),
-            'unverified_template_count':sum(not f.get('model_key') for f in faces),'edge_reports':edge_reports})
+            'unverified_template_count':sum(not f.get('model_key') for f in faces),'edge_reports':edge_reports,
+            **template_diagnostics(faces,active_key)})
     return {'items':items}
 
 

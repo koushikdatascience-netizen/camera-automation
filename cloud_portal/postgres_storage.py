@@ -392,10 +392,10 @@ class PostgresPortalStore(AttendanceDeliveryStore):
 
     def add_cloud_face(self, item: dict[str, Any]) -> dict[str, Any]:
         with self._conn() as conn:
-            row=conn.execute(text("""INSERT INTO cloud_face_profiles(id,person_id,tenant_id,shop_id,embedding_json,quality,image_path,created_at)
-                VALUES(:id,:person,:tenant,:shop,CAST(:embedding AS JSONB),:quality,:image_path,:created) RETURNING id,person_id,quality,image_path,created_at"""),
+            row=conn.execute(text("""INSERT INTO cloud_face_profiles(id,person_id,tenant_id,shop_id,embedding_json,quality,image_path,created_at,model_key)
+                VALUES(:id,:person,:tenant,:shop,CAST(:embedding AS JSONB),:quality,:image_path,:created,:model_key) RETURNING id,person_id,quality,image_path,created_at,model_key"""),
                 {"id":item["id"],"person":item["person_id"],"tenant":item["tenant_id"],"shop":item["shop_id"],
-                 "embedding":json.dumps(item["embedding"]),"quality":item["quality"],"image_path":item.get("image_path"),"created":self.now()}).mappings().one()
+                 "embedding":json.dumps(item["embedding"]),"quality":item["quality"],"image_path":item.get("image_path"),"created":self.now(),"model_key":item.get("model_key")}).mappings().one()
         return dict(row)
 
     def list_cloud_faces(self, tenant_id: str, shop_id: str, person_id: str, include_embedding: bool=False) -> list[dict[str, Any]]:

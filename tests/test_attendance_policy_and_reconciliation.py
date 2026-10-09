@@ -51,7 +51,8 @@ def test_authoritative_roster_preserves_intentional_local_only_identity(tmp_path
     assert store.get_person(local["id"])["active"] == 1
     assert store.get_person(local["id"])["managed_source"] == "local"
     assert len(store.list_faces(local["id"])) == 1
-    assert any(row["person_id"] == local["id"] for row in store.embeddings())
+    assert store.list_faces(local['id'])[0]['model_key'] is None
+    assert store.embeddings()==[]  # Legacy enrollment is retained, never implicitly trusted.
 
 
 def test_removed_confirmed_crm_identity_loses_face_template(tmp_path):
@@ -63,7 +64,7 @@ def test_removed_confirmed_crm_identity_loses_face_template(tmp_path):
         "full_name":"Old CRM User",
         "role":"WORKER",
         "active":True,
-        "faces":[{"face_id":"crm-face","embedding":[0.1,0.2,0.3],"quality":0.9}],
+        "faces":[{"face_id":"crm-face","embedding":[1.]+[0.]*511,"quality":0.9}],
     }])
     result=store.apply_cloud_personnel([])
 

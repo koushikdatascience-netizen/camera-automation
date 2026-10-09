@@ -697,12 +697,14 @@
       const face=person.face_enrolled?"✓ Enrolled":"Face required";
       const sync=person.edge_synced?"✓ Edge synced":"Sync pending";
       const crm=person.crm_mapped?"✓ CRM mapped":"CRM not mapped";
+      const diagnostic=person.sync_diagnostic;
+      const compatibility=diagnostic?'Cloud: '+diagnostic.model_compatibility+' · '+Object.entries(diagnostic.template_status_counts||{}).filter(([,count])=>count>0).map(([status,count])=>count+' '+status).join(', '):'Compatibility not verified';
       return "<tr><td><div class='avatar'>"+escapeHtml(initials)+"</div>"+
         (person.enrollment_preview_url?"<img data-enrollment-preview='"+escapeHtml(person.enrollment_preview_url)+"' width='48' height='48' alt='CRM enrollment preview'>":"")+"</td>"+
-        "<td><strong>"+escapeHtml(person.full_name||"")+"</strong><br><small>"+face+" · "+sync+" · "+crm+"</small></td>"+
+        "<td><strong>"+escapeHtml(person.full_name||"")+"</strong><br><small>"+face+" · "+sync+" · "+crm+"</small><br><small>"+escapeHtml(compatibility)+"</small></td>"+
         "<td>"+escapeHtml(person.employee_code||"")+"</td><td>"+escapeHtml(person.role||"")+"</td>"+
         "<td>"+(person.active?"Active":"Inactive")+"</td><td>"+escapeHtml(String(person.created_at||"").slice(0,10))+"</td>"+
-        "<td><span>"+(person.face_enrolled?"Face ready":"Face not registered")+"</span></td></tr>";
+        "<td><span>"+(diagnostic?.model_compatibility==='COMPATIBLE'?"Compatible templates":person.face_enrolled?"Review compatibility":"Face not registered")+"</span></td></tr>";
     }).join("");
     body.querySelectorAll('[data-enrollment-preview]').forEach(async img=>{
       try {
@@ -720,13 +722,17 @@
     const response=await authFetch("/portal/v1/tenants/"+encodeURIComponent(scope.tenant_id)+"/personnel");
     const data=await response.json();
     if(!response.ok) throw new Error(data.detail||"Unable to load personnel.");
-    renderPersonnel(data.items||[]);
     const diagnostics=await authFetch('/portal/v1/tenants/'+encodeURIComponent(scope.tenant_id)+'/personnel-diagnostics');
+    let diagnosticData={items:[]};
+    if(diagnostics.ok) diagnosticData=await diagnostics.json();
+    const byPerson=new Map((diagnosticData.items||[]).map(item=>[item.person_id,item]));
+    renderPersonnel((data.items||[]).map(item=>({...item,sync_diagnostic:byPerson.get(String(item.id))})));
     if(diagnostics.ok){
       const details=document.createElement('details');details.id='personnel-sync-diagnostics';
       const summary=document.createElement('summary');summary.textContent='Personnel synchronization diagnostics';
-      const pre=document.createElement('pre');pre.textContent=JSON.stringify(await diagnostics.json(),null,2);
-      details.append(summary,pre);document.getElementById('personnel-sync-diagnostics')?.remove();
+      const explanation=document.createElement('p');explanation.textContent='COMPATIBLE: ready for recognition. INCOMPATIBLE: re-enroll with the edge model. MODEL_UNAVAILABLE: restore models and restart. UNVERIFIED: legacy template; re-enrollment required. Each template and the last edge report are shown separately; only compatible templates can recognize.';
+      const pre=document.createElement('pre');pre.textContent=JSON.stringify(diagnosticData,null,2);
+      details.append(summary,explanation,pre);document.getElementById('personnel-sync-diagnostics')?.remove();
       document.getElementById('personnel-table-body').closest('table').after(details);
     }
   }

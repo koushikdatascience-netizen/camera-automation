@@ -39,6 +39,8 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_object_security_events_time ON object_security_events(detected_at);
             ''')
             self._ensure_column(c,'face_profiles','image_path','TEXT')
+            self._ensure_column(c,'face_profiles','model_key','TEXT')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_face_model_person ON face_profiles(model_key,person_id)')
             self._ensure_column(c,'attendance_sessions','arrival_snapshot','TEXT')
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
             self._ensure_column(c,'personnel','attendance_mode','TEXT')
@@ -142,16 +144,21 @@ class SQLiteStore:
         now=self.now(); seen=set()
         mapped=[str(i['crm_user_id']) for i in items if i.get('crm_user_id')]
         if len(mapped)!=len(set(mapped)): raise ValueError('Duplicate CRM identity in personnel snapshot')
+        from camera_service.face_service import validated_embedding
+        from camera_service.face_provenance import active_model_key
+        active_key=active_model_key() if any(f.get('model_key') for i in items for f in i.get('faces') or []) else None
         for item in items:
             scope=getattr(self,'_event_scope',{}) or {}
             for key in ('tenant_id','shop_id'):
                 if item.get(key) and scope.get(key) and str(item[key])!=str(scope[key]):
                     raise ValueError('Personnel snapshot scope mismatch')
-            if item.get('enrollment_model_key'):
-                from camera_service.face_service import validated_embedding, enrollment_model_key
-                if item['enrollment_model_key']!=enrollment_model_key():
-                    raise ValueError('Cloud enrollment model is incompatible with edge recognition')
-                for face in item.get('faces') or []: validated_embedding(face['embedding'])
+            for face in item.get('faces') or []:
+                validated_embedding(face['embedding'])
+                if face.get('model_key'):
+                    if item.get('enrollment_model_key') and face['model_key']!=item['enrollment_model_key']:
+                        raise ValueError('Cloud template provenance does not match roster metadata')
+                    if face['model_key']!=active_key:
+                        raise ValueError('Cloud enrollment model is incompatible with edge recognition')
         with self._lock,self._conn() as c:
             for item in items:
                 pid=str(item["person_id"]); seen.add(pid)
@@ -185,16 +192,19 @@ class SQLiteStore:
                 cloud_face_ids=set()
                 for face in item.get("faces") or []:
                     fid=str(face["face_id"]); cloud_face_ids.add(fid)
-                    owner=c.execute('SELECT person_id FROM face_profiles WHERE id=?',(fid,)).fetchone()
-                    if item.get('crm_user_id') and owner and owner['person_id']!=pid:
-                        raise ValueError('Face template identity conflict')
-                    c.execute("""INSERT INTO face_profiles(id,person_id,embedding_json,quality,created_at,image_path)
-                        VALUES(?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET person_id=excluded.person_id,
-                        embedding_json=excluded.embedding_json,quality=excluded.quality""",
-                        (fid,pid,json.dumps(face["embedding"]),float(face.get("quality") or 0),now))
-                existing=c.execute("SELECT id FROM face_profiles WHERE person_id=?",(pid,)).fetchall()
+                    owner=c.execute('SELECT person_id,embedding_json,model_key FROM face_profiles WHERE id=?',(fid,)).fetchone()
+                    if owner:
+                        if owner['person_id']!=pid or json.loads(owner['embedding_json'])!=face['embedding']:
+                            raise ValueError('Face template identity or embedding conflict')
+                        if face.get('model_key') and owner['model_key']!=face['model_key']:
+                            raise ValueError('Template provenance change requires a new enrollment ID')
+                    else:
+                        c.execute("""INSERT INTO face_profiles(id,person_id,embedding_json,quality,created_at,image_path,model_key)
+                            VALUES(?,?,?,?,?,NULL,?)""",
+                            (fid,pid,json.dumps(face["embedding"]),float(face.get("quality") or 0),now,face.get('model_key')))
+                existing=c.execute("SELECT id,model_key,image_path FROM face_profiles WHERE person_id=?",(pid,)).fetchall()
                 for row in existing:
-                    if row["id"] not in cloud_face_ids:
+                    if row["id"] not in cloud_face_ids and row['model_key'] and not row['image_path']:
                         c.execute("DELETE FROM face_profiles WHERE id=?",(row["id"],))
 
             # Only CRM-owned or pre-provenance legacy identities are reconciled.
@@ -228,31 +238,35 @@ class SQLiteStore:
         allowed['updated_at']=self.now(); sql="UPDATE personnel SET "+','.join(f"{k}=?" for k in allowed)+" WHERE id=?"
         with self._lock,self._conn() as c: c.execute(sql,tuple(allowed.values())+(pid,))
         return self.get_person(pid)
-    def add_face(self,pid,embedding:list[float],quality:float,image_path=None):
+    def add_face(self,pid,embedding:list[float],quality:float,image_path=None,model_key=None):
+        if model_key:
+            from camera_service.face_service import validated_embedding
+            embedding=validated_embedding(embedding)
         fid=str(uuid.uuid4())
         with self._lock,self._conn() as c:
-            c.execute("INSERT INTO face_profiles(id,person_id,embedding_json,quality,created_at,image_path) VALUES(?,?,?,?,?,?)",(fid,pid,json.dumps(embedding),quality,self.now(),image_path))
-        return {'id':fid,'person_id':pid,'quality':quality,'image_path':image_path}
+            c.execute("INSERT INTO face_profiles(id,person_id,embedding_json,quality,created_at,image_path,model_key) VALUES(?,?,?,?,?,?,?)",(fid,pid,json.dumps(embedding),quality,self.now(),image_path,model_key))
+        return {'id':fid,'person_id':pid,'quality':quality,'image_path':image_path,'model_key':model_key}
     def list_faces(self,pid):
-        with self._conn() as c: return [dict(r) for r in c.execute("SELECT id,person_id,quality,created_at,image_path FROM face_profiles WHERE person_id=? ORDER BY created_at DESC",(pid,))]
+        with self._conn() as c: return [dict(r) for r in c.execute("SELECT id,person_id,quality,created_at,image_path,model_key FROM face_profiles WHERE person_id=? ORDER BY created_at DESC",(pid,))]
     def get_face(self,pid,fid):
         with self._conn() as c:
-            r=c.execute("SELECT id,person_id,quality,created_at,image_path FROM face_profiles WHERE person_id=? AND id=?",(pid,fid)).fetchone(); return dict(r) if r else None
+            r=c.execute("SELECT id,person_id,quality,created_at,image_path,model_key FROM face_profiles WHERE person_id=? AND id=?",(pid,fid)).fetchone(); return dict(r) if r else None
     def delete_face(self,pid,fid):
         with self._lock,self._conn() as c:
             cur=c.execute("DELETE FROM face_profiles WHERE id=? AND person_id=?",(fid,pid)); return cur.rowcount>0
     def embeddings(self):
+        from camera_service.face_provenance import active_model_key
+        from camera_service.face_service import validated_embedding
+        active_key=active_model_key()
+        if not active_key: return []
         with self._conn() as c:
-            rows=c.execute("SELECT f.id,f.person_id,f.embedding_json,p.full_name,p.role,p.crm_sync_json FROM face_profiles f JOIN personnel p ON p.id=f.person_id WHERE p.active=1").fetchall()
+            rows=c.execute("SELECT f.id,f.person_id,f.embedding_json,p.full_name,p.role FROM face_profiles f JOIN personnel p ON p.id=f.person_id WHERE p.active=1 AND f.model_key=?",(active_key,)).fetchall()
             result=[]
             for row in rows:
-                data=dict(row);metadata=json.loads(data.pop('crm_sync_json') or '{}')
-                if metadata.get('enrollment_model_key'):
-                    from camera_service.face_service import enrollment_model_key
-                    try:
-                        if metadata['enrollment_model_key']!=enrollment_model_key(): continue
-                    except ValueError: continue
-                result.append({**data,'embedding':json.loads(data['embedding_json'])})
+                data=dict(row)
+                try: vector=validated_embedding(json.loads(data['embedding_json']))
+                except (ValueError,TypeError): continue
+                result.append({**data,'embedding':vector})
             return result
     def open_session(self,person_id,store_id):
         with self._conn() as c:

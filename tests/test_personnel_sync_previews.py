@@ -25,7 +25,7 @@ def test_edge_model_and_embedding_validation(tmp_path,monkeypatch):
     monkeypatch.setattr(face_service,'enrollment_model_key',lambda:'model')
     store=SQLiteStore(str(tmp_path/'edge.db'))
     vector=[1.]+[0.]*511
-    valid=item(enrollment_model_key='model');valid['faces']=[{'face_id':'face','embedding':vector,'quality':.9}]
+    valid=item(enrollment_model_key='model');valid['faces']=[{'face_id':'face','embedding':vector,'quality':.9,'model_key':'model'}]
     store.apply_cloud_personnel([valid]);assert len(store.embeddings())==1
     for invalid in ({**valid,'enrollment_model_key':'other'}, {**valid,'faces':[{'face_id':'bad','embedding':[0.]*512}]}):
         with pytest.raises(ValueError):store.apply_cloud_personnel([invalid])
