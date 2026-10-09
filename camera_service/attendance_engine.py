@@ -11,44 +11,37 @@ class Presence:
 class AttendanceEngine:
     def __init__(self, store, store_id:str, pending_window_seconds:float=5.0):
         self.store=store; self.store_id=store_id; self.pending_window_seconds=pending_window_seconds; self._lock=threading.RLock(); self.presence={}; self.identities={}; self.crossings={}
-    def on_identity(self, ev:IdentitySeen):
-        key=(ev.camera_id,ev.track_id)
+    def on_identity(self, ev: IdentitySeen):
+        """A recognized employee confirms arrival in AUTO mode without line crossing.
+
+        An existing open session is reused by storage, preventing repeat entries.
+        Manual mode continues recording observations without confirming arrival.
+        """
+        import os
+        mode = os.environ.get("CAMERA_EYE_ATTENDANCE_MODE", "AUTO").strip().upper()
         with self._lock:
-            self.identities[key]=ev
-            p=self.presence.get(ev.person_id) or Presence(person_id=ev.person_id,first_seen_today=ev.timestamp)
-            # Recognition itself must not end a business break. A person can remain
-            # visible to a camera while on break; only the explicit break workflow
-            # transitions BREAK -> PRESENT.
-            session, _ = self.store.create_arrival(ev.person_id,self.store_id,ev.timestamp,ev.camera_id,ev.confidence,ev.snapshot_path,confirmed=False)
-            p.attendance_session_id=session['id'] if session else p.attendance_session_id
-            p.last_seen_at=ev.timestamp; p.last_camera_id=ev.camera_id; p.last_confidence=ev.confidence
-            if p.status != 'BREAK':
-                p.status='PRESENT'
-            self.presence[ev.person_id]=p
-            p.current_track_id=ev.track_id; p.last_snapshot_path=ev.snapshot_path or p.last_snapshot_path
-            cross=self.crossings.get(key)
-            if cross and abs((ev.timestamp-cross.timestamp).total_seconds())<=self.pending_window_seconds: return self._apply(ev,cross)
+            p = self.presence.get(ev.person_id) or Presence(person_id=ev.person_id, first_seen_today=ev.timestamp)
+            if mode == "AUTO" and p.status != "BREAK":
+                session, _ = self.store.create_arrival(
+                    ev.person_id, self.store_id, ev.timestamp, ev.camera_id,
+                    ev.confidence, ev.snapshot_path, confirmed=True,
+                )
+            else:
+                session, _ = self.store.create_arrival(
+                    ev.person_id, self.store_id, ev.timestamp, ev.camera_id,
+                    ev.confidence, ev.snapshot_path, confirmed=False,
+                )
+            p.attendance_session_id = session["id"] if session else p.attendance_session_id
+            p.last_seen_at = ev.timestamp
+            p.last_camera_id = ev.camera_id
+            p.last_confidence = ev.confidence
+            if p.status != "BREAK":
+                p.status = "PRESENT"
+            p.current_track_id = ev.track_id
+            p.last_snapshot_path = ev.snapshot_path or p.last_snapshot_path
+            self.presence[ev.person_id] = p
         return None
-    def on_crossing(self, ev:LineCrossingEvent):
-        key=(ev.camera_id,ev.track_id)
-        with self._lock:
-            self.crossings[key]=ev
-            ident=self.identities.get(key)
-            if ident and abs((ev.timestamp-ident.timestamp).total_seconds())<=self.pending_window_seconds: return self._apply(ident,ev)
-        return None
-    def _apply(self, ident:IdentitySeen, cross:LineCrossingEvent):
-        snapshot_path = cross.snapshot_path or ident.snapshot_path
-        if cross.direction=='ENTRY':
-            s,created=self.store.create_arrival(ident.person_id,self.store_id,cross.timestamp,cross.camera_id,ident.confidence,snapshot_path,confirmed=True)
-            p=self.presence[ident.person_id]; p.attendance_session_id=s['id']; p.status='PRESENT'
-            return {'type':'ARRIVAL' if created else 'PRESENCE','session':s}
-        if cross.direction=='EXIT':
-            s,closed=self.store.close_exit(ident.person_id,self.store_id,cross.timestamp,cross.camera_id,ident.confidence,snapshot_path)
-            p=self.presence[ident.person_id]; p.status='ABSENT'; p.attendance_session_id=None
-            if not closed:
-                self.store.add_person_event(ident.person_id,self.store_id,cross.camera_id,'EXIT_WITHOUT_OPEN_SESSION',cross.timestamp)
-                return {'type':'EXIT_WITHOUT_OPEN_SESSION'}
-            return {'type':'EXIT','session':s}
+
     def start_break(self, person_id: str, camera_id: str, timestamp: datetime | None = None, break_master_id: str | None = None):
         """Create a business-confirmed break event.
 
