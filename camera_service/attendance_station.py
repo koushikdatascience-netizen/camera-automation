@@ -134,6 +134,7 @@ class AttendanceStation:
                     recognized=None
 
             if action == "CHECK_IN":
+                c.execute('DELETE FROM attendance_auto_holds WHERE person_id=? AND store_id=?',(person_id,self.engine.store_id))
                 if session:
                     c.execute(
                         "UPDATE attendance_sessions SET entry_confirmed=1,arrival_time=?,"
@@ -151,6 +152,11 @@ class AttendanceStation:
                         ),
                     )
             elif action == "CHECK_OUT":
+                from zoneinfo import ZoneInfo
+                from cloud_portal.person_attendance_rules import business_date
+                policy=store.attendance_policy_snapshot(person_id,self.engine.store_id)['values']
+                day=business_date(now,policy['timezone'],policy.get('attendanceDayStartTime','00:00'))
+                c.execute('INSERT INTO attendance_auto_holds VALUES(?,?,?,?) ON CONFLICT(person_id,store_id) DO UPDATE SET business_date=excluded.business_date,reason=excluded.reason',(person_id,self.engine.store_id,day,'MANUAL_LOGOUT'))
                 if not session:
                     raise ValueError("No open attendance session")
                 c.execute(

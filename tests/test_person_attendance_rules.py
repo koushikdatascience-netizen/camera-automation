@@ -86,3 +86,8 @@ def test_business_date_uses_employee_timezone_at_utc_midnight_boundary():
                               checked_in=True, on_break=False, camera_coverage_healthy=True,
                               completed_episodes_today=0)
     assert result.business_date == "2026-10-08"
+def test_shop_day_boundary_before_and_after_start():
+    from datetime import datetime,timezone
+    from cloud_portal.person_attendance_rules import business_date
+    assert business_date(datetime(2026,10,11,0,29,tzinfo=timezone.utc),'Asia/Kolkata','06:00')=='2026-10-10'
+    assert business_date(datetime(2026,10,11,0,30,tzinfo=timezone.utc),'Asia/Kolkata','06:00')=='2026-10-11'

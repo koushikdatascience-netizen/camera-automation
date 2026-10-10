@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+def business_date(at,timezone_name,day_start='00:00'):
+    hours,minutes=map(int,day_start.split(':'))
+    if not 0<=hours<=23 or not 0<=minutes<=59:raise ValueError('Invalid attendance day boundary')
+    return (at.astimezone(ZoneInfo(timezone_name))-timedelta(hours=hours,minutes=minutes)).date().isoformat()
+
 
 @dataclass(frozen=True)
 class PersonAttendancePolicy:
@@ -20,6 +25,7 @@ class PersonAttendancePolicy:
     required_working_minutes: int = 540
     attendance_mode: str = "AUTO"
     timezone: str = "Asia/Kolkata"
+    attendance_day_start_time: str = '00:00'
 
     def __post_init__(self) -> None:
         if self.attendance_mode not in {"AUTO", "MANUAL"}:
@@ -33,6 +39,7 @@ class PersonAttendancePolicy:
         if not 1 <= self.required_working_minutes <= 1440:
             raise ValueError("invalid working target")
         ZoneInfo(self.timezone)
+        business_date(datetime.now(ZoneInfo(self.timezone)),self.timezone,self.attendance_day_start_time)
 
 
 @dataclass(frozen=True)
@@ -64,7 +71,7 @@ def evaluate_absence(
     if completed_episodes_today < 0:
         raise ValueError("episode count cannot be negative")
     elapsed = max(0.0, (now - last_seen_at).total_seconds() / 60)
-    day = now.astimezone(ZoneInfo(policy.timezone)).date().isoformat()
+    day = business_date(now,policy.timezone,policy.attendance_day_start_time)
     if not checked_in:
         return AbsenceEvaluation("NOT_CHECKED_IN", elapsed, day, ())
     if on_break:

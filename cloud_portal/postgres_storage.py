@@ -138,7 +138,7 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                 tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
                 grace_period_minutes INTEGER NOT NULL DEFAULT 15,
                 allowed_break_minutes INTEGER NOT NULL DEFAULT 60,
-                total_working_minutes INTEGER NOT NULL DEFAULT 480,
+                total_working_minutes INTEGER NOT NULL DEFAULT 540,
                 max_logoff_time TEXT NOT NULL DEFAULT '21:30',
                 absence_auto_logout_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata',
@@ -212,6 +212,8 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                 healthy_camera_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                 checked_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY(tenant_id,shop_id,crm_user_id))""",
+            """ALTER TABLE attendance_camera_coverage ADD COLUMN IF NOT EXISTS healthy_since TIMESTAMPTZ""",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_full_day_absence_once ON person_attendance_transitions(tenant_id,shop_id,crm_user_id,business_date) WHERE transition='FULL_DAY_ABSENT'""",
         ]
         with self._conn() as conn:
             for statement in statements:
@@ -632,6 +634,15 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                 WHERE id=:id AND tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge AND status='CLAIMED'"""),
                 {"status":status,"result":json.dumps(result),"now":self.now(),"id":command_id,
                  "tenant":tenant_id,"shop":shop_id,"edge":edge_id})
+            if out.rowcount and status=='FAILED':
+                command=conn.execute(text("SELECT command_type,request_json FROM edge_commands WHERE id=:id"),{'id':command_id}).mappings().first()
+                if command['command_type'] in {'ATTENDANCE_POLICY_CHECKOUT','ATTENDANCE_CONFIRMED_ACTION'}:
+                    request=command['request_json']
+                    conn.execute(text("""UPDATE edge_attendance_delivery SET status='RECONCILIATION_REQUIRED',error_code='EDGE_SESSION_CHECKOUT_MISMATCH'
+                        WHERE event_id=:id AND tenant_id=:t AND shop_id=:s AND status IN ('SUCCEEDED','CRM_CONFIRMED')"""),dict(id=command_id,t=tenant_id,s=shop_id))
+                    conn.execute(text("""UPDATE crm_auto_logout_actions SET status='RECONCILIATION_REQUIRED',last_error='edge_session_checkout_mismatch'
+                        WHERE tenant_id=:t AND shop_id=:s AND crm_user_id=:u AND absence_started_at=:a AND status='SUCCEEDED'"""),
+                        dict(t=tenant_id,s=shop_id,u=request['crm_user_id'],a=datetime.fromisoformat(request['absence_started_at'])))
         return bool(out.rowcount)
 
     def get_edge_command(self, command_id: str, tenant_id: str, shop_id: str | None = None) -> dict[str, Any] | None:
@@ -788,6 +799,11 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                               last_recognition_event_id: str | None = None, *, allow_on_break: bool = False) -> bool:
         now=self.now()
         with self._conn() as conn:
+            lock=int.from_bytes(hashlib.sha256(f'{tenant_id}|{shop_id}|{local_person_id}'.encode()).digest()[:8],'big',signed=True)
+            conn.execute(text('SELECT pg_advisory_xact_lock(:lock)'),{'lock':lock})
+            if conn.execute(text("""SELECT 1 FROM edge_attendance_delivery WHERE tenant_id=:t AND shop_id=:s
+                AND person_id=:p AND status IN ('CLAIMED','CRM_CONFIRMED','RECONCILIATION_REQUIRED','RETRY','MAPPING_REQUIRED') LIMIT 1"""),
+                {'t':tenant_id,'s':shop_id,'p':local_person_id}).first():return False
             conn.execute(text("""UPDATE crm_auto_logout_actions SET status='FAILED',
                 last_error='safe_preflight_retry_limit_exhausted',completed_at=:now
                 WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
@@ -935,6 +951,11 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                 return "RECONCILIATION_REQUIRED"
             recognition_advanced=presence["last_seen_at"]>absence_started_at
             activity_metadata=dict(activity.get("metadata") or {})
+            if activity_metadata.get('reason_code')=='MAX_LOGOFF_REACHED':recognition_advanced=False
+            bridge=activity_metadata.get('bridge_session')
+            if bridge:
+                activity_metadata['attendance_session_id']=bridge['session_id']
+                activity_metadata['edge_checkout_command_id']=activity['id']
             if recognition_advanced:
                 activity_metadata["recognitionAdvancedDuringCrmLogout"]=True
                 activity_metadata["crmLocalAttendanceMismatch"]="RECONCILIATION_REQUIRED"
@@ -958,6 +979,8 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                         "now":self.now(),"tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
                         "started":absence_started_at})
                 return "RECONCILIATION_REQUIRED"
+            if bridge:
+                self._queue_confirmed_bridge_checkout(conn,tenant_id,shop_id,crm_user_id,absence_started_at,activity,activity_metadata,bridge)
             conn.execute(text("""UPDATE attendance_presence SET checked_in=FALSE,on_break=FALSE,
                 checkout_claimed_at=NULL,updated_at=:now WHERE tenant_id=:tenant AND shop_id=:shop
                 AND local_person_id=:person AND checked_in=TRUE"""),{
@@ -969,6 +992,49 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                     "now":self.now(),"tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
                     "started":absence_started_at})
         return "SUCCEEDED"
+
+    def _queue_confirmed_bridge_checkout(self,conn,tenant,shop,user,started,activity,metadata,bridge):
+        from zoneinfo import ZoneInfo
+        stamp=activity['occurred_at'].isoformat()
+        event={'event_id':activity['id'],'event_type':'ATTENDANCE_EXIT','person_id':bridge['person_id'],
+            'store_id':shop,'camera_id':activity.get('camera_id'),'event_time':stamp,
+            'metadata':{**metadata,'attendance_sync_bridge':True,'attendance_source':'RECOGNITION',
+                'predecessor_event_id':bridge['predecessor_event_id'],'prior_state':'IN','new_state':'OUT',
+                'crm_delivery_owner':'cloud','evidence_manifest':activity.get('evidence') or {},
+                'evidence_missing':{'action_capture':'cloud action uses last-seen evidence; no fresh local frame'}}}
+        envelope={'event_id':activity['id'],'event_type':'ATTENDANCE_EXIT','event_time':stamp,
+            'tenant_id':tenant,'shop_id':shop,'edge_id':bridge['edge_id'],'camera_id':event['camera_id'],'payload':event}
+        digest=hashlib.sha256(json.dumps(self._attendance_identity(envelope),sort_keys=True).encode()).hexdigest()
+        conn.execute(text("""INSERT INTO edge_attendance_delivery(event_id,tenant_id,shop_id,edge_id,person_id,crm_user_id,
+            session_id,predecessor_id,effective_predecessor_id,identity_hash,event_type,status,crm_message,updated_at)
+            VALUES(:id,:tenant,:shop,:edge,:person,:user,:session,:pred,:pred,:digest,'ATTENDANCE_EXIT','SUCCEEDED',:message,:now)
+            ON CONFLICT(event_id) DO NOTHING"""),dict(id=activity['id'],tenant=tenant,shop=shop,edge=bridge['edge_id'],person=bridge['person_id'],user=user,
+                session=bridge['session_id'],pred=bridge['predecessor_event_id'],digest=digest,message=metadata.get('crm_response_message'),now=self.now().isoformat()))
+        from cloud_portal.person_attendance_rules import business_date
+        policy=metadata.get('policy_snapshot') or {}
+        day=business_date(activity['occurred_at'],policy.get('timezone','Asia/Kolkata'),policy.get('attendanceDayStartTime',policy.get('attendance_day_start_time','00:00')))
+        request={'event':event,'tenant_id':tenant,'edge_id':bridge['edge_id'],'absence_started_at':started.isoformat(),'business_date':day,'crm_user_id':user}
+        conn.execute(text("""INSERT INTO edge_commands(id,tenant_id,shop_id,edge_id,command_type,request_json,status,created_at)
+            VALUES(:id,:tenant,:shop,:edge,'ATTENDANCE_POLICY_CHECKOUT',CAST(:request AS JSONB),'PENDING',:now) ON CONFLICT(id) DO NOTHING"""),
+            dict(id=activity['id'],tenant=tenant,shop=shop,edge=bridge['edge_id'],request=json.dumps(request),now=self.now()))
+
+    def queue_manual_attendance_action(self,envelope,user):
+        from cloud_portal.attendance_delivery import attendance_payload
+        from zoneinfo import ZoneInfo
+        payload=attendance_payload(envelope);metadata=payload['metadata']
+        when=datetime.fromisoformat(envelope['event_time'])
+        event={**payload,'event_id':envelope['event_id'],'event_type':envelope['event_type'],
+            'event_time':envelope['event_time'],'camera_id':envelope.get('camera_id'),
+            'metadata':{**metadata,'reason_code':'OPERATOR_CHECKOUT','crm_delivery_owner':'cloud'}}
+        zone=ZoneInfo((metadata.get('attendance_policy_snapshot') or {}).get('values',{}).get('timezone','Asia/Kolkata'))
+        from cloud_portal.person_attendance_rules import business_date
+        day_policy=(metadata.get('attendance_policy_snapshot') or {}).get('values',{})
+        day=business_date(when,day_policy.get('timezone','Asia/Kolkata'),day_policy.get('attendanceDayStartTime','00:00'))
+        request=dict(event=event,tenant_id=envelope['tenant_id'],edge_id=envelope['edge_id'],absence_started_at=when.isoformat(),business_date=day,crm_user_id=user)
+        with self._conn() as conn:
+            conn.execute(text("""INSERT INTO edge_commands(id,tenant_id,shop_id,edge_id,command_type,request_json,status,created_at)
+                VALUES(:id,:t,:s,:edge,'ATTENDANCE_CONFIRMED_ACTION',CAST(:request AS JSONB),'PENDING',:now) ON CONFLICT(id) DO NOTHING"""),
+                dict(id=envelope['event_id'],t=envelope['tenant_id'],s=envelope['shop_id'],edge=envelope['edge_id'],request=json.dumps(request),now=self.now()))
 
     def list_v2_attendance_presence(self, limit: int = 200) -> list[dict[str, Any]]:
         with self._conn() as conn:
@@ -1007,6 +1073,36 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                     "details":json.dumps(details),
                 })
         return result.rowcount == 1
+
+    def record_edge_attendance_observations(self,tenant,shop,observations):
+        with self._conn() as conn:
+            for item in observations[:1000]:
+                try:seen=datetime.fromisoformat(item['seen_at'])
+                except (KeyError,ValueError,TypeError):continue
+                if seen.tzinfo is None or seen>self.now()+timedelta(seconds=10):continue
+                conn.execute(text("""UPDATE attendance_presence SET last_seen_at=:seen
+                    WHERE tenant_id=:t AND shop_id=:s AND local_person_id=:p
+                    AND last_seen_at<:seen AND checked_in=TRUE"""),dict(t=tenant,s=shop,p=str(item.get('person_id') or ''),seen=seen))
+
+    def attendance_day_decisions(self,tenant,shop):
+        with self._conn() as conn:
+            rows=conn.execute(text("""SELECT DISTINCT ON (t.crm_user_id,t.business_date)
+                t.crm_user_id,t.business_date,t.transition,t.occurred_at,t.details_json,m.local_person_id
+                FROM person_attendance_transitions t JOIN crm_person_mappings m
+                ON m.tenant_id=t.tenant_id AND m.shop_id=t.shop_id AND m.crm_user_id=t.crm_user_id
+                WHERE t.tenant_id=:t AND t.shop_id=:s AND t.transition IN ('FULL_DAY_ABSENT','ADMIN_DAY_CORRECTION')
+                ORDER BY t.crm_user_id,t.business_date,t.occurred_at DESC"""),dict(t=tenant,s=shop)).mappings().all()
+        return [dict(r) for r in rows]
+
+    def correct_attendance_day(self,tenant,shop,user,day,actor,note,status):
+        with self._conn() as conn:
+            if not conn.execute(text("""SELECT 1 FROM person_attendance_transitions WHERE tenant_id=:t AND shop_id=:s
+                AND crm_user_id=:u AND business_date=:d AND transition='FULL_DAY_ABSENT'"""),dict(t=tenant,s=shop,u=user,d=day)).first():return False
+            now=self.now()
+            conn.execute(text("""INSERT INTO person_attendance_transitions(tenant_id,shop_id,crm_user_id,business_date,
+                absence_started_at,transition,occurred_at,details_json) VALUES(:t,:s,:u,:d,:now,'ADMIN_DAY_CORRECTION',:now,CAST(:detail AS JSONB))"""),
+                dict(t=tenant,s=shop,u=user,d=day,now=now,detail=json.dumps({'actor':actor,'note':note,'status':status,'crmMutation':False})))
+        return True
 
     def list_v2_absence_alerts(self, tenant_id: str, shop_id: str, crm_user_id: str,
                                business_date: str, limit: int = 100) -> list[dict[str, Any]]:
@@ -1067,7 +1163,7 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
             "emails":json.dumps(policy.get("email_recipients") or []),
             "whatsapp":json.dumps(policy.get("whatsapp_recipients") or []),
             "updated_at":now,
-            "rules":json.dumps({k:policy[k] for k in ('shift_start_time','late_grace_minutes','scheduled_weekdays','overtime_enabled','attendance_mode','attendanceMode','absence_monitoring_enabled','absenceMonitoringEnabled','mark_absent_after_minutes','markAbsentAfterMinutes') if k in policy}),
+            "rules":json.dumps({k:policy[k] for k in ('shift_start_time','late_grace_minutes','scheduled_weekdays','overtime_enabled','attendance_mode','attendanceMode','absence_monitoring_enabled','absenceMonitoringEnabled','mark_absent_after_minutes','markAbsentAfterMinutes','attendance_day_start_time','presence_update_interval_minutes','out_of_camera_grace_minutes','max_out_of_camera_occurrences_per_day','admin_notification_after_minutes','day_end_auto_logout_enabled') if k in policy}),
         }
         with self._conn() as conn:
             conn.execute(text("""INSERT INTO attendance_policies(
@@ -1096,7 +1192,7 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
         if not row:
             return {
                 "tenant_id":tenant_id,"shop_id":shop_id,"grace_period_minutes":15,
-                "allowed_break_minutes":60,"total_working_minutes":480,"max_logoff_time":"21:30",
+                "allowed_break_minutes":60,"total_working_minutes":540,"max_logoff_time":"21:30",
                 "absence_auto_logout_enabled":True,"timezone":"Asia/Kolkata",
                 "email_recipients":[],"whatsapp_recipients":[],"updated_at":None,
             }
@@ -1347,7 +1443,7 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                 reported_zone=camera.get("camera_zone")
                 if reported_zone is not None and str(reported_zone)!=str(camera_zone):
                     continue
-                latest_by_camera[identifier]=bool(camera.get("enabled")) and bool(camera.get("online"))
+                latest_by_camera[identifier]=bool(camera.get("enabled")) and bool(camera.get("online")) and camera.get('recognition_healthy',True) is True and not camera.get('last_error')
                 break
         healthy=sorted(camera for camera,online in latest_by_camera.items() if online)
         reason="healthy" if healthy else ("cameras_offline" if fresh_heartbeat else "heartbeat_stale_or_missing")
@@ -1364,18 +1460,22 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
             heartbeat_max_age_seconds=heartbeat_max_age_seconds).get("state")=="HEALTHY"
 
     def save_v2_camera_coverage(self, tenant_id: str, shop_id: str, crm_user_id: str,
-                                coverage: dict[str, Any], checked_at: datetime) -> None:
+                                coverage: dict[str, Any], checked_at: datetime) -> datetime | None:
         with self._conn() as conn:
-            conn.execute(text("""INSERT INTO attendance_camera_coverage(
-                tenant_id,shop_id,crm_user_id,camera_zone,state,reason,healthy_camera_ids_json,checked_at)
-                VALUES(:tenant,:shop,:user,:zone,:state,:reason,CAST(:cameras AS JSONB),:now)
+            result=conn.execute(text("""INSERT INTO attendance_camera_coverage(
+                tenant_id,shop_id,crm_user_id,camera_zone,state,reason,healthy_camera_ids_json,checked_at,healthy_since)
+                VALUES(:tenant,:shop,:user,:zone,:state,:reason,CAST(:cameras AS JSONB),:now,:now)
                 ON CONFLICT(tenant_id,shop_id,crm_user_id) DO UPDATE SET
+                  healthy_since=CASE WHEN EXCLUDED.state<>'HEALTHY' OR attendance_camera_coverage.state<>'HEALTHY'
+                      OR attendance_camera_coverage.checked_at < EXCLUDED.checked_at - INTERVAL '2 minutes'
+                      THEN EXCLUDED.checked_at ELSE COALESCE(attendance_camera_coverage.healthy_since,EXCLUDED.checked_at) END,
                   camera_zone=EXCLUDED.camera_zone,state=EXCLUDED.state,reason=EXCLUDED.reason,
-                  healthy_camera_ids_json=EXCLUDED.healthy_camera_ids_json,checked_at=EXCLUDED.checked_at"""),{
+                  healthy_camera_ids_json=EXCLUDED.healthy_camera_ids_json,checked_at=EXCLUDED.checked_at RETURNING healthy_since"""),{
                     "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
                     "zone":coverage.get("cameraZone"),"state":coverage.get("state","UNKNOWN"),
                     "reason":coverage.get("reason","unknown"),
                     "cameras":json.dumps(coverage.get("healthyCameraIds") or []),"now":checked_at})
+            return result.scalar()
 
     def get_v2_camera_coverage(self, tenant_id: str, shop_id: str, crm_user_id: str) -> dict[str, Any] | None:
         with self._conn() as conn:
@@ -1450,26 +1550,25 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
 
 
     def claim_due_max_logoff_checkouts(self, now: datetime, limit: int = 50) -> list[dict[str, Any]]:
-        with self._conn() as conn:
-            rows=conn.execute(text("""WITH due AS (
-                    SELECT p.tenant_id,p.shop_id,p.local_person_id
-                    FROM attendance_presence p
-                    JOIN attendance_policies ap ON ap.tenant_id=p.tenant_id AND ap.shop_id=p.shop_id
-                    WHERE NOT EXISTS (SELECT 1 FROM person_attendance_policies pp
-                                      WHERE pp.tenant_id=p.tenant_id AND pp.shop_id=p.shop_id
-                                        AND pp.crm_user_id=p.crm_user_id)
-                      AND p.checked_in=TRUE
-                      AND ((:now AT TIME ZONE ap.timezone)::time >= ap.max_logoff_time::time)
-                      AND (p.checkout_claimed_at IS NULL OR p.checkout_claimed_at < :retry_before)
-                    ORDER BY p.updated_at
-                    FOR UPDATE OF p SKIP LOCKED
-                    LIMIT :limit
-                )
-                UPDATE attendance_presence p SET checkout_claimed_at=:now,updated_at=:now
-                FROM due
-                WHERE p.tenant_id=due.tenant_id AND p.shop_id=due.shop_id
-                  AND p.local_person_id=due.local_person_id
-                RETURNING p.*"""),{
-                    "now":now,"retry_before":now-timedelta(minutes=5),"limit":max(1,min(200,int(limit)))
-                }).mappings().all()
-        return [dict(row) for row in rows]
+        from cloud_portal.policy_resolution import resolve_attendance_policy
+        from zoneinfo import ZoneInfo
+        candidates=self.list_v2_attendance_presence(limit=limit)
+        due=[]
+        for row in candidates:
+            policy=resolve_attendance_policy(row.get('policy_json'),self.attendance_policy(row['tenant_id'],row['shop_id'])).values
+            if not policy.get('dayEndAutoLogoutEnabled',True):continue
+            zone=ZoneInfo(policy['timezone']);local_now=now.astimezone(zone)
+            with self._conn() as conn:
+                login=conn.execute(text("SELECT MAX(occurred_at) FROM attendance_activity WHERE tenant_id=:t AND shop_id=:s AND crm_user_id=:u AND activity_type='CHECK_IN'"),dict(t=row['tenant_id'],s=row['shop_id'],u=row['crm_user_id'])).scalar()
+            login=(login or row['last_seen_at']).astimezone(zone)
+            hh,mm=map(int,policy['maxLogoffTime'].split(':'))
+            deadline=login.replace(hour=hh,minute=mm,second=0,microsecond=0)
+            if deadline<login:deadline+=timedelta(days=1)
+            if local_now<deadline:continue
+            with self._conn() as conn:
+                claimed=conn.execute(text("""UPDATE attendance_presence SET checkout_claimed_at=:now
+                    WHERE tenant_id=:t AND shop_id=:s AND crm_user_id=:u AND checked_in=TRUE
+                    AND (checkout_claimed_at IS NULL OR checkout_claimed_at<:retry) RETURNING crm_user_id"""),
+                    dict(t=row['tenant_id'],s=row['shop_id'],u=row['crm_user_id'],now=now,retry=now-timedelta(minutes=5))).first()
+            if claimed:due.append(row)
+        return due

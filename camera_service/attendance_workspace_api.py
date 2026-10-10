@@ -17,12 +17,18 @@ class WorkspacePolicy(BaseModel):
     attendance_mode:str=Field(default='AUTO',pattern='^(AUTO|MANUAL)$')
     grace_period_minutes:int=Field(default=15,ge=1,le=1440)
     allowed_break_minutes:int=Field(default=60,ge=0,le=1440)
-    total_working_minutes:int=Field(default=480,ge=1,le=1440)
+    total_working_minutes:int=Field(default=540,ge=1,le=1440)
     max_logoff_time:str=Field(default='21:30',pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
     absence_auto_logout_enabled:bool=True
     absence_monitoring_enabled:bool=True
     mark_absent_after_minutes:int=Field(default=60,ge=60,le=1440)
+    presence_update_interval_minutes:int=Field(default=2,ge=1,le=60)
+    out_of_camera_grace_minutes:int=Field(default=5,ge=1,le=1440)
+    max_out_of_camera_occurrences_per_day:int=Field(default=5,ge=1,le=100)
+    admin_notification_after_minutes:int=Field(default=15,ge=1,le=1440)
+    day_end_auto_logout_enabled:bool=True
     timezone:str='Asia/Kolkata'
+    attendance_day_start_time:str=Field(default='00:00',pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
     email_recipients:list[str]=Field(default_factory=list,max_length=50)
     whatsapp_recipients:list[str]=Field(default_factory=list,max_length=50)
     shift_start_time:str|None=Field(default=None,pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
@@ -97,8 +103,11 @@ def install_local(app,get_store,get_config):
         for person in people:
             faces=store.list_faces(person['id']);face=next((f for f in faces if f.get('image_path')),None)
             person['photo_url']=f"/api/v1/personnel/{person['id']}/faces/{face['id']}/image" if face else None
-        return build_workspace(people,sessions,events,query,evidence=lambda e:local_evidence(e,config),
+        result=build_workspace(people,sessions,events,query,evidence=lambda e:local_evidence(e,config),
             policies={p['id']:local_policy(store,config.store_id,p['id']) for p in people})
+        from camera_service.attendance_workspace import apply_day_decisions
+        apply_day_decisions(result,store.attendance_day_decisions(config.store_id),query)
+        return result
 
     @app.get('/api/v2/attendance/workspace')
     def workspace(request:Request):
@@ -164,6 +173,8 @@ def install_local(app,get_store,get_config):
 
 
 def validate_policy(value):
+    if not value['out_of_camera_grace_minutes']<value['admin_notification_after_minutes']<value['mark_absent_after_minutes']:
+        raise HTTPException(422,'Camera grace must be less than notification threshold and full-day absence threshold')
     try:
         from zoneinfo import ZoneInfo
         ZoneInfo(value['timezone'])
@@ -312,7 +323,26 @@ def install_cloud(app,get_store,require_session,scope,admin,resolve_media):
             try:resolve_media(tenant,principal.shop_id,media_event_id,'video');video={'url':base+'/clip','captured_at':None}
             except HTTPException:pass
             return {'event_id':event['event_id'],'media_event_id':media_event_id,'camera_id':event['camera_id'],'images':images,'video':video,'status':'COMPLETE' if len(images)==3 and video else 'PARTIAL' if images or video else 'Evidence unavailable'}
-        return build_workspace(people,sessions,events,query,evidence=evidence,policies=policies)
+        result=build_workspace(people,sessions,events,query,evidence=evidence,policies=policies)
+        if hasattr(store,'attendance_day_decisions'):
+            from camera_service.attendance_workspace import apply_day_decisions
+            apply_day_decisions(result,store.attendance_day_decisions(tenant,principal.shop_id),query)
+        result['can_correct_day']=principal.role.upper() in {'OWNER','ADMIN','SUPERADMIN'}
+        return result
+
+    @app.post('/portal/v2/tenants/{tenant_id}/attendance/days/{day}/correction')
+    def correct_day(tenant_id:str,day:str,body:dict,principal=Depends(require_session)):
+        from datetime import date
+        scope(tenant_id,principal);admin(principal)
+        try:date.fromisoformat(day)
+        except ValueError:raise HTTPException(422,'Invalid attendance date') from None
+        person=str(body.get('person_id') or '');note=str(body.get('note') or '').strip();status=body.get('status')
+        if not note or len(note)>500 or status not in {'PRESENT','ABSENT'}:raise HTTPException(422,'Status and audit note required')
+        store=get_store();mapping=store.crm_person_mapping(tenant_id,principal.shop_id,person)
+        if not mapping:raise HTTPException(404,'Scoped employee mapping required')
+        if not store.correct_attendance_day(tenant_id,principal.shop_id,mapping['crm_user_id'],day,str(principal.user_id),note,status):
+            raise HTTPException(409,'No full-day absence decision for this date')
+        return {'status':status,'audited':True,'crm_mutation':False}
 
     @app.get('/portal/v2/tenants/{tenant_id}/attendance/workspace')
     def workspace(tenant_id:str,request:Request,principal=Depends(require_session)):
@@ -349,8 +379,11 @@ def install_cloud(app,get_store,require_session,scope,admin,resolve_media):
             value['attendance_mode']=value.get('attendanceMode',value.get('attendance_mode','AUTO'))
             value['absence_monitoring_enabled']=value.get('absenceMonitoringEnabled',value.get('absence_monitoring_enabled',True))
             value['mark_absent_after_minutes']=value.get('markAbsentAfterMinutes',value.get('mark_absent_after_minutes',60))
-        for camel,snake in {'attendanceMode':'attendance_mode','absenceMonitoringEnabled':'absence_monitoring_enabled','markAbsentAfterMinutes':'mark_absent_after_minutes'}.items():
-            resolved_sources.setdefault(snake,'SHOP' if camel in shop_policy else 'SYSTEM')
+        from cloud_portal.policy_resolution import SHOP_ALIASES
+        applied=resolve_attendance_policy(override if person_id else {},shop_policy)
+        for camel,snake in SHOP_ALIASES.items():
+            value[snake]=applied.values[camel]
+            resolved_sources[snake]=applied.sources[camel]
         return {'policy':value,'sources':resolved_sources,'updated_at':value.get('updatedAt') or value.get('updated_at'),
             'can_edit':principal.role.upper() in {'OWNER','ADMIN','SUPERADMIN'},'person_id':person_id}
 
@@ -364,7 +397,7 @@ def install_cloud(app,get_store,require_session,scope,admin,resolve_media):
             mapping=store.crm_person_mapping(tenant_id,principal.shop_id,person_id)
             if not mapping:raise HTTPException(404,'Scoped CRM employee mapping required')
             existing=store.person_attendance_policy(tenant_id,principal.shop_id,str(mapping['crm_user_id'])) or {}
-            aliases={'grace_period_minutes':'gracePeriodMinutes','allowed_break_minutes':'allowedBreakMinutes','total_working_minutes':'requiredWorkingMinutes','max_logoff_time':'maxLogoffTime','absence_auto_logout_enabled':'absenceAutoLogoutEnabled','attendance_mode':'attendanceMode','absence_monitoring_enabled':'absenceMonitoringEnabled','mark_absent_after_minutes':'markAbsentAfterMinutes','late_grace_minutes':'late_grace_minutes'}
+            aliases={'attendance_day_start_time':'attendanceDayStartTime','presence_update_interval_minutes':'presenceUpdateIntervalMinutes','out_of_camera_grace_minutes':'outOfCameraGraceMinutes','max_out_of_camera_occurrences_per_day':'maxOutOfCameraOccurrencesPerDay','admin_notification_after_minutes':'adminNotificationAfterMinutes','day_end_auto_logout_enabled':'dayEndAutoLogoutEnabled','grace_period_minutes':'gracePeriodMinutes','allowed_break_minutes':'allowedBreakMinutes','total_working_minutes':'requiredWorkingMinutes','max_logoff_time':'maxLogoffTime','absence_auto_logout_enabled':'absenceAutoLogoutEnabled','attendance_mode':'attendanceMode','absence_monitoring_enabled':'absenceMonitoringEnabled','mark_absent_after_minutes':'markAbsentAfterMinutes','late_grace_minutes':'late_grace_minutes'}
             saved=store.upsert_person_attendance_policy(tenant_id,principal.shop_id,str(mapping['crm_user_id']),{**existing,**{aliases.get(k,k):v for k,v in value.items()}})
         else:
             saved=store.upsert_attendance_policy(tenant_id,principal.shop_id,value)

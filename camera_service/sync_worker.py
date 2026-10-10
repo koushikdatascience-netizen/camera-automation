@@ -118,6 +118,8 @@ class EdgeSyncWorker:
             heartbeat_sync = {"sent": False}
             try:
                 heartbeat = self.cloud_client.heartbeat(self.edge_config, self._edge_status_payload(license_status))
+                if 'attendance_day_decisions' in heartbeat:
+                    self.store.save_attendance_day_decisions(self.edge_config.shop_id,heartbeat['attendance_day_decisions'])
                 heartbeat_sync = {"sent": True, "received_at": heartbeat.get("received_at")}
             except Exception as exc:
                 heartbeat_sync = {"sent": False, "error": str(exc)}
@@ -129,8 +131,8 @@ class EdgeSyncWorker:
                     try:
                         result = self._execute_command(command)
                         camera_test_failed = (
-                            str(command.get("command_type") or "") == "CAMERA_TEST"
-                            and result.get("success") is False
+                            str(command.get("command_type") or "") in {"CAMERA_TEST","ATTENDANCE_POLICY_CHECKOUT","ATTENDANCE_CONFIRMED_ACTION"}
+                            and (result.get("success") is False or result.get('ok') is False)
                         )
                         if camera_test_failed:
                             self.cloud_client.complete_edge_command(command["id"], {
@@ -297,6 +299,7 @@ class EdgeSyncWorker:
                     "enabled": bool(camera.enabled),
                     "features": camera.features.model_dump(),
                     "online": bool(runtime.online) if runtime else False,
+                    "recognition_healthy": bool(runtime and runtime.online and runtime.ai_fps>0 and not runtime.last_error),
                     "state": runtime.state.value if runtime and hasattr(runtime.state, "value") else (str(runtime.state) if runtime else "UNKNOWN"),
                     "last_frame_at": runtime.last_frame_at if runtime else None,
                     "capture_fps": runtime.capture_fps if runtime else 0.0,
@@ -324,8 +327,12 @@ class EdgeSyncWorker:
             # temporarily unable to provide the optional personnel inventory.
             personnel = []
         from camera_service.updater import current_build
+        with self.store._conn() as conn:
+            observations=[dict(r) for r in conn.execute('SELECT person_id,seen_at FROM attendance_observations')]
         return {
             "service": "SnapKeyVisionAI",
+            "capabilities": ["attendance_policy_checkout_v1","attendance_cloud_actions_v1"],
+            "attendance_observations":observations,
             "build": current_build(),
             "license": {
                 "active": bool(license_status.active),
@@ -342,6 +349,13 @@ class EdgeSyncWorker:
     def _execute_command(self, command: dict[str, Any]) -> dict[str, Any]:
         command_type=str(command.get("command_type") or "")
         request=command.get("request") or {}
+        if command_type in {'ATTENDANCE_POLICY_CHECKOUT','ATTENDANCE_CONFIRMED_ACTION'}:
+            event=request.get('event') or {}
+            if (event.get('store_id')!=self.edge_config.shop_id
+                    or request.get('tenant_id')!=self.edge_config.tenant_id
+                    or request.get('edge_id')!=self.edge_config.edge_id):
+                raise ValueError('Policy checkout scope mismatch')
+            return self.store.apply_policy_checkout(request)
         if command_type == "CAMERA_DELETE":
             camera_id = str(request.get("camera_id") or "")
             if self.camera_manager is None:

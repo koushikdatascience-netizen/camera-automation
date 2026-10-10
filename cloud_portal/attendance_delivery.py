@@ -179,6 +179,10 @@ class AttendanceDeliveryStore:
                 lock = int.from_bytes(hashlib.sha256(
                     f"{args['tenant']}|{args['shop']}|{args['person']}".encode()).digest()[:8], "big", signed=True)
                 self._delivery_execute(conn, "SELECT pg_advisory_xact_lock(:lock)", {"lock": lock})
+                busy=self._delivery_execute(conn,"""SELECT 1 FROM crm_auto_logout_actions
+                    WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
+                    AND status IN ('IN_FLIGHT','CRM_CONFIRMED_LOCAL_PENDING','RECONCILIATION_REQUIRED') LIMIT 1""",args).fetchone()
+                if busy:return 'RECONCILIATION_REQUIRED',False
             duplicate = self._delivery_execute(conn, """SELECT event_id FROM edge_attendance_delivery
                 WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person AND event_id<>:id
                 AND ((session_id=:session AND event_type=:type AND :type IN ('ATTENDANCE_ENTRY','ATTENDANCE_EXIT'))
@@ -264,6 +268,35 @@ class AttendanceDeliveryStore:
             return self._delivery_execute(conn, """SELECT event_id FROM edge_attendance_delivery
                 WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person LIMIT 1""",
                 dict(tenant=tenant,shop=shop,person=person)).fetchone() is not None
+
+    def active_bridge_session(self, tenant, shop, person):
+        """Only a confirmed, unclosed session can own a policy checkout."""
+        with self._conn() as conn:
+            row=self._delivery_execute(conn, """SELECT entry.* FROM edge_attendance_delivery entry
+                WHERE entry.tenant_id=:tenant AND entry.shop_id=:shop AND entry.person_id=:person
+                AND entry.event_type='ATTENDANCE_ENTRY' AND entry.status='SUCCEEDED'
+                AND NOT EXISTS (SELECT 1 FROM edge_attendance_delivery exit
+                    WHERE exit.tenant_id=entry.tenant_id AND exit.shop_id=entry.shop_id
+                    AND exit.person_id=entry.person_id AND exit.session_id=entry.session_id
+                    AND exit.event_type='ATTENDANCE_EXIT' AND exit.status='SUCCEEDED')
+                ORDER BY entry.updated_at DESC LIMIT 1""",
+                dict(tenant=tenant,shop=shop,person=person)).fetchone()
+            if not row:return None
+            session=dict(row._mapping) if hasattr(row,'_mapping') else dict(row)
+            latest=self._delivery_execute(conn,"""SELECT event_id,status FROM edge_attendance_delivery
+                WHERE tenant_id=:tenant AND shop_id=:shop AND person_id=:person
+                ORDER BY updated_at DESC LIMIT 1""",dict(tenant=tenant,shop=shop,person=person)).fetchone()
+            session['predecessor_event_id']=latest[0]
+            session['ready']=latest[1]=='SUCCEEDED'
+            heartbeat=self._delivery_execute(conn,"""SELECT status_json,received_at FROM edge_heartbeats
+                WHERE tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge
+                ORDER BY received_at DESC LIMIT 1""",dict(tenant=tenant,shop=shop,edge=session['edge_id'])).fetchone()
+            status=(json.loads(heartbeat[0]) if isinstance(heartbeat[0],str) else heartbeat[0]) if heartbeat else {}
+            received=heartbeat[1] if heartbeat else None
+            received=datetime.fromisoformat(received) if isinstance(received,str) else received
+            session['checkout_capable']=bool(received and 0 <= (datetime.now(timezone.utc)-received).total_seconds() <= 90
+                and 'attendance_policy_checkout_v1' in (status or {}).get('capabilities',[]))
+            return session
 
     def attendance_delivery_receipt(self, tenant, shop, event_id):
         with self._conn() as conn:

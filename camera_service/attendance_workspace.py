@@ -12,6 +12,29 @@ from cloud_portal.policy_resolution import resolve_attendance_policy
 from camera_service.attendance_state import STATES,session_state
 
 UTC=timezone.utc
+
+
+def apply_day_decisions(result,decisions,query):
+    """Day classification never destroys the original session or worked minutes."""
+    start,end=query.window(datetime.now(UTC));days=[]
+    for d in decisions:
+        day=str(d['business_date']);person=d['local_person_id'];details=d.get('details_json') or {}
+        status='ABSENT' if d['transition']=='FULL_DAY_ABSENT' else details.get('status','ABSENT')
+        if query.person_id and query.person_id!=person:continue
+        if not start.astimezone(ZoneInfo(query.timezone)).date().isoformat()<=day<end.astimezone(ZoneInfo(query.timezone)).date().isoformat():continue
+        days.append({'person_id':person,'date':day,'status':status,'reason':d['transition'],'occurred_at':str(d['occurred_at'])})
+        for row in result['_all_items']:
+            from cloud_portal.person_attendance_rules import business_date
+            policy=(row.get('policy') or {}).get('values') or {}
+            row_day=business_date(instant(row['login']),policy.get('timezone',query.timezone),policy.get('attendanceDayStartTime','00:00'))
+            if row['person_id']==person and row_day==day:
+                row['attendance_day_status']=status;row['attendance_day']=day
+                if status=='ABSENT':
+                    row['status_label']+=' · Entire day ABSENT'
+                    row['compliance']=list(dict.fromkeys([*row['compliance'],'FULL_DAY_ABSENT']))
+    result['attendance_days']=days
+    absent={d['person_id'] for d in days if d['status']=='ABSENT'}
+    if absent:result['summary']['absent_employees']=max(len(absent),result['summary'].get('absent_employees') or 0)
 EVENTS={'ATTENDANCE_ENTRY','ATTENDANCE_EXIT','BREAK_START','BREAK_END','CHECK_IN','CHECK_OUT','GRACE_EXCEEDED',
         'AUTO_LOGIN','AUTO_LOGOUT','LOGIN','LOGOUT','BREAK_IN','BREAK_OUT','GRACE_PERIOD_EXPIRED','MANUAL_CORRECTION',
         'MANUAL_CHECK_IN','MANUAL_CHECK_OUT','MANUAL_START_BREAK','MANUAL_END_BREAK'}
@@ -161,7 +184,7 @@ def build_workspace(people,sessions,events,query:WorkspaceQuery,*,now=None,evide
         if query.status and state!=query.status:continue
         snapshot=next((e['policy_applied'] for e in history if e['policy_applied']),None)
         applied=(snapshot or policy_snapshot(policies.get(pid,{})))
-        policy=applied.get('values') or {};required=int(policy.get('requiredWorkingMinutes',480))
+        policy=applied.get('values') or {};required=int(policy.get('requiredWorkingMinutes',540))
         if policy.get('shift_start_time'):
             late_determined=True
             hh,mm=map(int,policy['shift_start_time'].split(':'))

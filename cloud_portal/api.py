@@ -240,7 +240,7 @@ class AttendanceStationActionRequest(BaseModel):
 class AttendancePolicyRequest(BaseModel):
     grace_period_minutes: int = Field(default=15, ge=1, le=240)
     allowed_break_minutes: int = Field(default=60, ge=0, le=480)
-    total_working_minutes: int = Field(default=480, ge=1, le=1440)
+    total_working_minutes: int = Field(default=540, ge=1, le=1440)
     max_logoff_time: str = Field(default="21:30", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     absence_auto_logout_enabled: bool = True
     timezone: str = "Asia/Kolkata"
@@ -258,6 +258,7 @@ class PersonAttendancePolicyRequest(BaseModel):
     markAbsentAfterMinutes: int = Field(default=60, ge=3, le=1440)
     requiredWorkingMinutes: int = Field(default=540, ge=1, le=1440)
     dayEndAutoLogoutEnabled: bool = True
+    attendanceDayStartTime: str = Field(default='00:00',pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
     absenceMonitoringEnabled: bool = True
     timezone: str = "Asia/Kolkata"
     emailNotificationsEnabled: bool = True
@@ -786,7 +787,7 @@ def _notify_cloud_event(envelope: dict[str, Any]) -> None:
     event_type=str(envelope.get("event_type") or "")
     alert_types={
         "UNKNOWN_INCIDENT","UNKNOWN_INSIDE_ALERT","CROWD_ALERT","LONG_BREAK_ALERT",
-        "AUTO_CHECK_OUT","MAX_LOGOFF_AUTO_CHECK_OUT","ATTENDANCE_POLICY_VIOLATION",
+        "AUTO_CHECK_OUT","MAX_LOGOFF_AUTO_CHECK_OUT","ATTENDANCE_POLICY_VIOLATION","ATTENDANCE_SYNC_FAILURE","CAMERA_OFFLINE",
     }
     if event_type not in alert_types:
         return
@@ -1456,6 +1457,9 @@ def _synchronize_attendance_bridge(envelope, *, historical_missing_receipt=False
         # These are the same services used by the portal attendance station.
         when=datetime.fromisoformat(str(envelope['event_time']).replace('Z','+00:00'))
         event_type=envelope['event_type']
+        if (str(envelope['event_id']).startswith('portal-manual:')
+                and hasattr(store,'queue_manual_attendance_action')):
+            store.queue_manual_attendance_action(envelope,str(mapping['crm_user_id']))
         if event_type=='ATTENDANCE_ENTRY' and hasattr(store,'touch_attendance_presence'):
             store.touch_attendance_presence(tenant_id=tenant,shop_id=shop,local_person_id=person,
                 crm_user_id=str(mapping['crm_user_id']),seen_at=when,camera_id=envelope.get('camera_id'),
@@ -1495,6 +1499,13 @@ def _synchronize_attendance_bridge(envelope, *, historical_missing_receipt=False
         # A confirmed remote mutation must only retry local finalization.
         if status=='CRM_CONFIRMED': failure='CRM_CONFIRMED'
         store.set_attendance_delivery(envelope,failure,known_code,retry_seconds=5)
+        if failure in {'RECONCILIATION_REQUIRED','REJECTED'}:
+            try:
+                alert={**envelope,'event_id':'sync-failure-'+envelope['event_id'],'event_type':'ATTENDANCE_SYNC_FAILURE',
+                    'payload':{'person_id':person,'metadata':{'crm_user_id':mapping['crm_user_id'],'reason_code':known_code,'delivery_status':failure}}}
+                store.record_portal_event(alert);_notify_cloud_event(alert)
+            except Exception:
+                logger.error('ATTENDANCE_SYNC_ALERT_PENDING event_id=%s',envelope['event_id'])
         return {'status':failure,'error_code':known_code}
 
 
@@ -2908,6 +2919,10 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
     action_claimed=False; mutation_sent=False; confirmation_persisted=False
     started=presence.get("last_seen_at")
     try:
+        bridge=_policy_checkout_bridge(tenant_id,shop_id,person_id)
+        if bridge is False:
+            store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
+            return
         if not hasattr(store,"claim_crm_auto_logout"):
             raise RuntimeError("Durable automatic checkout storage is required")
         if not store.claim_crm_auto_logout(tenant_id,shop_id,crm_user_id,started,
@@ -2938,7 +2953,7 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
                 store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
                 return
             raise RuntimeError("CRM automatic checkout response unconfirmed")
-        confirmation={"crm_response_message":_safe_crm_response_message(result),
+        confirmation={"bridge_session":bridge,"crm_response_message":_safe_crm_response_message(result),
             "reason_code":reason_code,"crm_operation":"LoginLogout", "occurred_at":now.isoformat(),
             "policy_snapshot":store.attendance_policy(tenant_id,shop_id) if hasattr(store,"attendance_policy") else {}}
         if not store.mark_crm_auto_logout_confirmed(tenant_id,shop_id,crm_user_id,started,confirmation):
@@ -3068,15 +3083,14 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
     if not row.get("checked_in") or row.get("on_break"):
         return
     tenant=str(row["tenant_id"]);shop=str(row["shop_id"]);user=str(row["crm_user_id"])
-    if hasattr(store,'has_bridge_attendance') and store.has_bridge_attendance(
-            tenant,shop,str(row.get('local_person_id') or '')):
-        return  # Bridge sessions require an explicit checkout, not disappearance.
+    bridge=_policy_checkout_bridge(tenant,shop,str(row.get('local_person_id') or ''))
+    if bridge is False:return
     started=row["last_seen_at"]
     # Policy thresholds drive absence alerts; this one fixed limit is reserved
     # solely for the CRM endpoint's confirmed 60-minute absence contract.
     policy_absence_minutes=int(policy.get("markAbsentAfterMinutes",CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES))
     required_absence_minutes=max(policy_absence_minutes,CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES)
-    if (now-started).total_seconds() < required_absence_minutes*60:
+    if (now-row.get('qualifying_absence_started_at',started)).total_seconds() < required_absence_minutes*60:
         return
     attendance_camera_id=row.get("last_camera_id")
     coverage_zone=row.get("last_camera_zone") or policy.get("attendanceCameraZone")
@@ -3103,7 +3117,7 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
         if not store.mark_crm_auto_logout_confirmed(tenant,shop,user,started,
                 {"crm_response_message":_safe_crm_response_message(result),
                  "policy_snapshot":policy,"required_absence_minutes":required_absence_minutes,
-                 "occurred_at":now.isoformat()}):
+                 "occurred_at":now.isoformat(),"bridge_session":bridge}):
             raise RuntimeError("CRM succeeded but local action confirmation could not be persisted")
         crm_confirmation_persisted=True
         activity_id="v2-"+_v2_auto_logout_action_id(tenant,shop,user,started)
@@ -3111,7 +3125,7 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
             "id":activity_id,"occurred_at":now,"camera_id":row.get("last_camera_id"),
             "evidence":_evidence_manifest_for_last_recognition(
                 tenant,shop,row.get("last_recognition_event_id"),"absence_action_snapshot"),
-            "metadata":{"crm_response_message":_safe_crm_response_message(result),
+            "metadata":{"bridge_session":bridge,"crm_response_message":_safe_crm_response_message(result),
                         "policy_snapshot":policy,"required_absence_minutes":required_absence_minutes,
                         "absence_started_at":started.isoformat(),"crm_operation":"auto-logout",
                         "crm_contract_minimum_minutes":CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES,
@@ -3136,6 +3150,13 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
                 store.release_crm_auto_logout_for_retry(tenant,shop,user,started,type(exc).__name__)
         finally:
             logger.exception("V2_AUTO_LOGOUT_NEEDS_RECONCILIATION user_id=%s",user)
+
+
+def _policy_checkout_bridge(tenant,shop,person):
+    if not hasattr(store,'active_bridge_session'):return None
+    bridge=store.active_bridge_session(tenant,shop,person)
+    if not bridge or str(bridge['session_id']).startswith('portal-manual:'):return None
+    return bridge if bridge['ready'] and bridge['checkout_capable'] else False
 
 
 def _attendance_coverage_status(tenant: str, shop: str, now: datetime,
@@ -3199,21 +3220,27 @@ def _evaluate_v2_person_absences() -> None:
                 max_out_of_camera_occurrences_per_day=policy_data.get("maxOutOfCameraOccurrencesPerDay",5),
                 admin_notification_after_minutes=policy_data.get("adminNotificationAfterMinutes",15),
                 mark_absent_after_minutes=policy_data.get("markAbsentAfterMinutes",60),
-                required_working_minutes=policy_data.get("requiredWorkingMinutes",480),
+                required_working_minutes=policy_data.get("requiredWorkingMinutes",540),
                 timezone=policy_data.get("timezone","Asia/Kolkata"),
+                attendance_day_start_time=policy_data.get('attendanceDayStartTime','00:00'),
             )
             user=str(row["crm_user_id"]); seen=row["last_seen_at"]
             attendance_camera_id=row.get("last_camera_id")
             coverage_zone=row.get("last_camera_zone") or policy_data.get("attendanceCameraZone")
             coverage=_attendance_coverage_status(tenant,shop,now,attendance_camera_id,coverage_zone)
+            healthy_since=None
             if hasattr(store,"save_v2_camera_coverage"):
-                store.save_v2_camera_coverage(tenant,shop,user,coverage,now)
+                healthy_since=store.save_v2_camera_coverage(tenant,shop,user,coverage,now)
+            qualifying_seen=max(row['last_seen_at'],healthy_since) if isinstance(healthy_since,datetime) else row['last_seen_at']
+            row['qualifying_absence_started_at']=qualifying_seen
+            row['policy_json']=policy_data
             from zoneinfo import ZoneInfo as _ZoneInfo
-            business_day=now.astimezone(_ZoneInfo(policy.timezone)).date().isoformat()
+            from cloud_portal.person_attendance_rules import business_date
+            business_day=business_date(now,policy.timezone,policy.attendance_day_start_time)
             episodes=store.count_v2_absence_episodes(tenant,shop,user,business_day)
             # An episode is keyed by its last-seen timestamp, not by each worker tick.
             evaluation=evaluate_absence(
-                policy,now=now,last_seen_at=seen,
+                policy,now=now,last_seen_at=qualifying_seen,
                 checked_in=bool(row["checked_in"]),on_break=bool(row["on_break"]),
                 camera_coverage_healthy=coverage.get("state")=="HEALTHY",completed_episodes_today=episodes,
                 active_episode_counted=True,
@@ -3232,6 +3259,8 @@ def _evaluate_v2_person_absences() -> None:
                     tenant,shop,user,coverage.get("cameraZone"),coverage.get("reason"))
                 continue
             transitions=list(evaluation.transitions)
+            if evaluation.elapsed_minutes>=policy.mark_absent_after_minutes and not row.get('on_break'):
+                transitions.append('FULL_DAY_ABSENT')
             if "GRACE_EXCEEDED" in transitions and episodes >= policy.max_out_of_camera_occurrences_per_day:
                 transitions.append("DAILY_ABSENCE_LIMIT_EXCEEDED")
             for transition in dict.fromkeys(transitions):
@@ -3239,19 +3268,23 @@ def _evaluate_v2_person_absences() -> None:
                     tenant_id=tenant,shop_id=shop,crm_user_id=user,
                     business_date=business_day,absence_started_at=seen,
                     transition=transition,occurred_at=now,
-                    details={"elapsedMinutes":round(evaluation.elapsed_minutes,2),
+                    details={"localPersonId":row.get('local_person_id'),"policy":policy_data,
+                             "evidence":_evidence_manifest_for_last_recognition(tenant,shop,row.get('last_recognition_event_id'),'absence_action_snapshot'),
+                             "elapsedMinutes":round(evaluation.elapsed_minutes,2),
                              "cameraId":row.get("last_camera_id"),"state":evaluation.state},
                 )
-                if created and transition in ("ADMIN_ABSENCE_WARNING","DAILY_ABSENCE_LIMIT_EXCEEDED","PROLONGED_ABSENCE"):
+                if transition in ("ADMIN_ABSENCE_WARNING","DAILY_ABSENCE_LIMIT_EXCEEDED","FULL_DAY_ABSENT") and (created or hasattr(store,'enqueue_notification_delivery')):
                     try:
-                        event={"event_id":f"v2-{transition}-{user}-{int(seen.timestamp())}",
+                        alert_key=f'{tenant}|{shop}|{user}|{transition}|'+(business_day if transition=='FULL_DAY_ABSENT' else seen.isoformat())
+                        event={"event_id":'v2-alert-'+hashlib.sha256(alert_key.encode()).hexdigest(),
                                "tenant_id":tenant,"shop_id":shop,"site_id":shop,
                                "camera_id":row.get("last_camera_id"),"edge_id":"cloud-policy",
                                "event_type":"ATTENDANCE_POLICY_VIOLATION",
                                "event_time":now.isoformat(),
-                               "payload":{"metadata":{"crm_user_id":user,
+                               "payload":{"person_id":row.get('local_person_id'),"metadata":{"crm_user_id":user,
                                    "reason_code":transition,
                                    "elapsed_minutes":round(evaluation.elapsed_minutes,2)}}}
+                        if hasattr(store,'record_portal_event'):store.record_portal_event(event)
                         _notify_cloud_event(event)
                     except Exception:
                         logger.exception("V2_NOTIFICATION_FAILED user_id=%s transition=%s",user,transition)
@@ -3471,6 +3504,12 @@ def edge_heartbeat(payload: dict[str, Any], background_tasks: BackgroundTasks,
         raise HTTPException(400, {"missing": missing})
     _enforce_edge_scope(principal, payload)
     result=store.record_heartbeat(payload)
+    if hasattr(store,'record_edge_attendance_observations') and not principal.legacy_global:
+        store.record_edge_attendance_observations(principal.tenant_id,principal.shop_id,
+            (payload.get('status') or {}).get('attendance_observations') or [])
+    if hasattr(store,'attendance_day_decisions') and not principal.legacy_global:
+        decisions=store.attendance_day_decisions(principal.tenant_id,principal.shop_id)
+        result['attendance_day_decisions']=[{**d,'occurred_at':d['occurred_at'].isoformat()} for d in decisions]
     background_tasks.add_task(_evaluate_absence_checkouts)
     return result
 

@@ -25,6 +25,9 @@ class SQLiteStore:
         with self._conn() as c:
             c.executescript('''
             PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS attendance_auto_holds(person_id TEXT NOT NULL,store_id TEXT NOT NULL,business_date TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(person_id,store_id));
+            CREATE TABLE IF NOT EXISTS attendance_observations(person_id TEXT NOT NULL,store_id TEXT NOT NULL,seen_at TEXT NOT NULL,PRIMARY KEY(person_id,store_id));
+            CREATE TABLE IF NOT EXISTS attendance_day_decisions(store_id TEXT NOT NULL,person_id TEXT NOT NULL,business_date TEXT NOT NULL,decision_json TEXT NOT NULL,occurred_at TEXT NOT NULL,PRIMARY KEY(store_id,person_id,business_date));
             CREATE TABLE IF NOT EXISTS personnel(id TEXT PRIMARY KEY, employee_code TEXT UNIQUE NOT NULL, full_name TEXT NOT NULL, role TEXT NOT NULL, phone TEXT, email TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS face_profiles(id TEXT PRIMARY KEY, person_id TEXT NOT NULL, embedding_json TEXT NOT NULL, quality REAL NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(person_id) REFERENCES personnel(id));
             CREATE INDEX IF NOT EXISTS idx_face_person ON face_profiles(person_id);
@@ -305,6 +308,13 @@ class SQLiteStore:
             c.execute("BEGIN IMMEDIATE")
             row=c.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? AND status='OPEN' ORDER BY arrival_time DESC LIMIT 1",(person_id,store_id)).fetchone()
             existing=dict(row) if row else None
+            if not existing:
+                from zoneinfo import ZoneInfo
+                from cloud_portal.person_attendance_rules import business_date
+                policy=self.attendance_policy_snapshot(person_id,store_id)['values']
+                day=business_date(ts,policy['timezone'],policy.get('attendanceDayStartTime','00:00'))
+                hold=c.execute('SELECT business_date FROM attendance_auto_holds WHERE person_id=? AND store_id=?',(person_id,store_id)).fetchone()
+                if hold and hold['business_date']==day:return None,False
             if existing and (not confirmed or existing['entry_confirmed']):
                 return existing,False
             sid=existing['id'] if existing else str(uuid.uuid4())
@@ -324,6 +334,59 @@ class SQLiteStore:
                 self._enqueue_edge_event(c,sid,'ATTENDANCE_ENTRY',{'event_id':sid,'person_id':person_id,'store_id':store_id,'camera_id':camera,'event_type':'ATTENDANCE_ENTRY','event_time':ts.isoformat(),'metadata':metadata})
             result=dict(c.execute("SELECT * FROM attendance_sessions WHERE id=?",(sid,)).fetchone())
             return result,not bool(existing)
+    def record_attendance_observation(self,person_id,store_id,seen_at):
+        with self._lock,self._conn() as c:
+            c.execute('INSERT INTO attendance_observations VALUES(?,?,?) ON CONFLICT(person_id,store_id) DO UPDATE SET seen_at=MAX(seen_at,excluded.seen_at)',(person_id,store_id,seen_at.isoformat()))
+
+    def save_attendance_day_decisions(self,shop,decisions):
+        with self._lock,self._conn() as c:
+            for d in decisions:
+                if not c.execute('SELECT 1 FROM personnel WHERE id=?',(d['local_person_id'],)).fetchone():continue
+                c.execute('INSERT INTO attendance_day_decisions VALUES(?,?,?,?,?) ON CONFLICT(store_id,person_id,business_date) DO UPDATE SET decision_json=excluded.decision_json,occurred_at=excluded.occurred_at WHERE excluded.occurred_at>attendance_day_decisions.occurred_at',
+                    (shop,d['local_person_id'],d['business_date'],json.dumps(d),d['occurred_at']))
+
+    def attendance_day_decisions(self,shop):
+        with self._conn() as c:
+            return [json.loads(r[0]) for r in c.execute('SELECT decision_json FROM attendance_day_decisions WHERE store_id=?',(shop,))]
+
+    def apply_policy_checkout(self,request):
+        """Apply a cloud-confirmed action once, without creating a second CRM owner."""
+        event=request['event'];metadata=event['metadata'];person=event['person_id'];shop=event['store_id']
+        stamp=event['event_time'];sid=metadata['attendance_session_id']
+        kind=event.get('event_type','ATTENDANCE_EXIT')
+        with self._lock,self._conn() as c:
+            c.execute('BEGIN IMMEDIATE')
+            if c.execute('SELECT 1 FROM person_events WHERE id=?',(event['event_id'],)).fetchone():
+                return {'ok':True,'duplicate':True,'session_id':sid}
+            session=c.execute('SELECT * FROM attendance_sessions WHERE id=? AND person_id=? AND store_id=?',(sid,person,shop)).fetchone()
+            if kind=='ATTENDANCE_ENTRY':
+                other=c.execute("SELECT * FROM attendance_sessions WHERE person_id=? AND store_id=? AND status='OPEN'",(person,shop)).fetchone()
+                if other and other['entry_confirmed'] and other['id']!=sid:return {'ok':False,'error':'SESSION_CHANGED'}
+                if other and not other['entry_confirmed']:
+                    c.execute("UPDATE attendance_sessions SET status='SUPERSEDED' WHERE id=?",(other['id'],))
+                c.execute("INSERT OR IGNORE INTO attendance_sessions(id,person_id,store_id,arrival_time,arrival_camera,status,entry_confirmed) VALUES(?,?,?,?,?,'OPEN',1)",(sid,person,shop,stamp,event.get('camera_id')))
+                c.execute('DELETE FROM attendance_auto_holds WHERE person_id=? AND store_id=?',(person,shop))
+            elif kind in {'BREAK_START','BREAK_END'}:
+                if not session or session['status']!='OPEN' or not session['entry_confirmed']:return {'ok':False,'error':'SESSION_CHANGED'}
+                if (kind=='BREAK_START')==bool(session['break_started_at']):return {'ok':False,'error':'BREAK_STATE_CHANGED'}
+                if kind=='BREAK_START':c.execute('UPDATE attendance_sessions SET break_started_at=?,last_break_start=?,last_break_end=NULL WHERE id=?',(stamp,stamp,sid))
+                else:c.execute('UPDATE attendance_sessions SET break_started_at=NULL,last_break_end=? WHERE id=?',(stamp,sid))
+            elif kind!='ATTENDANCE_EXIT':raise ValueError('Unsupported confirmed attendance action')
+            if kind!='ATTENDANCE_EXIT':
+                c.execute('INSERT INTO person_events VALUES(?,?,?,?,?,?,?)',(event['event_id'],person,shop,event.get('camera_id'),kind,stamp,json.dumps(metadata)))
+                self._enqueue_edge_event(c,event['event_id'],kind,event)
+                return {'ok':True,'session_id':sid,'applied':True}
+            if not session or session['status']!='OPEN':
+                return {'ok':False,'error':'SESSION_CHANGED','session_id':sid}
+            seen=c.execute('SELECT seen_at FROM attendance_observations WHERE person_id=? AND store_id=?',(person,shop)).fetchone()
+            if metadata.get('reason_code') not in {'MAX_LOGOFF_REACHED','OPERATOR_CHECKOUT'} and seen and datetime.fromisoformat(seen[0])>datetime.fromisoformat(request['absence_started_at']):
+                return {'ok':False,'error':'RECOGNITION_ADVANCED','session_id':sid}
+            c.execute("UPDATE attendance_sessions SET exit_time=?,exit_camera=?,status='CLOSED',break_started_at=NULL,last_break_end=CASE WHEN break_started_at IS NOT NULL THEN ? ELSE last_break_end END WHERE id=?",(stamp,event.get('camera_id'),stamp,sid))
+            c.execute('INSERT INTO person_events VALUES(?,?,?,?,?,?,?)',(event['event_id'],person,shop,event.get('camera_id'),'ATTENDANCE_EXIT',stamp,json.dumps(metadata)))
+            self._enqueue_edge_event(c,event['event_id'],'ATTENDANCE_EXIT',event)
+            c.execute('INSERT INTO attendance_auto_holds VALUES(?,?,?,?) ON CONFLICT(person_id,store_id) DO UPDATE SET business_date=excluded.business_date,reason=excluded.reason',(person,shop,request['business_date'],'POLICY_CHECKOUT'))
+            return {'ok':True,'session_id':sid,'closed':True}
+
     def close_exit(self,person_id,store_id,ts,camera,confidence,snapshot_path=None):
         with self._lock:
             s=self.open_session(person_id,store_id)

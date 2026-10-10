@@ -29,6 +29,8 @@ class AttendanceEngine:
             if person and person.get("attendance_mode") in {"AUTO", "MANUAL"}:
                 mode = person["attendance_mode"]
         with self._lock:
+            if hasattr(self.store,'record_attendance_observation'):
+                self.store.record_attendance_observation(ev.person_id,self.store_id,ev.timestamp)
             self.identities[(ev.camera_id, ev.track_id)] = ev
             p = self.presence.get(ev.person_id) or Presence(person_id=ev.person_id, first_seen_today=ev.timestamp)
             open_session=getattr(self.store,'open_session',None)
@@ -47,7 +49,7 @@ class AttendanceEngine:
                     ev.person_id, self.store_id, ev.timestamp, ev.camera_id,
                     ev.confidence, ev.snapshot_path, confirmed=False,
                 )
-            p.attendance_session_id = session["id"] if session else p.attendance_session_id
+            p.attendance_session_id = session["id"] if session else None
             p.last_seen_at = ev.timestamp
             p.last_camera_id = ev.camera_id
             p.last_confidence = ev.confidence

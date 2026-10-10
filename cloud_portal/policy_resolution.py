@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 SYSTEM_DEFAULTS: dict[str, Any] = {
+    'attendanceDayStartTime':'00:00',
     "gracePeriodMinutes": 15,
     "allowedBreakMinutes": 60,
-    "requiredWorkingMinutes": 480,
+    "requiredWorkingMinutes": 540,
     "maxLogoffTime": "21:30",
     "absenceAutoLogoutEnabled": True,
     "absenceMonitoringEnabled": True,
@@ -27,6 +28,12 @@ SYSTEM_DEFAULTS: dict[str, Any] = {
     "mark_absent_after_minutes": 60,
 }
 SHOP_ALIASES = {
+    'attendanceDayStartTime':'attendance_day_start_time',
+    'presenceUpdateIntervalMinutes':'presence_update_interval_minutes',
+    'outOfCameraGraceMinutes':'out_of_camera_grace_minutes',
+    'maxOutOfCameraOccurrencesPerDay':'max_out_of_camera_occurrences_per_day',
+    'adminNotificationAfterMinutes':'admin_notification_after_minutes',
+    'dayEndAutoLogoutEnabled':'day_end_auto_logout_enabled',
     "gracePeriodMinutes": "grace_period_minutes",
     "allowedBreakMinutes": "allowed_break_minutes",
     "requiredWorkingMinutes": "total_working_minutes",
