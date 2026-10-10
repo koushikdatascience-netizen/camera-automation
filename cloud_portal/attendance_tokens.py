@@ -57,20 +57,18 @@ def decrypt_scoped_token(value: str, tenant_id: str, shop_id: str,
     return token
 
 
-def jwt_expiry(token: str, *, issued_at: datetime | None = None) -> datetime:
-    """Bound 24h CRM contract by embedded exp; decoding is NOT signature verification."""
-    now=issued_at or datetime.now(timezone.utc)
-    if now.tzinfo is None:
+def jwt_expiry(token: str, *, issued_at: datetime | None = None) -> datetime | None:
+    """Return an unverified JWT expiry hint, or None when no valid exp is present."""
+    if issued_at is not None and issued_at.tzinfo is None:
         raise ValueError("issued_at must be timezone aware")
-    max_exp=now+timedelta(hours=24)
     try:
         parts=token.removeprefix("Bearer ").split(".")
         raw=parts[1] + "=" * (-len(parts[1]) % 4)
         payload=json.loads(base64.urlsafe_b64decode(raw))
         exp=datetime.fromtimestamp(int(payload["exp"]),timezone.utc)
-        return min(max_exp,exp)
+        return exp
     except (IndexError,KeyError,ValueError,TypeError,OverflowError):
-        return max_exp
+        return None
 
 
 def usable(expires_at: datetime, now: datetime | None = None) -> bool:

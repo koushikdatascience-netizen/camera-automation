@@ -82,6 +82,10 @@ def employee_crm(monkeypatch):
         failure=state.failure; state.failure=None
         if failure=="timeout": raise httpx.ReadTimeout("mock timeout",request=request)
         if failure==401: return httpx.Response(401,json={"success":False})
+        if failure=="validation": return httpx.Response(400,json={
+            "title":"One or more validation errors occurred.",
+            "errors":{"actualStartTime":["The value must be a valid TimeSpan."]},
+            "token":"must-not-be-returned"})
         return httpx.Response(200,json={"success":failure!="rejected","message":state.message})
 
     real_client=httpx.Client
@@ -177,6 +181,17 @@ def test_manual_401_invalidates_only_employee_token_and_does_not_replay(employee
     assert ctx.store.local==local_before and len(ctx.store.activities)==activities_before
     assert manual(ctx,"BREAK_START")["ok"] is True  # a separate, explicit retry
     assert ctx.state.face_logins==2 and len(mutations(ctx))==3
+
+
+def test_manual_attendance_displays_safe_crm_validation_details(employee_crm):
+    ctx=employee_crm; ctx.state.failure="validation"
+
+    with pytest.raises(HTTPException) as exc:
+        manual(ctx,"CHECK_IN")
+
+    assert exc.value.status_code==502
+    assert "actualStartTime: The value must be a valid TimeSpan." in exc.value.detail
+    assert "must-not-be-returned" not in exc.value.detail
 
 
 @pytest.mark.parametrize("action",["CHECK_IN","CHECK_OUT","BREAK_START","BREAK_END"])

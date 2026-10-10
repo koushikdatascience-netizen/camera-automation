@@ -9,8 +9,8 @@ database change was performed for this release gate.
 | Purpose | Method and path | Auth and identity | Contract evidence / release status |
 | --- | --- | --- | --- |
 | Employee directory and enrollment image | `GET /api/User/face-embeddings/{tenantCode}` | No Authorization header. Directory is scoped by tenant code; map CRM `id` and `tenantId`. | Customer-supplied integration notes and implementation. Real response shape must be confirmed for each tenant; no images or embeddings are returned by ordinary personnel-list APIs. |
-| Employee Face Login | `POST /api/Auth/loginUsingFaceTenant` | No Authorization header. `{base64Image, tenantId}` uses the CRM-enrolled image and CRM tenant UUID. Returned user and tenant are checked before caching. | Customer-supplied contract and mocked response. Real token/identity response not exercised in this task. |
-| Check-in and ordinary checkout | `POST /api/UserRoster/LoginLogout` | Employee Face Login token. `userId` is the mapped CRM employee ID; `date` is ISO date; `actualStartTime` or `actualOffTime` carries the action time. | Path, fields and token behavior are documented and mock-tested. Exact live success and rejection schemas remain unverified. |
+| Employee Face Login | `POST /api/Auth/loginUsingFaceTenant` | No Authorization header. `{base64Image, tenantId}` uses the CRM-enrolled image and CRM tenant UUID. `success`, `token`, `user.id`, and `user.tenantId` must all validate before caching. | Customer-supplied contract and mocked response. Real token/identity response not exercised in this task. |
+| Automatic/manual check-in and manual checkout | `POST /api/UserRoster/LoginLogout` | Employee Face Login token. `userId` is the mapped CRM employee ID; `actualStartTime`/`actualOffTime` is serialized as `HH:mm:ss`. Date uses `SNAPKEY_CRM_ATTENDANCE_DATE_FORMAT` and effective policy timezone, overridable with `SNAPKEY_CRM_ATTENDANCE_TIMEZONE`. | Request shape and TimeSpan serialization are tested. Exact live `date` format/timezone and manual-checkout authorization semantics remain unverified; do not enable production mutations until CRM confirms them. |
 | Break In | `POST /api/UserBreak/start-break` | Same employee token; `{userId, breakMasterId}`. Break ID comes from the tenant/shop-scoped CRM mapping. | Path/body are documented and mock-tested. Exact live business response remains unverified. |
 | Break Out | `POST /api/UserBreak/end-break` | Same employee token; `userId` query parameter. | Path/query are documented and mock-tested. Exact live business response remains unverified. |
 | Absence logout | `POST /api/UserActivity/auto-logout` | Same employee token; `{userId, remarks}`. Requires policy eligibility, healthy scoped camera coverage, and the confirmed 60-minute minimum. | Customer-supplied contract and mock-tested. Keep both automatic logout flags off until controlled staging and explicit approval. |
@@ -22,6 +22,14 @@ Camera Eye policy endpoints (`/integration/v1|v2/.../attendance-policy` and
 Camera Eye APIs. There is no verified CRM policy-sync or CRM evidence-upload
 endpoint in the supplied contract, so none is invented here. CRM employee mapping
 preserves tenant, shop, local-person, CRM-user, and break-master identifiers.
+
+Face tokens remain encrypted and scoped to tenant/shop/CRM user. A JWT `exp` is
+used only as an unverified expiry hint; opaque tokens are not cached unless the
+operator configures `SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS` from confirmed CRM
+token-lifetime evidence. No 24-hour assumption is used. Date format defaults to
+`%Y-%m-%d`, with event time converted to the effective attendance-policy
+timezone unless `SNAPKEY_CRM_ATTENDANCE_TIMEZONE` is explicitly set; CRM must
+confirm this contract before live writes are enabled.
 
 ## Mutation confirmation and recovery
 
@@ -36,6 +44,13 @@ client-side rule, not proof that the live CRM uses these success fields. Confirm
 those fields and business rejection semantics with the CRM team before enabling
 mutations. Existing confirmed-rejection/retry classification must be revisited
 if the CRM returns a different contract.
+
+HTTP errors now retain bounded, sanitized CRM messages, including nested ASP.NET
+field errors. Terminal business/validation rejections are stored as `REJECTED`
+and are not retried automatically; authorization/rate-limit and definite
+transport failures remain retryable, while an ambiguous post-submit result is
+held for reconciliation. Token, password, image, and embedding fields are
+excluded/redacted from surfaced details.
 
 For a timeout, malformed response, or unrecognized 2xx response, an operator
 must compare the employee's CRM roster/activity state for the exact shop and
@@ -63,6 +78,9 @@ disabled. The Windows installer was not rebuilt; this change is cloud-only.
 
 - The CRM team's live success/rejection response bodies and status semantics
   have not been verified against a designated test employee.
+- Manual checkout currently retains the existing `LoginLogout`/`actualOffTime`
+  implementation, but CRM has not verified that manual checkout uses this
+  contract or the employee token. Treat this as blocked pending confirmation.
 - Monthly roster access still requires a correctly scoped service credential;
   employee Face Login authorization for that endpoint is unverified.
 - No live staging CRM, SMTP, WhatsApp, production environment protection, or
@@ -83,9 +101,15 @@ disabled. The Windows installer was not rebuilt; this change is cloud-only.
   `22 passed` in 49.83s. The roster endpoint now only returns enabled mappings
   belonging to the authenticated principal's shop, and rejects an explicit
   user outside that shop.
-- Full local suite on the pre-shop-scope/workflow-default snapshot:
-  `395 passed, 19 skipped`. This was not rerun after the small changes above;
-  the affected suites and PostgreSQL upgrade regression were rerun instead.
+- AUTO/MANUAL CRM contract-focused regression set: `103 passed`; date/time
+  conversion, required Face Login tenant identity, safe validation-message
+  display, and terminal rejection behavior are covered.
+- Latest full regression suite: `405 passed, 20 skipped` in 644.85s. The skips
+  are optional/integration tests requiring services not configured for the full
+  local run. `python -m compileall -q camera_service cloud_portal tools` and
+  `git diff --check` also passed. Earlier disposable-PostgreSQL acceptance
+  results remain `176 passed, 1 skipped` plus the schema-upgrade regression
+  (`1 passed`); no database schema changes were made in this follow-up.
 - Docker Desktop's Linux engine was unavailable. Isolated PostgreSQL was run
   using the installed local PostgreSQL service on a separate loopback port and
   disposable test database/schema.
@@ -97,6 +121,11 @@ disabled. The Windows installer was not rebuilt; this change is cloud-only.
   remain MOCK-VERIFIED only. No CRM mutation, staging release, workflow dispatch,
   browser run, or installer build was performed. Exact CRM `date` business
   timezone contract also remains unverified.
+- Cloud Compose now defaults both AUTO login and AUTO logout to disabled. The
+  AUTO login fallback is opt-in through `SNAPKEY_CRM_AUTO_LOGIN_ENABLED=1`;
+  attendance date format/timezone can be set per deployment and otherwise use
+  policy timezone with ISO date formatting. This setting is not evidence that
+  the live CRM accepts that date contract.
 - `tools/deploy_cloud.sh` rollback code was inspected: it restores the prior
   image and Compose file after a failed health check. The script could not be
   executed locally because Bash/WSL startup is denied. The schema upgrade uses

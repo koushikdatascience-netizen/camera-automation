@@ -1,7 +1,9 @@
 import httpx
 import pytest
+from datetime import datetime,timezone
 
 from cloud_portal.crm_client import CrmUnconfirmedMutationResponse, SnapKeyCrmClient
+from cloud_portal.crm_attendance_contract import format_crm_attendance_date_time
 
 
 class FakeResponse:
@@ -58,6 +60,30 @@ def test_face_directory_is_public_and_cached_for_ttl(monkeypatch):
     call=FakeClient.calls[0]
     assert call["path"] == "/api/User/face-embeddings/ABM-46-775"
     assert "Authorization" not in call["headers"]
+
+
+def test_crm_attendance_date_and_time_use_effective_business_timezone(monkeypatch):
+    event_time=datetime(2026,10,7,20,0,tzinfo=timezone.utc)
+
+    actual_date,actual_time=format_crm_attendance_date_time(
+        event_time,"Asia/Kolkata","%d/%m/%Y")
+
+    assert actual_date=="08/10/2026"
+    assert actual_time=="01:30:00"
+
+
+def test_crm_error_details_include_dotnet_field_errors_and_redact_credentials():
+    detail=SnapKeyCrmClient.safe_error_message({
+        "title":"One or more validation errors occurred.",
+        "status":400,
+        "errors":{"actualStartTime":["The value must be a valid TimeSpan."],
+                  "passwordHash":["private-hash"]},
+        "token":"private-token",
+    })
+
+    assert "actualStartTime: The value must be a valid TimeSpan." in detail
+    assert "400" in detail
+    assert "private-hash" not in detail and "private-token" not in detail
 
 
 def test_face_directory_force_refresh_bypasses_cache(monkeypatch):

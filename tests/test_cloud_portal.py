@@ -133,6 +133,7 @@ def test_crm_attendance_deployed_payload_and_logout_opt_in(tmp_path, monkeypatch
  monkeypatch.setenv('SNAPKEY_CRM_ATTENDANCE_ENABLED','1')
  monkeypatch.delenv('SNAPKEY_CRM_AUTO_LOGIN_ENABLED',raising=False)
  monkeypatch.delenv('SNAPKEY_CRM_AUTO_LOGOUT_ENABLED',raising=False)
+ monkeypatch.setenv('SNAPKEY_CRM_ATTENDANCE_TIMEZONE','UTC')
  import importlib
  import cloud_portal.api as api
  importlib.reload(api)

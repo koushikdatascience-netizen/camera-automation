@@ -4,6 +4,7 @@ import json
 import pytest
 
 from cryptography.fernet import Fernet
+from cloud_portal.crm_client import SnapKeyCrmClient
 from cloud_portal.attendance_tokens import (
     encrypt_token,decrypt_token,encrypt_scoped_token,decrypt_scoped_token,
     TokenScopeError,jwt_expiry,usable,
@@ -23,14 +24,62 @@ def test_encryption_requires_key(monkeypatch):
         encrypt_token("secret")
 
 
-def test_jwt_exp_is_earlier_than_24h_contract():
+def test_jwt_expiry_is_used_as_hint_without_assuming_a_fixed_token_lifetime():
     now=datetime(2026,10,8,tzinfo=timezone.utc)
     exp=int((now+timedelta(hours=2)).timestamp())
     body=base64.urlsafe_b64encode(json.dumps({"exp":exp}).encode()).decode().rstrip("=")
     token="a."+body+".c"
     assert jwt_expiry(token,issued_at=now)==now+timedelta(hours=2)
+    assert jwt_expiry("opaque-token",issued_at=now) is None
     assert not usable(now+timedelta(minutes=4),now)
     assert usable(now+timedelta(minutes=6),now)
+
+
+def test_opaque_face_token_is_used_once_but_not_cached_without_expiry(monkeypatch):
+    from types import SimpleNamespace
+    from cloud_portal import api
+
+    monkeypatch.setenv("CAMERA_EYE_TOKEN_ENCRYPTION_KEY",Fernet.generate_key().decode())
+    monkeypatch.delenv("SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS",raising=False)
+    calls=[]
+    class Store:
+        def get_crm_face_token(self,*_args): return None
+        def save_crm_face_token(self,*args): calls.append(args)
+    monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"_crm_tenant_uuid_for_user",lambda *_args:"crm-tenant")
+    monkeypatch.setattr(api,"_crm_face_login_identity",lambda *_args:("crm-tenant","enrolled-image"))
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(
+        business_success=SnapKeyCrmClient.business_success,
+        login_using_face_tenant=lambda *_args:{
+            "success":True,"token":"opaque-token","user":{"id":"employee","tenantId":"crm-tenant"}}))
+
+    assert api._crm_face_token("tenant","shop","employee")=="opaque-token"
+    assert calls==[]
+
+
+def test_opaque_face_token_uses_only_explicit_fallback_cache_ttl(monkeypatch):
+    from types import SimpleNamespace
+    from cloud_portal import api
+
+    monkeypatch.setenv("CAMERA_EYE_TOKEN_ENCRYPTION_KEY",Fernet.generate_key().decode())
+    monkeypatch.setenv("SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS","900")
+    saved=[]
+    class Store:
+        def get_crm_face_token(self,*_args): return None
+        def save_crm_face_token(self,*args): saved.append(args)
+    monkeypatch.setattr(api,"store",Store())
+    monkeypatch.setattr(api,"_crm_tenant_uuid_for_user",lambda *_args:"crm-tenant")
+    monkeypatch.setattr(api,"_crm_face_login_identity",lambda *_args:("crm-tenant","enrolled-image"))
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(
+        business_success=SnapKeyCrmClient.business_success,
+        login_using_face_tenant=lambda *_args:{
+            "success":True,"token":"opaque-token","user":{"id":"employee","tenantId":"crm-tenant"}}))
+
+    before=datetime.now(timezone.utc)
+    assert api._crm_face_token("tenant","shop","employee")=="opaque-token"
+
+    assert len(saved)==1
+    assert timedelta(seconds=895)<saved[0][-1]-before<timedelta(seconds=905)
 
 
 def test_cached_face_token_is_tenant_user_keyed_encrypted_and_refreshed_when_expired(monkeypatch):
@@ -83,6 +132,10 @@ def test_face_login_rejects_cross_user_or_cross_tenant_response(monkeypatch):
     with pytest.raises(RuntimeError,match="tenant mismatch"):
         api._validated_crm_face_login_token(
             {"success":True,"token":"discarded","user":{"id":"employee-a","tenantId":"tenant-b"}},
+            "employee-a","tenant-a")
+    with pytest.raises(RuntimeError,match="tenant mismatch"):
+        api._validated_crm_face_login_token(
+            {"success":True,"token":"discarded","user":{"id":"employee-a"}},
             "employee-a","tenant-a")
 
 

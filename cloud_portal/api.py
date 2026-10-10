@@ -27,7 +27,8 @@ from pydantic import BaseModel, Field
 
 from camera_service.licensing import sign_license_payload
 from cloud_portal.storage import PortalStore
-from cloud_portal.crm_client import crm_client
+from cloud_portal.crm_client import CrmBusinessRejection, CrmHttpStatusError, SnapKeyCrmClient, crm_client
+from cloud_portal.crm_attendance_contract import format_crm_attendance_date_time
 from cloud_portal.attendance_policy import AttendancePolicy
 from cloud_portal.notifications import NotificationService
 from camera_service.face_service import FaceService, enrollment_model_key, validated_embedding
@@ -1312,8 +1313,10 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
     if not mapping:
         if bridge: raise ValueError('CRM_MAPPING_REQUIRED')
         return
-    if event_type in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT"} and hasattr(store,"person_attendance_policy"):
-        person_policy=store.person_attendance_policy(tenant_id,shop_id,str(mapping["crm_user_id"]))
+    person_policy={}
+    if hasattr(store,"person_attendance_policy"):
+        person_policy=store.person_attendance_policy(tenant_id,shop_id,str(mapping["crm_user_id"])) or {}
+    if event_type in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT"}:
         if not manual and person_policy and str(person_policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
             if bridge: raise ValueError('EMPLOYEE_MANUAL_MODE')
             logger.info("CRM_ATTENDANCE_EVENT_SKIPPED person_id=%s event_type=%s reason=manual_mode",
@@ -1323,14 +1326,10 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
     if event_time.tzinfo is None:
         event_time=event_time.replace(tzinfo=timezone.utc)
     event_time=event_time.astimezone(timezone.utc)
-    # SnapKey UserRoster/LoginLogout accepts one payload for both mutations.
-    # Preserve the camera event timestamp as an ISO-8601 UTC value: ENTRY fills
-    # actualStartTime; EXIT fills actualOffTime. The unused fields are empty
-    # strings, matching the CRM contract supplied by the customer.
-    crm_timestamp=event_time.isoformat(timespec="milliseconds").replace("+00:00","Z")
-    crm_date=event_time.date().isoformat()
-    crm_time=event_time.strftime("%H:%M:%S")
+    # CRM TimeSpan fields are time-only. Convert both fields using the effective
+    # business timezone; date formatting stays configurable pending live contract confirmation.
     crm_user_id=mapping["crm_user_id"]
+    crm_date,crm_time=_crm_attendance_date_time(tenant_id,shop_id,crm_user_id,event_time,person_policy)
     # Automatic CRM mutations are deliberately split. The customer has now
     # confirmed the LoginLogout contract for automatic login, while automatic
     # logout remains opt-in until its business rule is confirmed. Manual portal
@@ -1371,7 +1370,7 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
         else:
             result=crm_client.end_break(crm_user_id,auth_token=face_token)
         if not _crm_mutation_succeeded(result):
-            raise RuntimeError("CRM rejected attendance event")
+            raise CrmBusinessRejection(SnapKeyCrmClient.safe_error_message(result))
     except Exception as exc:
         if bridge:
             exc.attendance_mutation_attempted=True
@@ -1443,12 +1442,16 @@ def _synchronize_attendance_bridge(envelope, *, historical_missing_receipt=False
         known_code=str(exc) if str(exc) in {
             'CRM rejected attendance event','EMPLOYEE_MANUAL_MODE','AUTO_LOGIN_DISABLED',
             'EXPLICIT_CHECKOUT_REQUIRED','CONFIRMED_BREAK_REQUIRED','CRM_BREAK_MAPPING_REQUIRED',
-        } else type(exc).__name__
-        definitive_rejection=(isinstance(exc,RuntimeError) and str(exc)=='CRM rejected attendance event')
-        safe_failure=(definitive_rejection or upstream in {400,401,403,404,409,422,429}
+        } else (exc.crm_message if isinstance(exc,CrmHttpStatusError) else
+                str(exc) if isinstance(exc,CrmBusinessRejection) else type(exc).__name__)
+        definitive_rejection=(isinstance(exc,CrmBusinessRejection) or
+                              (isinstance(exc,RuntimeError) and str(exc)=='CRM rejected attendance event'))
+        terminal_rejection=(definitive_rejection or upstream in {400,403,404,409,422})
+        safe_failure=(terminal_rejection or upstream in {401,429}
                       or isinstance(exc,(httpx.ConnectError,httpx.ConnectTimeout)))
         uncertain=attempted and not safe_failure
-        failure='RECONCILIATION_REQUIRED' if uncertain else 'RETRY'
+        failure=('REJECTED' if terminal_rejection else
+                 'RECONCILIATION_REQUIRED' if uncertain else 'RETRY')
         # A confirmed remote mutation must only retry local finalization.
         if status=='CRM_CONFIRMED': failure='CRM_CONFIRMED'
         store.set_attendance_delivery(envelope,failure,known_code,retry_seconds=5)
@@ -1527,11 +1530,8 @@ def _validated_crm_face_login_token(response: Any, crm_user_id: str,
     authenticated_user=str(user.get("id") or "").strip()
     if not expected_user or authenticated_user!=expected_user:
         raise RuntimeError("CRM face authentication identity mismatch")
-    # The directory lookup binds this CRM user ID to crm_tenant_id. If Face Login
-    # also returns tenantId, reject an explicit disagreement; that field is not
-    # required by the currently documented login response contract.
     returned_tenant=str(user.get("tenantId") or "").strip()
-    if returned_tenant and returned_tenant!=str(crm_tenant_id).strip():
+    if not returned_tenant or returned_tenant!=str(crm_tenant_id).strip():
         raise RuntimeError("CRM face authentication tenant mismatch")
     raw_token=response.get("token")
     token=raw_token.strip() if isinstance(raw_token,str) else ""
@@ -1635,6 +1635,26 @@ def _crm_face_login_succeeded(result: Any) -> bool:
 
 def _crm_mutation_succeeded(result: Any) -> bool:
     return crm_client.business_success(result)
+
+
+def _crm_attendance_date_time(tenant_id: str,shop_id: str,crm_user_id: str,
+                              event_time: datetime,policy: dict[str,Any] | None=None) -> tuple[str,str]:
+    """Format CRM date/time using the effective business timezone and configured date contract.
+
+    `SNAPKEY_CRM_ATTENDANCE_DATE_FORMAT` uses Python strftime syntax and defaults
+    to ISO date. The format and tenant's business timezone still require CRM
+    confirmation before production mutations are enabled.
+    """
+    policy=policy or {}
+    zone_name=os.getenv("SNAPKEY_CRM_ATTENDANCE_TIMEZONE","").strip()
+    if not zone_name:
+        zone_name=str(policy.get("timezone") or "").strip()
+    if not zone_name and hasattr(store,"attendance_policy"):
+        shop_policy=store.attendance_policy(tenant_id,shop_id) or {}
+        zone_name=str(shop_policy.get("timezone") or "").strip()
+    zone_name=zone_name or "Asia/Kolkata"
+    date_format=os.getenv("SNAPKEY_CRM_ATTENDANCE_DATE_FORMAT","%Y-%m-%d").strip()
+    return format_crm_attendance_date_time(event_time,zone_name,date_format)
 
 
 def _action_evidence_manifest(metadata: dict[str, Any] | None, recognition_event_id: str | None = None) -> dict[str, Any]:
@@ -1750,8 +1770,9 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
     if presence and bool(presence.get("checked_in")):
         logger.info("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s reason=session_already_open",event_id,person_id)
         return
+    person_policy={}
     if hasattr(store,"person_attendance_policy"):
-        person_policy=store.person_attendance_policy(tenant_id,shop_id,str(mapping["crm_user_id"]))
+        person_policy=store.person_attendance_policy(tenant_id,shop_id,str(mapping["crm_user_id"])) or {}
         if person_policy and str(person_policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
             logger.info("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s reason=manual_mode",event_id,person_id)
             return
@@ -1767,8 +1788,7 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         crm_tenant_id=_crm_tenant_uuid_for_user(tenant_id,authenticated_user_id)
         face_token=_crm_face_token(tenant_id,shop_id,authenticated_user_id)
 
-        crm_date=when.isoformat(timespec="milliseconds").replace("+00:00","Z")
-        crm_time=when.strftime("%H:%M:%S")
+        crm_date,crm_time=_crm_attendance_date_time(tenant_id,shop_id,str(mapping["crm_user_id"]),when,person_policy)
         attendance_result=crm_client.login_logout_with_face_token({
             "userId":authenticated_user_id,
             "date":crm_date,
@@ -2446,9 +2466,15 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
     if not crm_client.face_attendance_configured:
         raise HTTPException(503,"SnapKey CRM face attendance is not configured")
 
-    now=datetime.now(timezone.utc); crm_timestamp=now.isoformat(timespec="milliseconds").replace("+00:00","Z")
-    crm_date=crm_timestamp; crm_time=now.strftime("%H:%M:%S")
     authenticated_user_id=str(mapping["crm_user_id"])
+    person_policy=(store.person_attendance_policy(tenant_id,principal.shop_id,authenticated_user_id)
+                   if hasattr(store,"person_attendance_policy") else None) or {}
+    now=datetime.now(timezone.utc); crm_timestamp=now.isoformat(timespec="milliseconds").replace("+00:00","Z")
+    try:
+        crm_date,crm_time=_crm_attendance_date_time(
+            tenant_id,principal.shop_id,authenticated_user_id,now,person_policy)
+    except (ValueError,KeyError) as exc:
+        raise HTTPException(503,"CRM attendance date/time configuration is invalid") from exc
     try:
         try:
             face_token=_crm_face_token(tenant_id,principal.shop_id,authenticated_user_id,
@@ -2479,13 +2505,15 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
                 "CRM_MANUAL_ATTENDANCE_REJECTED action=%s person_id=%s crm_user_id=%s camera_id=%s",
                 action,person_id,authenticated_user_id,request.camera_id,
             )
-            raise HTTPException(409,"CRM rejected the attendance action")
+            raise HTTPException(409,"CRM rejected the attendance action: "+
+                                SnapKeyCrmClient.safe_error_message(result))
     except HTTPException:
         raise
     except httpx.HTTPStatusError as exc:
         _invalidate_crm_face_token_on_401(tenant_id,principal.shop_id,authenticated_user_id,exc)
         status=exc.response.status_code if exc.response is not None else 502
-        raise HTTPException(502,f"CRM attendance action failed (upstream HTTP {status})") from exc
+        detail=getattr(exc,"crm_message","CRM returned no safe error details")
+        raise HTTPException(502,f"CRM attendance action failed (upstream HTTP {status}): {detail}") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502,"CRM attendance action failed") from exc
     except Exception as exc:
@@ -2892,7 +2920,11 @@ def _crm_face_token_locked(tenant_id: str, shop_id: str, crm_user_id: str) -> st
             token=decrypt_scoped_token(cached["encrypted_token"],tenant_id,shop_id,crm_user_id,crm_tenant_id)
         except (InvalidToken,ValueError,UnicodeDecodeError):
             token=""
-        if token and usable(min(cached["expires_at"],jwt_expiry(token))):
+        token_expiry=jwt_expiry(token) if token else None
+        cached_expiry=cached.get("expires_at")
+        effective_expiry=(min(cached_expiry,token_expiry) if cached_expiry and token_expiry
+                          else token_expiry or cached_expiry)
+        if token and effective_expiry and usable(effective_expiry):
             return token
         if hasattr(store,"delete_crm_face_token"):
             store.delete_crm_face_token(tenant_id,shop_id,crm_user_id)
@@ -2904,6 +2936,17 @@ def _crm_face_token_locked(tenant_id: str, shop_id: str, crm_user_id: str) -> st
     response=crm_client.login_using_face_tenant(image,crm_tenant_id)
     token=_validated_crm_face_login_token(response,crm_user_id,crm_tenant_id)
     expires=jwt_expiry(token)
+    if expires is None:
+        raw_ttl=os.getenv("SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS","0").strip()
+        try:
+            fallback_ttl=max(0,int(raw_ttl))
+        except ValueError as exc:
+            raise RuntimeError("SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS must be an integer") from exc
+        if fallback_ttl==0:
+            # Opaque tokens may authorize the immediate action but aren't cached
+            # without a verified expiry or an explicitly configured short TTL.
+            return token
+        expires=datetime.now(timezone.utc)+timedelta(seconds=fallback_ttl)
     if not usable(expires):
         raise RuntimeError("CRM face token already expired")
     store.save_crm_face_token(tenant_id,shop_id,crm_user_id,

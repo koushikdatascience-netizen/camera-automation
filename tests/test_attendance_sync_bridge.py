@@ -248,15 +248,17 @@ def retry_now(bridge):
         conn.execute('UPDATE edge_attendance_delivery SET next_attempt_at=NULL')
 
 
-def test_rejected_crm_request_retries_after_duplicate_ingestion(bridge):
+def test_rejected_crm_request_is_terminal_and_preserves_safe_message(bridge):
     bridge.apply('CHECK_IN','in')
-    original=bridge.crm.login_logout_with_face_token
-    bridge.crm.login_logout_with_face_token=lambda *args: {'success':False}
-    assert bridge.ingest(bridge.envelope())['attendance_sync']['status']=='RETRY'
-    bridge.crm.login_logout_with_face_token=original
+    attempts=[]
+    bridge.crm.login_logout_with_face_token=lambda *args: attempts.append(1) or {
+        'success':False,'message':'Attendance already exists'}
+    result=bridge.ingest(bridge.envelope())['attendance_sync']
+    assert result['status']=='REJECTED'
+    assert result['error_code']=='Attendance already exists; success: false'
     retry_now(bridge)
-    assert bridge.ingest(bridge.envelope())['attendance_sync']['status']=='SUCCEEDED'
-    assert len(bridge.calls)==1
+    assert bridge.ingest(bridge.envelope())['attendance_sync']['status']=='REJECTED'
+    assert len(attempts)==1
 
 
 def test_timeout_requires_reconciliation_and_does_not_replay(bridge):

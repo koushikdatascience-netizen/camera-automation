@@ -151,6 +151,7 @@ def test_camera_outage_persists_unknown_and_suppresses_absence_actions(monkeypat
 
 def test_same_day_reentry_is_allowed_after_presence_was_checked_out(monkeypatch):
     calls=[]
+    monkeypatch.setenv("SNAPKEY_CRM_AUTO_LOGIN_ENABLED","1")
     now=datetime.now(timezone.utc)
     class Store:
         def crm_person_mapping(self,*_args): return {"crm_user_id":"crm-user"}

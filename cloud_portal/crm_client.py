@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import threading
 from typing import Any
@@ -15,6 +16,18 @@ logger.setLevel(logging.INFO)
 
 class CrmUnconfirmedMutationResponse(RuntimeError):
     """CRM accepted a mutation at HTTP level but did not confirm it in JSON."""
+
+
+class CrmHttpStatusError(httpx.HTTPStatusError):
+    """HTTP failure with a bounded, credential-free message for operator display."""
+
+    def __init__(self, original: httpx.HTTPStatusError, crm_message: str):
+        super().__init__(str(original),request=original.request,response=original.response)
+        self.crm_message=crm_message
+
+
+class CrmBusinessRejection(RuntimeError):
+    """A parsed CRM response explicitly rejected a requested mutation."""
 
 
 class SnapKeyCrmClient:
@@ -111,6 +124,57 @@ class SnapKeyCrmClient:
             return True
         return False
 
+    @staticmethod
+    def safe_error_message(source: Any, *, limit: int = 1200) -> str:
+        """Extract readable CRM problem details without returning secrets or image data."""
+        if hasattr(source,"json") and callable(source.json):
+            try:
+                source=source.json()
+            except (ValueError,TypeError):
+                source=None
+        parts=[]
+        priority=("message","title","detail","error","errors","status","success")
+
+        sensitive_fields={"token","authorization","password","passwordhash","faceimage",
+                          "faceimages","base64image","embedding","embeddings"}
+
+        def visit(value: Any, field: str | None=None) -> None:
+            if len(parts)>=32 or value is None:
+                return
+            if isinstance(value,bool):
+                if field and field.casefold()=="success" and value is False:
+                    parts.append("success: false")
+                return
+            if isinstance(value,dict):
+                keys=[key for key in priority if key in value]
+                if field and field.casefold()=="errors":
+                    keys.extend(key for key in value if str(key).casefold() not in priority)
+                for key in keys:
+                    if str(key).casefold() in sensitive_fields:
+                        continue
+                    visit(value[key],str(key))
+                return
+            if isinstance(value,(list,tuple)):
+                for child in value:
+                    visit(child,field)
+                return
+            item=str(value).strip()
+            if not item:
+                return
+            if field and field.casefold() not in {"message","title","detail","error","errors","status"}:
+                item=f"{field}: {item}"
+            parts.append(item)
+
+        visit(source)
+        message="; ".join(dict.fromkeys(parts))
+        message=re.sub(r"(?i)\bBearer\s+[^\s,;]+","Bearer [redacted]",message)
+        message=re.sub(r"(?i)\b(password(?:hash)?|authorization|token|base64image|embedding)\s*[:=]\s*[^\s,;]+",
+                       r"\1=[redacted]",message)
+        message=re.sub(r"(?i)data:image/[^\s,;]+;base64,[A-Za-z0-9+/=_-]+","[image redacted]",message)
+        message=re.sub(r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b","[token redacted]",message)
+        message=re.sub(r"(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{96,}(?![A-Za-z0-9])","[data redacted]",message)
+        return message[:limit] if message else "CRM returned no safe error details"
+
     def _request(self, method: str, path: str, *, operation: str,
                  auth_token: str | None = None, service_token: str | None = None,
                  tenant_code: str | None = None,
@@ -144,7 +208,7 @@ class SnapKeyCrmClient:
                 "CRM_HTTP_ERROR operation=%s status=%s elapsed_ms=%s auth_context=%s tenant_code=%s user_id=%s",
                 operation,status,elapsed_ms,auth_context,tenant_code or "-",user_id or "-",
             )
-            raise
+            raise CrmHttpStatusError(exc,self.safe_error_message(exc.response)) from exc
         except httpx.HTTPError:
             elapsed_ms=int((time.monotonic()-started)*1000)
             logger.exception(

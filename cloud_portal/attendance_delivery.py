@@ -244,7 +244,7 @@ class AttendanceDeliveryStore:
             return status, True
 
     def set_attendance_delivery(self, envelope, status, error_code=None, retry_seconds=0):
-        if status not in {"SUCCEEDED", "CRM_CONFIRMED", "RETRY", "MAPPING_REQUIRED",
+        if status not in {"SUCCEEDED", "CRM_CONFIRMED", "RETRY", "REJECTED", "MAPPING_REQUIRED",
                           "RECONCILIATION_REQUIRED"}:
             raise ValueError("Invalid attendance delivery status")
         now = datetime.now(timezone.utc)

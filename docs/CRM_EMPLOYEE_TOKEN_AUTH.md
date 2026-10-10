@@ -22,9 +22,11 @@ flow is introduced. The same token is reused while valid.
 The existing PostgreSQL `crm_face_tokens` table stores Fernet-encrypted tokens
 keyed by tenant code, shop, and CRM user ID. Scope metadata inside the ciphertext
 prevents copying a token to a different tenant/user row. Each lookup also verifies
-current membership in that tenant's face directory. Expiration is bounded by the
-persisted 24-hour maximum and JWT `exp`, with a five-minute safety margin. JWT
-payload decoding is only an expiry hint, not signature verification.
+current membership in that tenant's face directory. JWT `exp`, when present,
+is only an unverified expiry hint with a five-minute safety margin. Opaque tokens
+are not cached by default because the CRM token lifetime is not verified; an
+operator may configure `SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS` only after CRM
+confirms a safe lifetime. No 24-hour duration is assumed.
 
 Manual actions still require a fresh recognition candidate from the correct
 camera and edge. On a cache miss, they authenticate the current recognition image;

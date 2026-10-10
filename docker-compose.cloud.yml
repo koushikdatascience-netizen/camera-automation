@@ -53,8 +53,14 @@ services:
       # face-login service. Override this while that service is hosted separately.
       SNAPKEY_CRM_FACE_LOGIN_URL: ${SNAPKEY_CRM_FACE_LOGIN_URL:-https://apis.snapkey.in/api/Auth/loginUsingFaceTenant}
       # Auto-logout stays disabled until its business rule is explicitly confirmed.
-      SNAPKEY_CRM_AUTO_LOGIN_ENABLED: ${SNAPKEY_CRM_AUTO_LOGIN_ENABLED:-1}
+      SNAPKEY_CRM_AUTO_LOGIN_ENABLED: ${SNAPKEY_CRM_AUTO_LOGIN_ENABLED:-0}
       SNAPKEY_CRM_AUTO_LOGOUT_ENABLED: ${SNAPKEY_CRM_AUTO_LOGOUT_ENABLED:-0}
+      # Date/time formatting follows employee/shop policy unless timezone is explicitly overridden.
+      # CRM date format and business timezone still require tenant contract verification.
+      SNAPKEY_CRM_ATTENDANCE_DATE_FORMAT: ${SNAPKEY_CRM_ATTENDANCE_DATE_FORMAT:-%Y-%m-%d}
+      SNAPKEY_CRM_ATTENDANCE_TIMEZONE: ${SNAPKEY_CRM_ATTENDANCE_TIMEZONE:-}
+      # Opaque CRM tokens are not cached unless this fallback TTL is explicitly set.
+      SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS: ${SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS:-0}
       # V2 uses a different CRM endpoint; keep off until staging contract approval.
       CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED: ${CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED:-false}
       CAMERA_EYE_TOKEN_ENCRYPTION_KEY: ${CAMERA_EYE_TOKEN_ENCRYPTION_KEY:-}
