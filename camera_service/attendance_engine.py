@@ -19,8 +19,11 @@ class AttendanceEngine:
         """
         import os
         mode = os.environ.get("CAMERA_EYE_ATTENDANCE_MODE", "AUTO").strip().upper()
-        if hasattr(self.store,'effective_attendance_mode'):
-            mode=self.store.effective_attendance_mode(ev.person_id,self.store_id,mode)
+        mode_resolver=getattr(self.store,'effective_attendance_mode',None)
+        resolved_mode=(mode_resolver(ev.person_id,self.store_id,mode)
+                       if callable(mode_resolver) else None)
+        if resolved_mode in {'AUTO','MANUAL'}:
+            mode=resolved_mode
         else:
             person = self.store.get_person(ev.person_id)
             if person and person.get("attendance_mode") in {"AUTO", "MANUAL"}:
@@ -28,7 +31,8 @@ class AttendanceEngine:
         with self._lock:
             self.identities[(ev.camera_id, ev.track_id)] = ev
             p = self.presence.get(ev.person_id) or Presence(person_id=ev.person_id, first_seen_today=ev.timestamp)
-            saved=self.store.open_session(ev.person_id,self.store_id)
+            open_session=getattr(self.store,'open_session',None)
+            saved=open_session(ev.person_id,self.store_id) if callable(open_session) else None
             if saved and saved.get('entry_confirmed') and saved.get('break_started_at'):
                 p.status='BREAK';p.break_started_at=datetime.fromisoformat(saved['break_started_at'])
             elif p.status=='BREAK':

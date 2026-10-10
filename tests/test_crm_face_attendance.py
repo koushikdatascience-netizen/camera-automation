@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from cloud_portal.crm_client import SnapKeyCrmClient
+from cloud_portal.crm_client import CrmUnconfirmedMutationResponse, SnapKeyCrmClient
 
 
 class FakeResponse:
@@ -35,6 +35,8 @@ class FakeClient:
 
     def request(self, method, path, headers=None, **kwargs):
         self.calls.append({"method":method,"path":path,"headers":headers or {},"kwargs":kwargs})
+        if method.upper()=="POST":
+            return FakeResponse({"success":True})
         return FakeResponse([{"id":"crm-user-1","tenantId":"tenant-uuid-1"}])
 
     def post(self, url, headers=None, json=None, **kwargs):
@@ -98,6 +100,55 @@ def test_face_token_is_used_for_login_logout(monkeypatch):
     assert call["path"] == "/api/UserRoster/LoginLogout"
     assert call["headers"]["Authorization"] == "face-token"
     assert "expired-static-token" not in str(call)
+
+
+@pytest.mark.parametrize("body", [b"", b"upstream proxy generated this page"])
+def test_attendance_mutation_without_json_confirmation_is_uncertain(monkeypatch, body):
+    class UnconfirmedResponse(FakeResponse):
+        def __init__(self, payload=None, status_code=200):
+            super().__init__(payload, status_code)
+            self.content=body
+            self.text=body.decode("ascii")
+
+        def json(self):
+            if body:
+                raise ValueError("not JSON")
+            return super().json()
+
+    class UnconfirmedClient(FakeClient):
+        def request(self, method, path, headers=None, **kwargs):
+            self.calls.append({"method":method,"path":path,"headers":headers or {},"kwargs":kwargs})
+            return UnconfirmedResponse()
+
+    UnconfirmedClient.calls=[]
+    monkeypatch.setattr(httpx,"Client",UnconfirmedClient)
+    client=SnapKeyCrmClient(base_url="https://apis.snapkey.in")
+
+    with pytest.raises(CrmUnconfirmedMutationResponse):
+        client.login_logout_with_face_token(
+            {"userId":"crm-user-1","date":"2026-10-07","actualStartTime":"09:00:00"},
+            "face-token",
+        )
+
+    assert len(UnconfirmedClient.calls)==1
+    assert UnconfirmedClient.calls[0]["path"]=="/api/UserRoster/LoginLogout"
+
+
+def test_attendance_mutation_with_unconfirmed_business_body_is_uncertain(monkeypatch):
+    class UnconfirmedClient(FakeClient):
+        def request(self, method, path, headers=None, **kwargs):
+            self.calls.append({"method":method,"path":path,"headers":headers or {},"kwargs":kwargs})
+            return FakeResponse({"message":"request accepted"})
+
+    UnconfirmedClient.calls=[]
+    monkeypatch.setattr(httpx,"Client",UnconfirmedClient)
+    client=SnapKeyCrmClient(base_url="https://apis.snapkey.in")
+
+    with pytest.raises(CrmUnconfirmedMutationResponse):
+        client.login_logout_with_face_token(
+            {"userId":"crm-user-1","date":"2026-10-07","actualStartTime":"09:00:00"},
+            "face-token",
+        )
 
 
 def test_auto_logout_uses_distinct_endpoint_and_exact_payload(monkeypatch):

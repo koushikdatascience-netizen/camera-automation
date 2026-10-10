@@ -13,6 +13,10 @@ logger = logging.getLogger("camera_eye.crm")
 logger.setLevel(logging.INFO)
 
 
+class CrmUnconfirmedMutationResponse(RuntimeError):
+    """CRM accepted a mutation at HTTP level but did not confirm it in JSON."""
+
+
 class SnapKeyCrmClient:
     """Server-side SnapKey CRM client.
 
@@ -148,13 +152,34 @@ class SnapKeyCrmClient:
                 operation,elapsed_ms,auth_context,tenant_code or "-",user_id or "-",
             )
             raise
+        mutation_paths={
+            "/api/UserRoster/LoginLogout",
+            "/api/UserBreak/start-break",
+            "/api/UserBreak/end-break",
+            "/api/UserActivity/auto-logout",
+        }
+        is_mutation=method.upper()=="POST" and path in mutation_paths
         if not response.content:
-            return {"ok":True}
+            if is_mutation:
+                logger.warning("CRM_MUTATION_RESPONSE_UNCONFIRMED operation=%s reason=empty_body",operation)
+                raise CrmUnconfirmedMutationResponse("CRM mutation response was empty")
+            return {}
         try:
-            return response.json()
+            result=response.json()
         except ValueError:
             logger.warning("CRM_NON_JSON_RESPONSE operation=%s status=%s",operation,response.status_code)
-            return {"ok":True,"text":response.text[:1000]}
+            if is_mutation:
+                logger.warning("CRM_MUTATION_RESPONSE_UNCONFIRMED operation=%s reason=non_json",operation)
+                raise CrmUnconfirmedMutationResponse("CRM mutation response was not JSON")
+            return {}
+        explicit_business_rejection=(
+            isinstance(result,dict)
+            and (result.get("success") is False or result.get("ok") is False)
+        )
+        if is_mutation and not self.business_success(result) and not explicit_business_rejection:
+            logger.warning("CRM_MUTATION_RESPONSE_UNCONFIRMED operation=%s reason=business_success_missing",operation)
+            raise CrmUnconfirmedMutationResponse("CRM mutation response did not confirm business success")
+        return result
 
     def all_users(self, tenant_code: str | None = None) -> Any:
         token=self.service_token_for_tenant(tenant_code) if tenant_code else None
@@ -254,12 +279,12 @@ class SnapKeyCrmClient:
             logger.exception("CRM_FACE_AUTH_TRANSPORT_ERROR tenant_id=%s",crm_tenant_id)
             raise
         if not response.content:
-            return {"ok":True}
+            return {}
         try:
             result=response.json()
         except ValueError:
             logger.warning("CRM_FACE_AUTH_NON_JSON tenant_id=%s status=%s",crm_tenant_id,response.status_code)
-            return {"ok":True,"text":response.text[:1000]}
+            return {}
         crm_user=result.get("user") if isinstance(result,dict) and isinstance(result.get("user"),dict) else {}
         logger.info(
             "CRM_FACE_AUTH_RESULT tenant_id=%s success=%s crm_user_id=%s token_present=%s",
