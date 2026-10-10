@@ -725,7 +725,9 @@ def integration_reconcile_person_auto_logout(tenant_id: str,shop_id: str,crm_use
         "id":activity_id,"occurred_at":datetime.now(timezone.utc),"camera_id":action.get("camera_id"),
         "evidence":_evidence_manifest_for_last_recognition(tenant_id,shop_id,
             action.get("last_recognition_event_id"),"reconciled_absence_action_snapshot"),
-        "metadata":{"absence_started_at":started.isoformat(),"crm_operation":"auto-logout",
+        "metadata":{**(action.get("confirmation_metadata") or {}),
+                    "absence_started_at":started.isoformat(),
+                    "crm_operation":(action.get("confirmation_metadata") or {}).get("crm_operation","auto-logout"),
                     "recognition_event_id":action.get("last_recognition_event_id"),
                     "reconciled_by":"CRM_INTEGRATION"},
     })
@@ -1363,8 +1365,7 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
                 "loginLocation":location,"logoutLocation":None},face_token)
         elif event_type=="ATTENDANCE_EXIT":
             result=crm_client.login_logout_with_face_token({"userId":crm_user_id,"date":crm_date,
-                "actualStartTime":None,"actualOffTime":crm_time,
-                "loginLocation":None,"logoutLocation":location},face_token)
+                "actualOffTime":crm_time},face_token)
         elif event_type=="BREAK_START":
             result=crm_client.start_break(crm_user_id,mapping["break_master_id"],auth_token=face_token)
         else:
@@ -2864,7 +2865,21 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
         logger.info("AUTO_CHECKOUT_SKIPPED tenant_id=%s shop_id=%s person_id=%s reason=feature_disabled",
                     tenant_id,shop_id,person_id)
         return
+    if reason_code=="ABSENCE_GRACE_EXCEEDED":
+        # Only V2 owns absence mutations: policy timing, durable claims and reconciliation.
+        store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
+        return
+    action_claimed=False; mutation_sent=False; confirmation_persisted=False
+    started=presence.get("last_seen_at")
     try:
+        if not hasattr(store,"claim_crm_auto_logout"):
+            raise RuntimeError("Durable automatic checkout storage is required")
+        if not store.claim_crm_auto_logout(tenant_id,shop_id,crm_user_id,started,
+                person_id,presence.get("last_camera_id"),presence.get("last_recognition_event_id"),
+                allow_on_break=reason_code=="MAX_LOGOFF_REACHED"):
+            store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
+            return
+        action_claimed=True
         attendance_camera_id=presence.get("last_camera_id")
         if require_camera_health and (not attendance_camera_id or not store.attendance_camera_coverage_healthy(
                 tenant_id,shop_id,now,camera_id=attendance_camera_id)):
@@ -2873,27 +2888,41 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
             store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
             return
         face_token=_crm_face_token(tenant_id,shop_id,crm_user_id)
+        crm_date,crm_time=_crm_attendance_date_time(tenant_id,shop_id,crm_user_id,now)
+        mutation_sent=True
         result=crm_client.login_logout_with_face_token({
             "userId":crm_user_id,
-            "date":now.date().isoformat(),
-            "actualOffTime":now.strftime("%H:%M:%S"),
+            "date":crm_date,
+            "actualOffTime":crm_time,
         },face_token)
         if not _crm_login_logout_succeeded(result):
-            raise RuntimeError("CRM rejected automatic checkout")
-        store.complete_presence_checkout(tenant_id,shop_id,person_id,True)
+            if isinstance(result,dict) and result.get("success") is False:
+                store.release_crm_auto_logout_for_retry(tenant_id,shop_id,crm_user_id,started,
+                    SnapKeyCrmClient.safe_error_message(result))
+                store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
+                return
+            raise RuntimeError("CRM automatic checkout response unconfirmed")
+        confirmation={"crm_response_message":_safe_crm_response_message(result),
+            "reason_code":reason_code,"crm_operation":"LoginLogout", "occurred_at":now.isoformat(),
+            "policy_snapshot":store.attendance_policy(tenant_id,shop_id) if hasattr(store,"attendance_policy") else {}}
+        if not store.mark_crm_auto_logout_confirmed(tenant_id,shop_id,crm_user_id,started,confirmation):
+            raise RuntimeError("CRM confirmation persistence failed")
+        confirmation_persisted=True
         last_seen=presence["last_seen_at"]
         recognition_id=presence.get("last_recognition_event_id")
-        store.record_attendance_activity({
-            "id":"activity-"+secrets.token_urlsafe(12),"tenant_id":tenant_id,"shop_id":shop_id,
+        state=store.finalize_crm_auto_logout_local(tenant_id,shop_id,crm_user_id,started,{
+            "id":"v2-"+_v2_auto_logout_action_id(tenant_id,shop_id,crm_user_id,started),"tenant_id":tenant_id,"shop_id":shop_id,
             "crm_user_id":crm_user_id,"local_person_id":person_id,
             "activity_type":"CHECK_OUT","occurred_at":now,"source":"CAMERA_EYE",
             "camera_id":presence.get("last_camera_id"),"reason_code":reason_code,
             "evidence":_evidence_manifest_for_last_recognition(
                 tenant_id,shop_id,recognition_id,"checkout_snapshot"),
-            "metadata":{"last_seen_at":last_seen.isoformat() if hasattr(last_seen,"isoformat") else str(last_seen),
+            "metadata":{**confirmation,"last_seen_at":last_seen.isoformat() if hasattr(last_seen,"isoformat") else str(last_seen),
                         "last_recognition_event_id":recognition_id,
                         "attendance_session_id":_attendance_session_id(person_id,now,str(recognition_id or "checkout"))},
         })
+        if state!="SUCCEEDED":
+            return
         event_type="MAX_LOGOFF_AUTO_CHECK_OUT" if reason_code=="MAX_LOGOFF_REACHED" else "AUTO_CHECK_OUT"
         alert={"event_id":"auto-checkout-"+secrets.token_urlsafe(12),"tenant_id":tenant_id,"shop_id":shop_id,
                "site_id":shop_id,"edge_id":"cloud-policy","camera_id":presence.get("last_camera_id"),
@@ -2906,6 +2935,12 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
                     tenant_id,shop_id,person_id,crm_user_id,reason_code)
     except Exception as exc:
         _invalidate_crm_face_token_on_401(tenant_id,shop_id,crm_user_id,exc)
+        if action_claimed and not confirmation_persisted:
+            if mutation_sent:
+                store.mark_crm_auto_logout_reconciliation_required(tenant_id,shop_id,crm_user_id,started,
+                    "CRM_result_or_confirmation_ambiguous")
+            else:
+                store.release_crm_auto_logout_for_retry(tenant_id,shop_id,crm_user_id,started,type(exc).__name__)
         store.complete_presence_checkout(tenant_id,shop_id,person_id,False)
         logger.exception("AUTO_CHECKOUT_FAILED tenant_id=%s shop_id=%s person_id=%s reason=%s",
                          tenant_id,shop_id,person_id,reason_code)
@@ -3021,12 +3056,18 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
         token=_crm_face_token(tenant,shop,user)
         crm_mutation_sent=True
         result=crm_client.auto_logout_with_face_token(
-            user,f"AUTO_LOGOUT: Employee not detected by a healthy attendance camera for {CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES} minutes",token)
-        if not _crm_mutation_succeeded(result):
-            # A definitive business rejection is safe to retry with backoff.
-            store.release_crm_auto_logout_for_retry(tenant,shop,user,started,"CRM_business_rejection")
+            user,f"AUTO_LOGOUT: Employee not detected by a healthy attendance camera for {required_absence_minutes} minutes",token)
+        if not _crm_login_logout_succeeded(result):
+            if not isinstance(result,dict) or result.get("success") is not False:
+                from cloud_portal.crm_client import CrmUnconfirmedMutationResponse
+                raise CrmUnconfirmedMutationResponse("CRM auto-logout response did not confirm success")
+            store.release_crm_auto_logout_for_retry(tenant,shop,user,started,
+                SnapKeyCrmClient.safe_error_message(result))
             return
-        if not store.mark_crm_auto_logout_confirmed(tenant,shop,user,started):
+        if not store.mark_crm_auto_logout_confirmed(tenant,shop,user,started,
+                {"crm_response_message":_safe_crm_response_message(result),
+                 "policy_snapshot":policy,"required_absence_minutes":required_absence_minutes,
+                 "occurred_at":now.isoformat()}):
             raise RuntimeError("CRM succeeded but local action confirmation could not be persisted")
         crm_confirmation_persisted=True
         activity_id="v2-"+_v2_auto_logout_action_id(tenant,shop,user,started)
@@ -3034,7 +3075,9 @@ def _v2_auto_logout(row: dict[str, Any], now: datetime) -> None:
             "id":activity_id,"occurred_at":now,"camera_id":row.get("last_camera_id"),
             "evidence":_evidence_manifest_for_last_recognition(
                 tenant,shop,row.get("last_recognition_event_id"),"absence_action_snapshot"),
-            "metadata":{"absence_started_at":started.isoformat(),"crm_operation":"auto-logout",
+            "metadata":{"crm_response_message":_safe_crm_response_message(result),
+                        "policy_snapshot":policy,"required_absence_minutes":required_absence_minutes,
+                        "absence_started_at":started.isoformat(),"crm_operation":"auto-logout",
                         "crm_contract_minimum_minutes":CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES,
                         "recognition_event_id":row.get("last_recognition_event_id")},
         })
@@ -3081,11 +3124,15 @@ def _recover_v2_auto_logout_local_finalizations(now: datetime) -> None:
         activity_id="v2-"+_v2_auto_logout_action_id(tenant,shop,user,started)
         try:
             state=store.finalize_crm_auto_logout_local(tenant,shop,user,started,{
-                "id":activity_id,"occurred_at":now,"camera_id":action.get("camera_id"),
+                "id":activity_id,"occurred_at":datetime.fromisoformat(
+                    action["confirmation_metadata"]["occurred_at"]) if (action.get("confirmation_metadata") or {}).get("occurred_at") else now,
+                "camera_id":action.get("camera_id"),
                 "evidence":_evidence_manifest_for_last_recognition(
                     tenant,shop,action.get("last_recognition_event_id"),"recovered_absence_action_snapshot"),
-                "metadata":{"absence_started_at":started.isoformat(),
-                            "crm_operation":"auto-logout","recovered_local_commit":True,
+                "metadata":{**(action.get("confirmation_metadata") or {}),
+                            "absence_started_at":started.isoformat(),
+                            "crm_operation":(action.get("confirmation_metadata") or {}).get("crm_operation","auto-logout"),
+                            "recovered_local_commit":True,
                             "recognition_event_id":action.get("last_recognition_event_id")},
             })
             logger.info("V2_AUTO_LOGOUT_RECOVERY user_id=%s state=%s",user,state)

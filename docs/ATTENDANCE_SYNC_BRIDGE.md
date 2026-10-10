@@ -34,7 +34,7 @@ No CRM endpoint or payload is changed:
 | --- | --- | --- |
 | Personnel identity | `GET /api/User/face-embeddings/{tenantCode}` | Confirmed unauthenticated directory contract |
 | Employee authentication | `POST /api/Auth/loginUsingFaceTenant` | Existing enrolled image + tenant UUID |
-| Entry/exit | `POST /api/UserRoster/LoginLogout` | Same employee's Face Login bearer token |
+| Entry/exit | `POST /api/UserRoster/LoginLogout` | Same employee's raw Face Login token (no Bearer prefix) |
 | Break start | `POST /api/UserBreak/start-break` | Same employee's token; server-mapped break master |
 | Break end | `POST /api/UserBreak/end-break` | Same employee's token |
 

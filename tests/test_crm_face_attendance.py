@@ -234,7 +234,7 @@ def test_auto_logout_uses_distinct_endpoint_and_exact_payload(monkeypatch):
     call=AutoLogoutClient.calls[0]
     assert call["method"] == "POST"
     assert call["path"] == "/api/UserActivity/auto-logout"
-    assert call["headers"]["Authorization"] == "face-token"
+    assert call["headers"]["Authorization"] == "Bearer face-token"
     assert call["kwargs"]["json"] == {
         "userId":"crm-user-1","remarks":"AUTO_LOGOUT: absent for 60 minutes"}
     assert "expired-static-token" not in str(call)

@@ -158,6 +158,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                 claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ,
                 last_error TEXT,
                 PRIMARY KEY(tenant_id,shop_id,crm_user_id,absence_started_at))""",
+            """ALTER TABLE crm_auto_logout_actions ADD COLUMN IF NOT EXISTS confirmation_metadata JSONB NOT NULL DEFAULT '{}'::jsonb""",
             """ALTER TABLE crm_auto_logout_actions ADD COLUMN IF NOT EXISTS local_person_id TEXT""",
             """ALTER TABLE crm_auto_logout_actions ADD COLUMN IF NOT EXISTS camera_id TEXT""",
             """ALTER TABLE crm_auto_logout_actions ADD COLUMN IF NOT EXISTS last_recognition_event_id TEXT""",
@@ -782,7 +783,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
     def claim_crm_auto_logout(self, tenant_id: str, shop_id: str, crm_user_id: str,
                               absence_started_at: datetime,local_person_id: str | None = None,
                               camera_id: str | None = None,
-                              last_recognition_event_id: str | None = None) -> bool:
+                              last_recognition_event_id: str | None = None, *, allow_on_break: bool = False) -> bool:
         now=self.now()
         with self._conn() as conn:
             conn.execute(text("""UPDATE crm_auto_logout_actions SET status='FAILED',
@@ -804,12 +805,16 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                 WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
                 AND absence_started_at=:started
                 AND status='PENDING' AND attempts<5
+                AND NOT EXISTS (SELECT 1 FROM crm_auto_logout_actions other
+                    WHERE other.tenant_id=:tenant AND other.shop_id=:shop AND other.crm_user_id=:user
+                      AND other.absence_started_at<>:started
+                      AND other.status IN ('IN_FLIGHT','CRM_CONFIRMED_LOCAL_PENDING','RECONCILIATION_REQUIRED'))
                 AND EXISTS (SELECT 1 FROM attendance_presence p
                     WHERE p.tenant_id=:tenant AND p.shop_id=:shop AND p.crm_user_id=:user
-                      AND p.checked_in=TRUE AND p.on_break=FALSE AND p.last_seen_at=:started)
+                      AND p.checked_in=TRUE AND (p.on_break=FALSE OR :allow_on_break) AND p.last_seen_at=:started)
                 RETURNING status"""),{
                     "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
-                    "started":absence_started_at,"now":now}).first()
+                    "started":absence_started_at,"now":now,"allow_on_break":allow_on_break}).first()
         return row is not None
 
     def complete_crm_auto_logout(self, tenant_id: str, shop_id: str, crm_user_id: str,
@@ -826,14 +831,16 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                     "user":crm_user_id,"started":absence_started_at})
 
     def mark_crm_auto_logout_confirmed(self, tenant_id: str, shop_id: str, crm_user_id: str,
-                                       absence_started_at: datetime) -> bool:
+                                       absence_started_at: datetime, confirmation_metadata: dict[str,Any] | None = None) -> bool:
         """Persist the upstream success before attempting any local finalization."""
         with self._conn() as conn:
             result=conn.execute(text("""UPDATE crm_auto_logout_actions
-                SET status='CRM_CONFIRMED_LOCAL_PENDING',last_error=NULL
+                SET status='CRM_CONFIRMED_LOCAL_PENDING',last_error=NULL,
+                    confirmation_metadata=CAST(:metadata AS JSONB)
                 WHERE tenant_id=:tenant AND shop_id=:shop AND crm_user_id=:user
                   AND absence_started_at=:started AND status='IN_FLIGHT'"""),{
-                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,"started":absence_started_at})
+                    "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,"started":absence_started_at,
+                    "metadata":json.dumps(confirmation_metadata or {})})
         return result.rowcount==1
 
     def release_crm_auto_logout_for_retry(self, tenant_id: str, shop_id: str, crm_user_id: str,
@@ -859,7 +866,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
     def list_v2_crm_auto_logout_recovery(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._conn() as conn:
             rows=conn.execute(text("""SELECT tenant_id,shop_id,crm_user_id,absence_started_at,
-                    local_person_id,camera_id,last_recognition_event_id
+                    local_person_id,camera_id,last_recognition_event_id,confirmation_metadata
                 FROM crm_auto_logout_actions WHERE status='CRM_CONFIRMED_LOCAL_PENDING'
                 ORDER BY claimed_at LIMIT :limit"""),{"limit":max(1,min(500,int(limit)))}).mappings().all()
         return [dict(row) for row in rows]
@@ -868,7 +875,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                                         limit: int = 100) -> list[dict[str, Any]]:
         with self._conn() as conn:
             rows=conn.execute(text("""SELECT absence_started_at,local_person_id,camera_id,
-                    last_recognition_event_id,status,attempts,claimed_at,completed_at,last_error
+                    last_recognition_event_id,status,attempts,claimed_at,completed_at,last_error,confirmation_metadata
                 FROM crm_auto_logout_actions WHERE tenant_id=:tenant AND shop_id=:shop
                   AND crm_user_id=:user AND status IN
                     ('IN_FLIGHT','CRM_CONFIRMED_LOCAL_PENDING','RECONCILIATION_REQUIRED','FAILED')
@@ -933,10 +940,11 @@ class PostgresPortalStore(AttendanceDeliveryStore):
                 id,tenant_id,shop_id,crm_user_id,local_person_id,activity_type,occurred_at,
                 reason_code,source,camera_id,evidence_json,metadata_json,created_at)
                 VALUES(:id,:tenant,:shop,:user,:person,'CHECK_OUT',:occurred,
-                'ABSENCE_60_MIN_AUTO_LOGOUT','CAMERA_EYE',:camera,CAST(:evidence AS JSONB),
+                :reason,'CAMERA_EYE',:camera,CAST(:evidence AS JSONB),
                 CAST(:metadata AS JSONB),:created) ON CONFLICT(id) DO NOTHING"""),{
                     "id":activity["id"],"tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
                     "person":presence["local_person_id"],"occurred":activity["occurred_at"],
+                    "reason":activity.get("reason_code") or activity_metadata.get("reason_code") or "ABSENCE_60_MIN_AUTO_LOGOUT",
                     "camera":activity.get("camera_id"),"evidence":json.dumps(activity.get("evidence") or {}),
                     "metadata":json.dumps(activity_metadata),"created":self.now()})
             if recognition_advanced:

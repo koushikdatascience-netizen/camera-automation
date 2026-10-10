@@ -245,7 +245,7 @@ class SnapKeyCrmClient:
             isinstance(result,dict)
             and (result.get("success") is False or result.get("ok") is False)
         )
-        confirmed=(self.login_logout_success(result) if path=="/api/UserRoster/LoginLogout"
+        confirmed=(self.login_logout_success(result) if path in {"/api/UserRoster/LoginLogout", "/api/UserActivity/auto-logout"}
                    else self.business_success(result))
         if is_mutation and not confirmed and not explicit_business_rejection:
             logger.warning("CRM_MUTATION_RESPONSE_UNCONFIRMED operation=%s reason=business_success_missing",operation)
@@ -402,7 +402,7 @@ class SnapKeyCrmClient:
 
 
     def auto_logout_with_face_token(self, user_id: str, remarks: str, face_token: str) -> Any:
-        """CRM's confirmed auto-logout endpoint. Do not log or persist the token here."""
+        """Use the documented Bearer scheme; employee scope still requires staging verification."""
         self._token_headers(face_token)
         uid=(user_id or "").strip()
         reason=(remarks or "").strip()
@@ -410,9 +410,10 @@ class SnapKeyCrmClient:
             raise ValueError("user_id and remarks are required")
         result=self._request("POST","/api/UserActivity/auto-logout",
                              operation="auto_logout",auth_token=face_token,
+                             headers={"Authorization":"Bearer "+face_token.strip().removeprefix("Bearer ").strip()},
                              user_id=uid,json={"userId":uid,"remarks":reason})
         logger.info("CRM_AUTO_LOGOUT_RESULT user_id=%s success=%s",
-                    uid,self.business_success(result))
+                    uid,self.login_logout_success(result))
         return result
 
 

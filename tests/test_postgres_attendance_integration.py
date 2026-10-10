@@ -62,9 +62,11 @@ def test_postgres_fresh_schema_outbox_and_auto_logout_recovery():
 
         started=now-timedelta(hours=1)
         assert store.claim_crm_auto_logout(tenant,shop,user,started) is True
-        assert store.mark_crm_auto_logout_confirmed(tenant,shop,user,started) is True
+        confirmation={"crm_response_message":"Done", "policy_snapshot":{"markAbsentAfterMinutes":90}}
+        assert store.mark_crm_auto_logout_confirmed(tenant,shop,user,started,confirmation) is True
         pending=store.list_v2_crm_auto_logout_recovery()
         assert len(pending)==1
+        assert pending[0]["confirmation_metadata"]==confirmation
         result=store.finalize_crm_auto_logout_local(tenant,shop,user,started,{
             "id":"auto-logout-test-activity","occurred_at":now,"camera_id":"cam-test",
             "evidence":{"status":"UNAVAILABLE","missing":{"absence":"test"}},

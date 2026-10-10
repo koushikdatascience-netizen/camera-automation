@@ -163,8 +163,7 @@ def test_crm_attendance_deployed_payload_and_logout_opt_in(tmp_path, monkeypatch
  assert len(calls)==2
  assert calls[-1]==({
   'userId':'crm-user-1','date':'2026-09-28T18:15:20.000+00:00',
-  'actualStartTime':None,'actualOffTime':'18:15:20',
-  'loginLocation':None,'logoutLocation':'Camera Eye - site-1',
+  'actualOffTime':'18:15:20',
  },'face-token')
 
 

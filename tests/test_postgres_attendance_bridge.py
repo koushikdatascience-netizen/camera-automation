@@ -118,6 +118,8 @@ def test_pg_enrollment_to_edge_recognition_and_authentication(pg_bridge,tmp_path
         calls.append(1)
         return {'success':True,'token':'synthetic','user':{'id':'employee','tenantId':'uuid'}}
     api.crm_client.login_using_face_tenant=login
+    # Synthetic opaque credential has no JWT expiry; opt into a short test-only TTL.
+    monkeypatch.setenv('SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS','600')
     assert api._crm_face_token('tenant','shop','employee')=='synthetic'
     assert api._crm_face_token('tenant','shop','employee')=='synthetic' and calls==[1]
     saved=pg_bridge.get_crm_face_token('tenant','shop','employee')
@@ -232,3 +234,18 @@ def test_pg_enrollment_singleflight_and_scope_guard(pg_bridge):
     store.upsert_crm_cloud_person(item)
     with pytest.raises(NoResultFound):store.upsert_crm_cloud_person({**item,'tenant_id':'tenant-b'})
     assert store.get_cloud_person('tenant-a','shop-a','shared')
+
+
+def test_logout_reconciliation_blocks_newer_claim_and_max_logoff_keeps_break_policy(pg_bridge):
+    now=datetime.now(timezone.utc)
+    tenant,shop,user,person="tenant-test","shop-test","user-test","person-test"
+    pg_bridge.touch_attendance_presence(tenant_id=tenant,shop_id=shop,local_person_id=person,
+        crm_user_id=user,seen_at=now,camera_id="cam",recognition_event_id="recognition-test",checked_in=True)
+    pg_bridge.set_attendance_presence_break(tenant,shop,person,True)
+    assert not pg_bridge.claim_crm_auto_logout(tenant,shop,user,now)
+    assert pg_bridge.claim_crm_auto_logout(tenant,shop,user,now,allow_on_break=True)
+    pg_bridge.mark_crm_auto_logout_reconciliation_required(tenant,shop,user,now,"uncertain upstream result")
+    later=now+timedelta(seconds=10)
+    pg_bridge.touch_attendance_presence(tenant_id=tenant,shop_id=shop,local_person_id=person,
+        crm_user_id=user,seen_at=later,camera_id="cam",recognition_event_id="recognition-test",checked_in=True)
+    assert not pg_bridge.claim_crm_auto_logout(tenant,shop,user,later,allow_on_break=True)

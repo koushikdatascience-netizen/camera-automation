@@ -67,16 +67,17 @@ if SCENARIO=mismatch SSH_ORIGINAL_COMMAND="deploy $REVISION" bash "$work/deploy.
   echo 'Mismatched image revision was accepted' >&2; exit 1
 fi
 test ! -f "$work/new"
+grep -q 'image: old' "$work/project/docker-compose.cloud.yml"
 SSH_ORIGINAL_COMMAND="deploy $REVISION" bash "$work/deploy.sh" < "$work/release.tar.gz"
 test "$(cat "$work/state/current-revision")" = "$REVISION"
 test "$(cat "$work/state/previous-image")" = sha256:old
-grep -q 'image: new' "$work/project/docker-compose.cloud.yml"
+grep -q 'image: old' "$work/project/docker-compose.cloud.yml"
 rm "$work/new"
 if SCENARIO=failure SSH_ORIGINAL_COMMAND="deploy $REVISION" bash "$work/deploy.sh" < "$work/release.tar.gz"; then
   echo 'Unhealthy deployment was accepted' >&2; exit 1
 fi
 test ! -f "$work/new"
-grep -q 'image: new' "$work/project/docker-compose.cloud.yml"
+grep -q 'image: old' "$work/project/docker-compose.cloud.yml"
 if grep -E ' down|volume rm|system prune' "$work/docker.log"; then
   echo 'Deployment attempted a destructive Docker operation' >&2; exit 1
 fi

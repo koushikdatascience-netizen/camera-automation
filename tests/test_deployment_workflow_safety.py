@@ -39,3 +39,16 @@ def test_cloud_deploy_validates_before_production_deploy():
     assert names.index("Validate cloud code") < names.index("Build tested production image")
     assert names.index("Build tested production image") < names.index("Verify production image with isolated PostgreSQL")
     assert names.index("Verify production image with isolated PostgreSQL") < names.index("Deploy exact tested image")
+
+
+def test_deploy_handler_preserves_server_owned_compose():
+    script=(Path(__file__).resolve().parents[1]/"tools/deploy_cloud.sh").read_text()
+    assert 'install -m 0644 "$work/docker-compose.cloud.yml" "$project/docker-compose.cloud.yml"' not in script
+    assert '"${compose[@]}" config --quiet' in script
+    assert '--no-deps --no-build --pull never portal' in script
+
+
+def test_compose_passes_fail_closed_integration_scope_allow_list():
+    root=Path(__file__).resolve().parents[1]
+    compose=yaml.load((root/'docker-compose.cloud.yml').read_text(),Loader=yaml.BaseLoader)
+    assert compose['services']['portal']['environment']['SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES']== '${SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES:-[]}'

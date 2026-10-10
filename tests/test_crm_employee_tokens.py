@@ -51,7 +51,7 @@ def employee_crm(monkeypatch):
         def record_attendance_activity(self,item): self.activities.append(item)
         def record_portal_event(self,item): self.events.append(item)
         def attendance_camera_coverage_status(self,*_args,**_kwargs): return {"state":"HEALTHY"}
-        def claim_crm_auto_logout(self,*_args):
+        def claim_crm_auto_logout(self,*_args,**_kwargs):
             if self.claimed: return False
             self.claimed=True; return True
         def mark_crm_auto_logout_confirmed(self,*_args): return True
@@ -138,14 +138,19 @@ def test_one_cached_employee_token_covers_login_logout_breaks_and_absence(employ
             "payload":{"payload":{"person_id":"person-a","metadata":{"crm_confirmed_break":True}}}})
     api._process_automatic_checkout(ctx.row,now=ctx.now,reason_code="MAX_LOGOFF_REACHED",
                                    require_camera_health=False)
-    api._v2_auto_logout(ctx.row,ctx.now)
+    # Absence belongs to a later independent session, not the already claimed max-logoff action.
+    ctx.store.claimed=False
+    api._v2_auto_logout({**ctx.row,"last_seen_at":ctx.row["last_seen_at"]+timedelta(seconds=1)},ctx.now)
 
     assert ctx.state.face_logins==1
     assert len(mutations(ctx))==11
     assert {r.url.path for r in mutations(ctx)}=={
         "/api/UserRoster/LoginLogout","/api/UserBreak/start-break",
         "/api/UserBreak/end-break","/api/UserActivity/auto-logout"}
-    tokens={r.headers["Authorization"] for r in mutations(ctx)}
+    for request in mutations(ctx):
+        assert request.headers["Authorization"].startswith("Bearer ")== (
+            request.url.path=="/api/UserActivity/auto-logout")
+    tokens={r.headers["Authorization"].removeprefix("Bearer ") for r in mutations(ctx)}
     assert len(tokens)==1
     cached=ctx.store.tokens[("tenant-a","shop-a","employee-a")]
     assert decrypt_scoped_token(cached["encrypted_token"],"tenant-a","shop-a","employee-a")==tokens.pop()

@@ -45,6 +45,7 @@ services:
       SNAPKEY_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-snapkey}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-snapkey_vision}
       SNAPKEY_EDGE_API_TOKEN: ${SNAPKEY_EDGE_API_TOKEN:-}
       SNAPKEY_CRM_INTEGRATION_KEY: ${SNAPKEY_CRM_INTEGRATION_KEY:?set SNAPKEY_CRM_INTEGRATION_KEY}
+      SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES: '${SNAPKEY_CRM_INTEGRATION_ALLOWED_SCOPES:-[]}'
       # Tenant/shop identities are supplied dynamically by the authenticated CRM backend.
       SNAPKEY_CRM_API_BASE_URL: ${SNAPKEY_CRM_API_BASE_URL:-https://apis.snapkey.in}
       SNAPKEY_CRM_API_TOKEN: ${SNAPKEY_CRM_API_TOKEN:-}

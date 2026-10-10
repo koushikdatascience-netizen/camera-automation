@@ -582,6 +582,11 @@ def test_crm_service_token_scope_rejects_user_outside_verified_tenant_intersecti
 def test_legacy_checkout_uses_verified_employee_face_token(monkeypatch):
     calls=[]
     class Store:
+        def claim_crm_auto_logout(self,*args,**kwargs): return True
+        def mark_crm_auto_logout_confirmed(self,*args): return True
+        def finalize_crm_auto_logout_local(self,*args):
+            calls.append(("complete",("tenant","shop","person",True))); return "SUCCEEDED"
+        def attendance_policy(self,*args): return {"timezone":"Asia/Kolkata"}
         def attendance_camera_coverage_healthy(self,*_args,**_kwargs):
             raise AssertionError("max-logoff keeps its existing coverage-independent policy")
         def complete_presence_checkout(self,*args): calls.append(("complete",args))

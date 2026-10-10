@@ -21,8 +21,8 @@ trap 'rm -rf -- "$work"' EXIT
 test -f "$project/.env"
 test -f "$project/docker-compose.cloud.yml"
 
-# Each deployment stream contains the image plus the compose definition from the
-# same tested commit. Server-owned .env is never transferred or replaced.
+# The bundle includes the tested Compose definition for reference only.
+# Server-owned Compose and .env are never transferred into the project or replaced.
 tar -xzf - -C "$work"
 test -s "$work/docker-compose.cloud.yml"
 test -s "$work/image.tar.gz"
@@ -35,12 +35,10 @@ container=$("${compose[@]}" ps -q portal)
 test -n "$container"
 previous_image=$(docker inspect --format '{{.Image}}' "$container")
 previous_revision=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")
-previous_compose="$work/previous-compose.yml"
-cp "$project/docker-compose.cloud.yml" "$previous_compose"
 
-# Load the tested image and atomically install the tested compose definition.
+# Validate the actual server configuration, then load only the tested portal image.
+"${compose[@]}" config --quiet
 docker load -i "$work/image.tar.gz"
-install -m 0644 "$work/docker-compose.cloud.yml" "$project/docker-compose.cloud.yml"
 actual_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
 if [[ "$actual_revision" != "$revision" ]]; then
   echo 'Image revision does not match the requested commit.' >&2
@@ -65,8 +63,7 @@ wait_healthy() {
   return 1
 }
 rollback() {
-  echo 'Deployment failed; restoring the previous compose definition and portal image.' >&2
-  install -m 0644 "$previous_compose" "$project/docker-compose.cloud.yml"
+  echo 'Deployment failed; restoring the previous portal image.' >&2
   write_override "$previous_image"
   if "${compose[@]}" -f "$override" up -d --no-deps --no-build --pull never portal \
     && wait_healthy "$previous_image"; then

@@ -1,8 +1,10 @@
 # Camera Eye V2 staging and rollback runbook
 
-Status: **staging preparation only**. This branch has not been deployed or verified against a staging PostgreSQL instance or the live CRM contract. Keep `CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED=false`. The separate legacy CRM flags are independent.
+Historical runbook; current test evidence and release commands are in `CONTROLLED_PRODUCTION_RELEASE_20261010.md`.
 
-The production deploy workflow is manual-dispatch only and targets the GitHub `production` environment. Before any dispatch, a repository administrator must configure required reviewers under **Settings → Environments → production**. The GitHub environment currently has no protection rules, so the workflow file alone cannot require reviewer approval.
+Original status: **staging preparation only**. This branch has not been deployed or verified against a staging PostgreSQL instance or the live CRM contract. Keep `CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED=false`. The separate legacy CRM flags are independent.
+
+The production deploy workflow is manual-dispatch only and targets the GitHub `production` environment. Before any dispatch, a repository administrator must configure required reviewers under **Settings → Environments → production**. Read-only verification on 2026-10-10 found a required-reviewers protection rule; self-review prevention is disabled. See CONTROLLED_PRODUCTION_RELEASE_20261010.md for the current release evidence and image-only procedure.
 
 ## Configuration
 

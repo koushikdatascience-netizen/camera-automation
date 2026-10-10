@@ -26,7 +26,7 @@ def verify_workspace_browser(app,base,label,employee):
     deadline=time.monotonic()+10
     while not server.started and time.monotonic()<deadline:time.sleep(.05)
     assert server.started
-    home=Path(__file__).resolve().parents[1]/'artifacts'/'attendance-workspace-browser';home.mkdir(parents=True,exist_ok=True)
+    home=Path(os.getenv('CAMERA_EYE_BROWSER_ARTIFACT_ROOT',str(Path(__file__).resolve().parents[1]/'artifacts'/'attendance-workspace-browser')));home.mkdir(parents=True,exist_ok=True)
     try:
         with sync_playwright() as p:
             browser=p.chromium.launch(headless=True,executable_path=r'C:\Program Files\Google\Chrome\Application\chrome.exe')
