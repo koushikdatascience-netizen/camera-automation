@@ -9,9 +9,10 @@ from typing import Any
 
 from sqlalchemy import create_engine, text
 from cloud_portal.attendance_delivery import AttendanceDeliveryStore
+from cloud_portal.integration_scopes import IntegrationScopeStore
 
 
-class PostgresPortalStore(AttendanceDeliveryStore):
+class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
     """Production cloud store. Edge machines remain SQLite/offline-first."""
 
     def __init__(self, database_url: str | None = None):
@@ -29,6 +30,7 @@ class PostgresPortalStore(AttendanceDeliveryStore):
         from camera_service.alerts_workspace import initialize
         initialize(self)
         self.initialize_attendance_delivery()
+        self.initialize_integration_scopes()
 
     @contextmanager
     def _conn(self):

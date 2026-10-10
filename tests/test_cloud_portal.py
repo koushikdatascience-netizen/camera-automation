@@ -3,6 +3,8 @@ from fastapi.testclient import TestClient
 
 def portal_auth(client, monkeypatch, tenant='tenant-a', shop='shop1'):
  monkeypatch.setenv('SNAPKEY_CRM_INTEGRATION_KEY','test-crm-integration-key-0123456789')
+ from cloud_portal import api
+ api.store.set_crm_integration_scope(api._token_digest('test-crm-integration-key-0123456789'),tenant,shop,granted_by='isolated-test-operator')
  response=client.post('/crm/session',json={'tenantId':tenant,'shopCode':shop,'userId':'user-1','displayName':'Test User','role':'OWNER'},headers={'X-CRM-Integration-Key':'test-crm-integration-key-0123456789'})
  assert response.status_code==200
  from urllib.parse import urlparse, parse_qs
@@ -34,7 +36,8 @@ def test_cloud_portal_issues_signed_license(tmp_path, monkeypatch):
  importlib.reload(api)
  client=TestClient(api.app)
  monkeypatch.setenv('SNAPKEY_CRM_INTEGRATION_KEY','admin-test-key')
- payload={'tenant_id':'tenant-a','site_id':'site-1','edge_id':'edge-1','machine_code':'ABC','max_cameras':3,'features':['tracking','cloud_sync'],'days':30,'grace_days':7}
+ api.store.set_crm_integration_scope(api._token_digest('admin-test-key'),'tenant-a','shop1',granted_by='isolated-test-operator')
+ payload={'tenant_id':'tenant-a','shop_id':'shop1','site_id':'site-1','edge_id':'edge-1','machine_code':'ABC','max_cameras':3,'features':['tracking','cloud_sync'],'days':30,'grace_days':7}
  assert client.post('/portal/v1/licenses/issue',json=payload).status_code==401
  response=client.post('/portal/v1/licenses/issue',json=payload,headers={'X-CRM-Integration-Key':'admin-test-key'})
  assert response.status_code==200
@@ -115,6 +118,7 @@ def test_crm_portal_session_is_hashed_and_scope_bound(tmp_path, monkeypatch):
  import cloud_portal.api as api
  importlib.reload(api)
  client=TestClient(api.app)
+ api.store.set_crm_integration_scope(api._token_digest('crm-secret-key-012345678901234567890123'),'tenant-2','shop1',granted_by='isolated-test-operator')
  response=client.post('/crm/session',json={'tenantId':'tenant-a','companyCode':'2','shopCode':'shop1','userId':'u1','displayName':'Owner','role':'OWNER'},headers={'X-CRM-Integration-Key':'crm-secret-key-012345678901234567890123'})
  assert response.status_code==200
  from urllib.parse import urlparse,parse_qs

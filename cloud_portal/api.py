@@ -61,6 +61,7 @@ CRM_AUTO_LOGOUT_MIN_ABSENCE_MINUTES = 60  # fixed by /api/UserActivity/auto-logo
 
 class LicenseIssueRequest(BaseModel):
     tenant_id: str
+    shop_id: str | None = None
     site_id: str
     edge_id: str
     machine_code: str
@@ -313,6 +314,8 @@ def register_portal_user(payload: PortalRegisterRequest, request: Request):
     if len(password)<8: raise HTTPException(400,"Password must be at least 8 characters")
     if store.portal_user_by_email(email): raise HTTPException(409,"An account already exists for this email")
     company=_slug(payload.company_code); shop=_slug(payload.shop_code)
+    if os.getenv("SNAPKEY_ENV", "production").lower() != "development":
+        _require_crm_integration(request, f"tenant-{company}", shop)
     # Deliberately matches edge activation identity so an owner registering the same
     # company/shop immediately sees already-activated Camera Eye devices.
     user={"id":secrets.token_urlsafe(18),"email":email,"password_hash":_password_hash(password),
@@ -397,6 +400,7 @@ def create_crm_portal_session(payload: CrmPortalSessionRequest, request: Request
     company=(payload.companyCode or "").strip()
     tenant=(f"tenant-{_slug(company)}" if company else (payload.tenantId or "").strip())
     if not tenant: raise HTTPException(400,"tenantId or companyCode is required")
+    _require_crm_integration(request, tenant, shop)
     session_id=secrets.token_urlsafe(18)
     token=secrets.token_urlsafe(32)
     now=datetime.now(timezone.utc)
@@ -505,11 +509,11 @@ def create_edge_activation_code(tenant_id: str, payload: EdgeActivationCodeReque
 def _require_crm_integration(request: Request, tenant_id: str, shop_id: str) -> None:
     if not _crm_integration_key_valid(request.headers.get("X-CRM-Integration-Key")):
         raise HTTPException(401, "Invalid CRM integration key")
-    # The integration key authenticates the trusted CRM backend, which supplies
-    # tenant/shop identity per request. Never provision tenant IDs through env.
-    # This is a service-to-service trust boundary: never expose the key to a browser.
     if not tenant_id.strip() or not shop_id.strip():
         raise HTTPException(400, "tenant_id and shop_id are required")
+    digest = _token_digest(request.headers["X-CRM-Integration-Key"].strip())
+    if not store.crm_integration_scope_allowed(digest, tenant_id, shop_id):
+        raise HTTPException(403, "CRM integration credential has no authorized tenant/shop binding")
     logger.info("CRM_INTEGRATION_ACCESS tenant_id=%s shop_id=%s method=%s path=%s",
                 tenant_id,shop_id,request.method,request.url.path)
 
@@ -1297,7 +1301,20 @@ async def upload_edge_event_evidence(
     }
 
 
+def _attendance_quarantined(envelope):
+    """Read-only release quarantine: never rewrite old receipts or claim CRM work."""
+    try:
+        ids = json.loads(os.getenv("SNAPKEY_CRM_ATTENDANCE_QUARANTINED_EVENT_IDS", "[]"))
+        if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
+            return True
+        return str(envelope.get("event_id") or "") in ids
+    except (TypeError, ValueError):
+        return True
+
+
 def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
+    if _attendance_quarantined(envelope):
+        return
     event_type=str(envelope.get("event_type") or "")
     if event_type not in {"ATTENDANCE_ENTRY","ATTENDANCE_EXIT","BREAK_START","BREAK_END"}:
         return
@@ -1384,6 +1401,8 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
 
 
 def _synchronize_attendance_bridge(envelope, *, historical_missing_receipt=False):
+    if _attendance_quarantined(envelope):
+        return {"status":"RECONCILIATION_REQUIRED", "error_code":"RELEASE_HISTORICAL_QUARANTINE"}
     from cloud_portal.attendance_delivery import attendance_payload
     payload=attendance_payload(envelope)
     metadata=payload.get('metadata') or {}
@@ -2836,6 +2855,10 @@ def issue_license(request: LicenseIssueRequest, http_request: Request):
     supplied=http_request.headers.get("X-CRM-Integration-Key","")
     if not _crm_integration_key_valid(supplied):
         raise HTTPException(401, "Administrative integration key is required")
+    if request.shop_id:
+        _require_crm_integration(http_request, request.tenant_id, request.shop_id)
+    elif not store.crm_integration_site_allowed(_token_digest(supplied.strip()), request.tenant_id, request.site_id):
+        raise HTTPException(403, "An authorized shop binding or existing scoped site is required")
     return _issue_license_payload(
         tenant_id=request.tenant_id,
         site_id=request.site_id,
