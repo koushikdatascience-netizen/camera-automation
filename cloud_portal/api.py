@@ -447,6 +447,13 @@ def activate_edge(payload: EdgeActivationRequest):
         grace_days=int(os.getenv("SNAPKEY_DEFAULT_LICENSE_GRACE_DAYS", "7")),
     )
     store.provision_edge_credential(_token_digest(token), tenant_id, company_code, shop, site_id, edge_id)
+    # A consumed one-time code is an existing, administrator-issued scope proof.
+    # Bind only that exact shop; never infer grants from the request's company/shop.
+    # Development/global activation codes cannot provision CRM integration scopes.
+    integration_key = os.getenv("SNAPKEY_CRM_INTEGRATION_KEY", "").strip()
+    if one_time and integration_key:
+        store.set_crm_integration_scope(_token_digest(integration_key), tenant_id, shop,
+                                       granted_by="verified-one-time-device-activation")
     return {
         "edge": {
             "tenant_id": tenant_id,
@@ -503,6 +510,12 @@ def create_edge_activation_code(tenant_id: str, payload: EdgeActivationCodeReque
         "created_at": now.isoformat(),
         "expires_at": expires.isoformat(),
     })
+    # The authenticated shop administrator approves onboarding for their own shop.
+    # This also covers already-installed devices without requiring reactivation.
+    integration_key = os.getenv("SNAPKEY_CRM_INTEGRATION_KEY", "").strip()
+    if integration_key:
+        store.set_crm_integration_scope(_token_digest(integration_key), principal.tenant_id,
+                                       principal.shop_id, granted_by="authenticated-shop-admin-onboarding")
     return {"activationCode": code, "expiresAt": expires.isoformat(), "shopCode": principal.shop_id}
 
 

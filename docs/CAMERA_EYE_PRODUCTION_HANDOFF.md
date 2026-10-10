@@ -54,6 +54,11 @@ After approval, an operator can provision a scope using `PostgresPortalStore` an
 Supply approved values interactively; never echo the key or place it in shell history.
 Revocation uses `enabled=False`. Rotation requires explicit bindings for the new digest.
 No public binding/provisioning endpoint is introduced. Unlimited exact grants are supported.
+The subsequent onboarding fix binds the configured CRM key automatically when an
+authenticated OWNER/ADMIN/SUPERADMIN generates a code for their own shop, or when
+a valid stored one-time code is consumed. The consumed code's stored scope is used;
+company/shop values submitted by the installer cannot expand it. Invalid/global
+development codes do not auto-grant scopes. Existing device credentials remain intact.
 Legacy license requests without shop_id require an existing enabled site/edge mapping
 whose shop is bound to that integration credential; new sites supply an approved shop_id.
 

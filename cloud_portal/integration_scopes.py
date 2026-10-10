@@ -1,8 +1,8 @@
 """Operator-approved bindings for the existing CRM integration credential.
 
-Existing edge credentials/portal sessions do not confer authority on a different
-credential. Bindings are provisioned explicitly by an operator, never inferred
-from request bodies, directories, or environment allow-lists.
+Existing edge credentials alone do not confer authority on a different credential.
+Bindings are provisioned by an operator or the authenticated shop-admin one-time
+activation flow, never inferred from unverified request bodies or directories.
 """
 from datetime import datetime, timezone
 import re
@@ -22,7 +22,7 @@ class IntegrationScopeStore:
                 PRIMARY KEY(token_hash,tenant_id,shop_id))""")
 
     def set_crm_integration_scope(self, token_hash, tenant_id, shop_id, *, granted_by, enabled=True):
-        """Administrative provisioning only; callers must have operator approval."""
+        """Provision only from an operator or trusted scoped-admin activation flow."""
         if not re.fullmatch(r"[0-9a-f]{64}", token_hash or ""):
             raise ValueError("A SHA256 credential digest is required")
         if not all(str(v or "").strip() for v in (tenant_id, shop_id, granted_by)):
