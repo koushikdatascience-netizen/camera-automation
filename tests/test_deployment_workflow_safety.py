@@ -21,6 +21,17 @@ def test_cloud_deploy_requires_production_environment_approval():
     assert deploy['environment']=='production'
 
 
+def test_windows_edge_update_publication_requires_manual_opt_in_and_production_environment():
+    workflow_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "windows-release.yml"
+    workflow = yaml.load(workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert "workflow_dispatch" in workflow["on"]
+    assert "push" not in workflow["on"]
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["publish"]["default"] == "false"
+    publish = workflow["jobs"]["publish-edge-update"]
+    assert publish["if"] == "${{ inputs.publish }}"
+    assert publish["environment"]["name"] == "production"
+
+
 def test_cloud_deploy_validates_before_production_deploy():
     workflow = _deploy_workflow()
     steps = workflow["jobs"]["deploy"]["steps"]

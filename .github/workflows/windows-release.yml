@@ -7,7 +7,7 @@ on:
         description: Publish verified installer to production auto-update registry
         required: true
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read

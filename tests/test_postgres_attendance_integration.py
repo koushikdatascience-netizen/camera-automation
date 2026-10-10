@@ -106,3 +106,48 @@ def test_postgres_fresh_schema_outbox_and_auto_logout_recovery():
             with admin_engine.begin() as conn:
                 conn.execute(text(f'DROP SCHEMA IF EXISTS {quoted_schema} CASCADE'))
         admin_engine.dispose()
+
+
+def test_postgres_upgrades_legacy_edge_identity_index_without_losing_credentials():
+    dsn=os.getenv("SNAPKEY_TEST_DATABASE_URL","").strip()
+    if not dsn:
+        if os.getenv("SNAPKEY_REQUIRE_POSTGRES_TESTS")=="1":
+            pytest.fail("SNAPKEY_TEST_DATABASE_URL is required in this PostgreSQL test job")
+        pytest.skip("SNAPKEY_TEST_DATABASE_URL is not configured; PostgreSQL integration test not run")
+    root_url=make_url(dsn)
+    if "test" not in str(root_url.database or "").lower():
+        pytest.fail("refusing integration writes unless database name contains 'test'")
+    schema="camera_eye_upgrade_test_"+uuid.uuid4().hex[:12]
+    admin=create_engine(dsn,pool_pre_ping=True)
+    store=None
+    try:
+        with admin.begin() as conn:
+            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+            conn.execute(text(f'''CREATE TABLE "{schema}".edge_credentials(
+                token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, company_code TEXT,
+                shop_id TEXT NOT NULL, site_id TEXT NOT NULL, edge_id TEXT NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL)'''))
+            conn.execute(text(f'''CREATE UNIQUE INDEX idx_edge_credentials_identity
+                ON "{schema}".edge_credentials(tenant_id,shop_id,site_id,edge_id)'''))
+            conn.execute(text(f'''INSERT INTO "{schema}".edge_credentials
+                (token_hash,tenant_id,shop_id,site_id,edge_id,enabled,created_at)
+                VALUES('retired-token-hash','tenant','shop','site','edge',FALSE,now())'''))
+        scoped=root_url.update_query_dict({'options':f'-csearch_path={schema},public'})
+        store=PostgresPortalStore(scoped.render_as_string(hide_password=False))
+        with store._conn() as conn:
+            indexes={row[0] for row in conn.execute(text("""SELECT indexname FROM pg_indexes
+                WHERE schemaname=:schema AND tablename='edge_credentials'"""),{'schema':schema})}
+        assert 'idx_edge_credentials_identity' not in indexes
+        assert 'idx_edge_credentials_active_identity' in indexes
+        store.provision_edge_credential('new-token-hash','tenant',None,'shop','site','edge')
+        with store._conn() as conn:
+            rows=conn.execute(text('''SELECT token_hash,enabled FROM edge_credentials
+                WHERE tenant_id='tenant' AND shop_id='shop' AND site_id='site' AND edge_id='edge'
+                ORDER BY token_hash''')).all()
+        assert rows==[('new-token-hash',True),('retired-token-hash',False)]
+    finally:
+        if store is not None:
+            store.engine.dispose()
+        with admin.begin() as conn:
+            conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        admin.dispose()

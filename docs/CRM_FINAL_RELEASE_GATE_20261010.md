@@ -14,7 +14,7 @@ database change was performed for this release gate.
 | Break In | `POST /api/UserBreak/start-break` | Same employee token; `{userId, breakMasterId}`. Break ID comes from the tenant/shop-scoped CRM mapping. | Path/body are documented and mock-tested. Exact live business response remains unverified. |
 | Break Out | `POST /api/UserBreak/end-break` | Same employee token; `userId` query parameter. | Path/query are documented and mock-tested. Exact live business response remains unverified. |
 | Absence logout | `POST /api/UserActivity/auto-logout` | Same employee token; `{userId, remarks}`. Requires policy eligibility, healthy scoped camera coverage, and the confirmed 60-minute minimum. | Customer-supplied contract and mock-tested. Keep both automatic logout flags off until controlled staging and explicit approval. |
-| Monthly roster | `GET /api/UserRoster/GetUsersRoster` | Tenant-scoped service token; `year`, `month`, and `userId`. Kept separate from employee attendance tokens. | Existing path and code. Service-token tenant scope mismatch can fail closed; CRM must provision the appropriate tenant-scoped credential. |
+| Monthly roster | `GET /api/UserRoster/GetUsersRoster` | Tenant-scoped service token; `year`, `month`, and `userId`. Kept separate from employee attendance tokens. Returned rows are further restricted to enabled CRM-user mappings in the caller's shop. | Existing path and code. Service-token tenant scope mismatch can fail closed; CRM must provision the appropriate tenant-scoped credential. Live credential and response scope were not verified. |
 | Break catalogue | `GET /api/BreakMaster/my-breaks` | Existing administrative service-token path. | No safe employee identity is selected by the current tenant-wide portal operation; not migrated to an employee token. |
 
 Camera Eye policy endpoints (`/integration/v1|v2/.../attendance-policy` and
@@ -72,12 +72,35 @@ disabled. The Windows installer was not rebuilt; this change is cloud-only.
 
 ## Local verification on 2026-10-10
 
-- `python -m compileall -q camera_service cloud_portal tools`: passed.
-- Focused CRM, employee-token, workflow, attendance bridge, policy,
-  reconciliation, and recognition tests: 88 passed across the focused runs.
-- Full local suite: `395 passed, 19 skipped` (`python -m pytest tests -q`).
-  The PostgreSQL integration test was skipped because no test DB URL was supplied
-  and Docker Desktop's Linux engine was unavailable. No production or external
-  database was used.
-- Live CRM contract, SMTP/WhatsApp delivery, staging deployment, browser
-  acceptance, and client installer were not exercised by this release-gate run.
+- Isolated PostgreSQL attendance/policy/CRM delivery/concurrency/tenant suite:
+  `176 passed, 1 skipped` on a disposable local PostgreSQL cluster. The skipped
+  test requires a separate optional test service. The isolated cluster was
+  stopped and removed after the run; no production database was used.
+- PostgreSQL upgrade regression for the legacy edge-credential identity index:
+  `1 passed`; the disabled credential remained intact while a new active
+  credential was provisioned.
+- Latest roster shop-scope, tenant-scope, cloud portal, and workflow tests:
+  `22 passed` in 49.83s. The roster endpoint now only returns enabled mappings
+  belonging to the authenticated principal's shop, and rejects an explicit
+  user outside that shop.
+- Full local suite on the pre-shop-scope/workflow-default snapshot:
+  `395 passed, 19 skipped`. This was not rerun after the small changes above;
+  the affected suites and PostgreSQL upgrade regression were rerun instead.
+- Docker Desktop's Linux engine was unavailable. Isolated PostgreSQL was run
+  using the installed local PostgreSQL service on a separate loopback port and
+  disposable test database/schema.
+- The Windows edge-update workflow's `publish` input now defaults to false;
+  static YAML tests verify manual dispatch, production environment binding, and
+  no push trigger. Actual GitHub environment reviewers/branch restrictions are
+  not observable because GitHub API access failed through the local proxy.
+- CRM success/rejection/401 response bodies and monthly-roster credential scope
+  remain MOCK-VERIFIED only. No CRM mutation, staging release, workflow dispatch,
+  browser run, or installer build was performed. Exact CRM `date` business
+  timezone contract also remains unverified.
+- `tools/deploy_cloud.sh` rollback code was inspected: it restores the prior
+  image and Compose file after a failed health check. The script could not be
+  executed locally because Bash/WSL startup is denied. The schema upgrade uses
+  idempotent `CREATE/ALTER ... IF NOT EXISTS`, but replaces the legacy
+  `idx_edge_credentials_identity` index with a partial active-identity index;
+  schema downgrade is not automatic. Back up before deploy and retain the
+  previous image/Compose revision for application rollback.

@@ -2546,13 +2546,17 @@ def crm_attendance_roster(tenant_id: str, year: int, month: int, user_id: str | 
     if not crm_client.configured_for_tenant(tenant_id):
         raise HTTPException(503,"SnapKey CRM tenant service token is not configured")
     try:
-        _assert_crm_service_token_scope(tenant_id)
+        _assert_crm_service_token_scope(tenant_id,user_id)
         allowed=_crm_allowed_user_ids(tenant_id)
+        shop_mappings=store.list_crm_person_mappings(tenant_id,principal.shop_id)
+        shop_allowed={str(item.get("crm_user_id") or "").strip()
+                      for item in shop_mappings if item.get("enabled",True)} & allowed
         requested=(user_id or "").strip()
-        if requested and requested not in allowed:
-            logger.warning("CRM_ROSTER_BLOCKED tenant_code=%s requested_user_id=%s reason=user_not_in_tenant",
-                           tenant_id,requested)
-            raise HTTPException(404,"CRM user is not part of this tenant")
+        if requested and requested not in shop_allowed:
+            logger.warning("CRM_ROSTER_BLOCKED tenant_code=%s shop_id=%s requested_user_id=%s reason=user_not_mapped_to_shop",
+                           tenant_id,principal.shop_id,
+                           requested)
+            raise HTTPException(404,"CRM user is not mapped to this shop")
         rows=crm_client.users_roster(year,month,requested or None,tenant_code=tenant_id)
         if not isinstance(rows,list):
             logger.error("CRM_ROSTER_INVALID_RESPONSE tenant_code=%s response_type=%s",
@@ -2566,10 +2570,11 @@ def crm_attendance_roster(tenant_id: str, year: int, month: int, user_id: str | 
                 tenant_id,len(allowed),len(roster_ids),
             )
             raise HTTPException(502,"SnapKey CRM service token is scoped to a different tenant")
-        scoped=[row for row in rows if isinstance(row,dict) and str(row.get("userId") or "").strip() in allowed]
+        scoped=[row for row in rows if isinstance(row,dict)
+                and str(row.get("userId") or "").strip() in shop_allowed]
         logger.info(
-            "CRM_ROSTER_SCOPED tenant_code=%s requested_user_id=%s upstream_rows=%s returned_rows=%s",
-            tenant_id,requested or "-",len(rows),len(scoped),
+            "CRM_ROSTER_SCOPED tenant_code=%s shop_id=%s requested_user_id=%s upstream_rows=%s returned_rows=%s",
+            tenant_id,principal.shop_id,requested or "-",len(rows),len(scoped),
         )
         return scoped
     except HTTPException:
