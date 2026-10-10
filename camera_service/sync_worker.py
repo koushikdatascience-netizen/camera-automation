@@ -261,8 +261,11 @@ class EdgeSyncWorker:
                             'ATTENDANCE_ENTRY','ATTENDANCE_EXIT','BREAK_START','BREAK_END'}:
                         status=(receipt.get('attendance_sync') or {}).get('status') if isinstance(receipt,dict) else None
                         if status!='SUCCEEDED':
-                            raise RuntimeError('Attendance cloud delivery pending: '+str(status or 'NO_RECEIPT'))
-                    self.store.mark_event_synced(row["id"])
+                            error=(receipt.get('attendance_sync') or {}).get('error_code') if isinstance(receipt,dict) else None
+                            raise RuntimeError('Attendance cloud delivery pending: '+str(status or 'NO_RECEIPT')+
+                                               (': '+str(error)[:800] if error else ''))
+                    attendance_result=(receipt.get('attendance_sync') or {}) if isinstance(receipt,dict) else {}
+                    self.store.mark_event_synced(row["id"],attendance_result.get('crm_message'))
                     synced += 1
                 except Exception as exc:
                     attempts = int(row.get("attempts", 0) or 0) + 1

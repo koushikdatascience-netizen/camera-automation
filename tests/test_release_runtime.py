@@ -268,7 +268,7 @@ def test_cloud_event_sync_strips_local_evidence_paths_without_losing_event(tmp_p
         def queued_events(self, limit):
             return [{'id':'evt-1','payload_json':json.dumps({'event_id':'evt-1','event_type':'SECURITY_OBJECT_ALERT',
                 'metadata':{'snapshot_path':str(photo),'clip_path':'C:/private/alert.mp4'}}),'attempts':0}]
-        def mark_event_synced(self, event_id): events.append(event_id)
+        def mark_event_synced(self, event_id, _crm_message=None): events.append(event_id)
         def now(self): return 'now'
     class Cloud:
         def enabled(self): return True

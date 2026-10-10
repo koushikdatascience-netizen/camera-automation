@@ -93,6 +93,8 @@ def normalize_event(row):
         'previous_state':metadata.get('prior_state') or metadata.get('state_before'),
         'new_state':metadata.get('new_state') or metadata.get('state_after'),
         'processing_status':row.get('processing_status') or row.get('delivery_status') or row.get('sync_status') or 'UNKNOWN',
+        'crm_message':row.get('crm_message') or metadata.get('crm_response_message'),
+        'crm_error':row.get('crm_error') or row.get('last_error') or metadata.get('crm_error'),
         'policy_applied':metadata.get('attendance_policy_snapshot') or None,'metadata':metadata}
 
 

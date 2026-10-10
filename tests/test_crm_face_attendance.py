@@ -1,6 +1,8 @@
 import httpx
 import pytest
 from datetime import datetime,timezone
+import json
+from pathlib import Path
 
 from cloud_portal.crm_client import CrmUnconfirmedMutationResponse, SnapKeyCrmClient
 from cloud_portal.crm_attendance_contract import format_crm_attendance_date_time
@@ -66,10 +68,48 @@ def test_crm_attendance_date_and_time_use_effective_business_timezone(monkeypatc
     event_time=datetime(2026,10,7,20,0,tzinfo=timezone.utc)
 
     actual_date,actual_time=format_crm_attendance_date_time(
-        event_time,"Asia/Kolkata","%d/%m/%Y")
+        event_time,"Asia/Kolkata")
 
-    assert actual_date=="08/10/2026"
+    assert actual_date=="2026-10-08T01:30:00.000+05:30"
     assert actual_time=="01:30:00"
+
+
+def test_crm_attendance_login_fixture_has_exact_n8n_datetime_and_timespan():
+    fixture=json.loads((Path(__file__).parent/'fixtures'/'crm_login_logout_success.json').read_text())
+    request=fixture['request']
+    assert request=={
+        'userId':'<CRM_USER_UUID>',
+        'date':'2026-10-10T17:06:17.770+05:30',
+        'actualStartTime':'17:06:17',
+    }
+    assert fixture['response']=={'success':True,'message':'Logged in successfully.'}
+    start=datetime.fromisoformat(request['date'])
+    assert start.utcoffset().total_seconds()==19800
+    assert format_crm_attendance_date_time(datetime(2026,10,10,11,36,17,770000,timezone.utc),
+                                           'Asia/Kolkata')==(
+        request['date'],request['actualStartTime'])
+
+
+def test_login_logout_requires_exact_success_true_contract(monkeypatch):
+    class ContractClient(FakeClient):
+        payload={'success':True,'message':'Logged in successfully.'}
+        def request(self,method,path,headers=None,**kwargs):
+            self.calls.append({'method':method,'path':path,'headers':headers or {},'kwargs':kwargs})
+            return FakeResponse(self.payload)
+    ContractClient.calls=[]
+    monkeypatch.setattr(httpx,'Client',ContractClient)
+    client=SnapKeyCrmClient(base_url='https://apis.snapkey.in')
+    fixture=json.loads((Path(__file__).parent/'fixtures'/'crm_login_logout_success.json').read_text())
+    assert client.login_logout_with_face_token(fixture['request'],'raw-face-token')==fixture['response']
+    request=ContractClient.calls[0]
+    assert request['headers']['Authorization']=='raw-face-token'
+    assert request['kwargs']['json']==fixture['request']
+    ContractClient.payload={'ok':True,'message':'not the confirmed contract'}
+    with pytest.raises(CrmUnconfirmedMutationResponse):
+        client.login_logout_with_face_token(fixture['request'],'raw-face-token')
+    ContractClient.payload={'message':'accepted without success flag'}
+    with pytest.raises(CrmUnconfirmedMutationResponse):
+        client.login_logout_with_face_token(fixture['request'],'raw-face-token')
 
 
 def test_crm_error_details_include_dotnet_field_errors_and_redact_credentials():

@@ -59,7 +59,7 @@ def test_pg_upgrade_adds_predecessor_recovery_columns():
             columns={row[0] for row in conn.execute(text("""SELECT column_name FROM information_schema.columns
                 WHERE table_schema=:schema AND table_name='edge_attendance_delivery'"""),
                 {'schema':schema}).all()}
-        assert {'effective_predecessor_id','registration_reason'} <= columns
+        assert {'effective_predecessor_id','registration_reason','crm_message'} <= columns
     finally:
         if store: store.engine.dispose()
         with admin.begin() as conn: conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))

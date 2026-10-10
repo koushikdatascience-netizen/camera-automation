@@ -125,6 +125,11 @@ class SnapKeyCrmClient:
         return False
 
     @staticmethod
+    def login_logout_success(result: Any) -> bool:
+        """LoginLogout is confirmed only by the observed CRM success=true contract."""
+        return isinstance(result,dict) and result.get("success") is True
+
+    @staticmethod
     def safe_error_message(source: Any, *, limit: int = 1200) -> str:
         """Extract readable CRM problem details without returning secrets or image data."""
         if hasattr(source,"json") and callable(source.json):
@@ -240,7 +245,9 @@ class SnapKeyCrmClient:
             isinstance(result,dict)
             and (result.get("success") is False or result.get("ok") is False)
         )
-        if is_mutation and not self.business_success(result) and not explicit_business_rejection:
+        confirmed=(self.login_logout_success(result) if path=="/api/UserRoster/LoginLogout"
+                   else self.business_success(result))
+        if is_mutation and not confirmed and not explicit_business_rejection:
             logger.warning("CRM_MUTATION_RESPONSE_UNCONFIRMED operation=%s reason=business_success_missing",operation)
             raise CrmUnconfirmedMutationResponse("CRM mutation response did not confirm business success")
         return result

@@ -38,7 +38,7 @@ class AttendanceDeliveryStore:
                 status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                 claimed_at TEXT, next_attempt_at TEXT, error_code TEXT, updated_at TEXT NOT NULL)""")
             for column in ('event_type','effective_predecessor_id','registration_reason',
-                           'reconciled_by','reconciliation_note','reconciled_at'):
+                           'reconciled_by','reconciliation_note','reconciled_at','crm_message'):
                 definition="TEXT NOT NULL DEFAULT ''" if column=='event_type' else 'TEXT'
                 if hasattr(self,'engine'):
                     self._delivery_execute(conn,f'ALTER TABLE edge_attendance_delivery ADD COLUMN IF NOT EXISTS {column} {definition}')
@@ -243,16 +243,19 @@ class AttendanceDeliveryStore:
                     WHERE event_id=:id""", args)
             return status, True
 
-    def set_attendance_delivery(self, envelope, status, error_code=None, retry_seconds=0):
+    def set_attendance_delivery(self, envelope, status, error_code=None, retry_seconds=0,
+                                crm_message=None):
         if status not in {"SUCCEEDED", "CRM_CONFIRMED", "RETRY", "REJECTED", "MAPPING_REQUIRED",
                           "RECONCILIATION_REQUIRED"}:
             raise ValueError("Invalid attendance delivery status")
         now = datetime.now(timezone.utc)
         with self._delivery_conn() as conn:
             self._delivery_execute(conn, """UPDATE edge_attendance_delivery SET status=:status,
-                error_code=:error,next_attempt_at=:next,updated_at=:now
+                error_code=:error,crm_message=COALESCE(:crm_message,crm_message),
+                next_attempt_at=:next,updated_at=:now
                 WHERE event_id=:id AND tenant_id=:tenant AND shop_id=:shop AND edge_id=:edge""",
-                dict(status=status,error=error_code,next=(now+timedelta(seconds=retry_seconds)).isoformat(),
+                dict(status=status,error=error_code,crm_message=crm_message,
+                     next=(now+timedelta(seconds=retry_seconds)).isoformat(),
                      now=now.isoformat(),id=envelope["event_id"],tenant=envelope["tenant_id"],
                      shop=envelope["shop_id"],edge=envelope["edge_id"]))
 

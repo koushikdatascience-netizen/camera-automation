@@ -56,7 +56,7 @@ def _json(value):
 def local_sources(store,shop):
     with store._conn() as conn:
         sessions=[dict(r) for r in conn.execute('SELECT * FROM attendance_sessions WHERE store_id=? ORDER BY arrival_time LIMIT ?', (shop,LIMIT+1))]
-        queue=[dict(r) for r in conn.execute('SELECT id,event_type,payload_json,status AS sync_status FROM edge_event_queue WHERE event_type IN (\'ATTENDANCE_ENTRY\',\'ATTENDANCE_EXIT\',\'BREAK_START\',\'BREAK_END\') LIMIT ?', (LIMIT+1,))]
+        queue=[dict(r) for r in conn.execute('SELECT id,event_type,payload_json,status AS sync_status,last_error,crm_message FROM edge_event_queue WHERE event_type IN (\'ATTENDANCE_ENTRY\',\'ATTENDANCE_EXIT\',\'BREAK_START\',\'BREAK_END\') LIMIT ?', (LIMIT+1,))]
         original=[dict(r) for r in conn.execute('SELECT * FROM person_events WHERE store_id=? ORDER BY event_time LIMIT ?', (shop,LIMIT+1))]
     if any(len(rows)>LIMIT for rows in (sessions,queue,original)):raise HTTPException(413,'Attendance history exceeds the safe reporting bound; archive/reporting partition required')
     by_id={row['id']:{**row,'payload':_json(row['payload_json'])} for row in queue if str(_json(row['payload_json']).get('store_id') or '')==shop}
@@ -178,9 +178,9 @@ def cloud_sources(store,tenant,shop):
         params={'tenant':tenant,'shop':shop,'limit':LIMIT+1}
         rows=conn.execute(text(sql),params).mappings().all() if is_pg else conn.execute(sql,params).fetchall()
         events=[{**dict(r),'payload':_json(r['payload_json'])} for r in rows]
-        receipt_sql='SELECT event_id,status FROM edge_attendance_delivery WHERE tenant_id=:tenant AND shop_id=:shop'
+        receipt_sql='SELECT event_id,status,crm_message,error_code FROM edge_attendance_delivery WHERE tenant_id=:tenant AND shop_id=:shop'
         receipts=conn.execute(text(receipt_sql),params).mappings().all() if is_pg else conn.execute(receipt_sql,params).fetchall()
-        statuses={r['event_id']:r['status'] for r in receipts}
+        statuses={r['event_id']:dict(r) for r in receipts}
         if is_pg:
             activities=conn.execute(text('SELECT * FROM attendance_activity WHERE tenant_id=:tenant AND shop_id=:shop ORDER BY occurred_at LIMIT :limit'),params).mappings().all()
             if len(activities)>LIMIT:raise HTTPException(413,'Activity history exceeds the safe reporting bound')
@@ -197,7 +197,10 @@ def cloud_sources(store,tenant,shop):
     if len(events)>LIMIT:raise HTTPException(413,'Attendance history exceeds the safe reporting bound; reporting partition required')
     people=store.list_cloud_people(tenant,shop)
     for event in events:
-        event.setdefault('delivery_status',statuses.get(event['id']) or 'NO_RECEIPT')
+        receipt=statuses.get(event['id']) or {}
+        event.setdefault('delivery_status',receipt.get('status') or 'NO_RECEIPT')
+        event.setdefault('crm_message',receipt.get('crm_message'))
+        event.setdefault('crm_error',receipt.get('error_code'))
     return people,[],events
 
 

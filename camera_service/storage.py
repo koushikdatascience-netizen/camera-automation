@@ -31,7 +31,7 @@ class SQLiteStore:
             CREATE TABLE IF NOT EXISTS attendance_sessions(id TEXT PRIMARY KEY, person_id TEXT NOT NULL, store_id TEXT NOT NULL, arrival_time TEXT NOT NULL, exit_time TEXT, arrival_camera TEXT, exit_camera TEXT, arrival_confidence REAL, exit_confidence REAL, arrival_snapshot TEXT, exit_snapshot TEXT, status TEXT NOT NULL, FOREIGN KEY(person_id) REFERENCES personnel(id));
             CREATE INDEX IF NOT EXISTS idx_attendance_person_status ON attendance_sessions(person_id,store_id,status);
             CREATE TABLE IF NOT EXISTS person_events(id TEXT PRIMARY KEY, person_id TEXT, store_id TEXT, camera_id TEXT, event_type TEXT NOT NULL, event_time TEXT NOT NULL, metadata_json TEXT);
-            CREATE TABLE IF NOT EXISTS edge_event_queue(id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at TEXT NOT NULL, next_attempt_at TEXT, claimed_at TEXT, synced_at TEXT);
+            CREATE TABLE IF NOT EXISTS edge_event_queue(id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at TEXT NOT NULL, next_attempt_at TEXT, claimed_at TEXT, synced_at TEXT, crm_message TEXT);
             CREATE INDEX IF NOT EXISTS idx_edge_event_queue_status ON edge_event_queue(status,created_at);
             CREATE TABLE IF NOT EXISTS unknown_incidents(id TEXT PRIMARY KEY, store_id TEXT NOT NULL, camera_id TEXT NOT NULL, track_id TEXT NOT NULL, first_seen TEXT NOT NULL, confirmed_unknown_at TEXT NOT NULL, last_seen TEXT NOT NULL, recognition_attempts INTEGER NOT NULL, best_similarity REAL, best_face_snapshot TEXT, best_person_snapshot TEXT, clip_path TEXT, status TEXT NOT NULL DEFAULT 'OPEN', acknowledged_at TEXT);
             CREATE INDEX IF NOT EXISTS idx_unknown_active ON unknown_incidents(store_id,camera_id,track_id,status);
@@ -58,6 +58,7 @@ class SQLiteStore:
             # databases predate this column, so those rows are quarantinable legacy
             # identities rather than being misclassified as intentional local-only users.
             self._ensure_column(c,'personnel','managed_source',"TEXT NOT NULL DEFAULT 'legacy'")
+            self._ensure_column(c,'edge_event_queue','crm_message','TEXT')
             self._recover_interrupted_attendance_evidence(c)
             self._release_stalled_unknown_incidents(c)
     def _ensure_column(self,conn,table,column,definition):
@@ -517,9 +518,10 @@ class SQLiteStore:
         with self._conn() as c:
             rows=c.execute("SELECT * FROM edge_event_queue WHERE status='PENDING' AND (next_attempt_at IS NULL OR next_attempt_at<=?) ORDER BY created_at LIMIT ?",(now,limit)).fetchall()
             return [dict(r) for r in rows]
-    def mark_event_synced(self,event_id):
+    def mark_event_synced(self,event_id,crm_message=None):
         with self._lock,self._conn() as c:
-            c.execute("UPDATE edge_event_queue SET status='SYNCED',synced_at=?,last_error=NULL WHERE id=?",(self.now(),event_id))
+            c.execute("""UPDATE edge_event_queue SET status='SYNCED',synced_at=?,last_error=NULL,
+                crm_message=COALESCE(?,crm_message) WHERE id=?""",(self.now(),crm_message,event_id))
     def mark_event_failed(self,event_id,error,retry_after_seconds=0):
         from datetime import timedelta
         next_attempt=(datetime.now(timezone.utc)+timedelta(seconds=max(0,float(retry_after_seconds)))).isoformat()

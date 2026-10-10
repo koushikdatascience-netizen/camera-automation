@@ -1,0 +1,11 @@
+{
+  "request": {
+    "userId": "<CRM_USER_UUID>",
+    "date": "2026-10-10T17:06:17.770+05:30",
+    "actualStartTime": "17:06:17"
+  },
+  "response": {
+    "success": true,
+    "message": "Logged in successfully."
+  }
+}

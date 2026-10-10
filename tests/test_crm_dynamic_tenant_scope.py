@@ -47,6 +47,6 @@ def test_cloud_compose_keeps_automatic_attendance_opt_in_by_default():
     compose = (Path(__file__).resolve().parents[1] / "docker-compose.cloud.yml").read_text()
     assert "SNAPKEY_CRM_AUTO_LOGIN_ENABLED: ${SNAPKEY_CRM_AUTO_LOGIN_ENABLED:-0}" in compose
     assert "SNAPKEY_CRM_AUTO_LOGOUT_ENABLED: ${SNAPKEY_CRM_AUTO_LOGOUT_ENABLED:-0}" in compose
-    assert "SNAPKEY_CRM_ATTENDANCE_DATE_FORMAT" in compose
+    assert "SNAPKEY_CRM_ATTENDANCE_DATE_FORMAT" not in compose
     assert "SNAPKEY_CRM_ATTENDANCE_TIMEZONE" in compose
     assert "SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS: ${SNAPKEY_CRM_TOKEN_FALLBACK_TTL_SECONDS:-0}" in compose

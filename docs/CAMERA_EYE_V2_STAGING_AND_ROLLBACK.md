@@ -60,7 +60,7 @@ The current DDL is additive/idempotent, so the prior portal may run with newer t
 ## CRM contract in this branch
 
 - `POST /api/Auth/loginUsingFaceTenant` sends `{ "base64Image": "<CRM-enrolled face image>", "tenantId": "<CRM tenant>" }`. It is the face-token refresh flow and is intended not to mutate attendance. The token is encrypted at rest; JWT `exp` is treated only as an expiry hint and is not cryptographically verified by Camera Eye.
-- `POST /api/UserRoster/LoginLogout` uses `{ "userId": "<CRM user>", "date": "YYYY-MM-DD", "actualStartTime": "HH:MM:SS" }` for login, or `actualOffTime` for ordinary checkout.
+- `POST /api/UserRoster/LoginLogout` uses the validated CRM user ID, a timezone-aware ISO 8601 `date` (including the effective policy offset), and `actualStartTime` as `HH:MM:SS` for login, or `actualOffTime` for ordinary checkout. Send the employee Face Login token raw in `Authorization` (no `Bearer` prefix). Confirm only HTTP success plus JSON `success: true`.
 - `POST /api/UserActivity/auto-logout` is a distinct 60-minute absence action with `{ "userId": "<CRM user>", "remarks": "..." }`. It is behind `CAMERA_EYE_V2_CRM_AUTO_LOGOUT_ENABLED`, requires 60 minutes, scoped healthy camera coverage, and an encrypted face token. Any ambiguous failure enters reconciliation-required state and is not automatically replayed.
 
 These bodies come from the supplied integration contract. Exact live CRM HTTP status/body success semantics and behavior after network timeouts still require contract tests against a designated CRM staging tenant. Never manually replay an ambiguous mutation before CRM reconciliation.

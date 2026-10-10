@@ -1369,8 +1369,12 @@ def _deliver_crm_attendance_event(envelope: dict[str, Any]) -> None:
             result=crm_client.start_break(crm_user_id,mapping["break_master_id"],auth_token=face_token)
         else:
             result=crm_client.end_break(crm_user_id,auth_token=face_token)
-        if not _crm_mutation_succeeded(result):
+        login_logout=event_type in {'ATTENDANCE_ENTRY','ATTENDANCE_EXIT'}
+        success=(_crm_login_logout_succeeded(result) if login_logout
+                 else _crm_mutation_succeeded(result))
+        if not success:
             raise CrmBusinessRejection(SnapKeyCrmClient.safe_error_message(result))
+        return result
     except Exception as exc:
         if bridge:
             exc.attendance_mutation_attempted=True
@@ -1410,9 +1414,12 @@ def _synchronize_attendance_bridge(envelope, *, historical_missing_receipt=False
         return {'status':status}
     try:
         if status!='CRM_CONFIRMED':
-            _deliver_crm_attendance_event(envelope)
+            crm_result=_deliver_crm_attendance_event(envelope)
+            crm_message=_safe_crm_response_message(crm_result)
             status='CRM_CONFIRMED'
-            store.set_attendance_delivery(envelope,'CRM_CONFIRMED')
+            store.set_attendance_delivery(envelope,'CRM_CONFIRMED',crm_message=crm_message)
+        else:
+            crm_message=receipt.get('crm_message')
         # These are the same services used by the portal attendance station.
         when=datetime.fromisoformat(str(envelope['event_time']).replace('Z','+00:00'))
         event_type=envelope['event_type']
@@ -1432,9 +1439,9 @@ def _synchronize_attendance_bridge(envelope, *, historical_missing_receipt=False
                                  'BREAK_START':'BREAK_START','BREAK_END':'BREAK_END'}[event_type],
                 'occurred_at':when,'source':metadata['attendance_source'],'camera_id':envelope.get('camera_id'),
                 'evidence':_action_evidence_manifest(metadata,metadata.get('recognition_event_id')),
-                'metadata':metadata})
+                'metadata':{**metadata,**({'crm_response_message':crm_message} if crm_message else {})}})
         store.set_attendance_delivery(envelope,'SUCCEEDED')
-        return {'status':'SUCCEEDED'}
+        return {'status':'SUCCEEDED','crm_message':crm_message}
     except Exception as exc:
         # Never persist exception text: upstream errors can contain credentials.
         attempted=getattr(exc,'attendance_mutation_attempted',False)
@@ -1636,15 +1643,21 @@ def _crm_face_login_succeeded(result: Any) -> bool:
 def _crm_mutation_succeeded(result: Any) -> bool:
     return crm_client.business_success(result)
 
+def _crm_login_logout_succeeded(result: Any) -> bool:
+    return isinstance(result,dict) and result.get('success') is True
+
+def _safe_crm_response_message(result: Any) -> str | None:
+    if not isinstance(result,dict):
+        return None
+    message=result.get('message')
+    if not isinstance(message,str) or not message.strip():
+        return None
+    return SnapKeyCrmClient.safe_error_message({'message':message})
+
 
 def _crm_attendance_date_time(tenant_id: str,shop_id: str,crm_user_id: str,
                               event_time: datetime,policy: dict[str,Any] | None=None) -> tuple[str,str]:
-    """Format CRM date/time using the effective business timezone and configured date contract.
-
-    `SNAPKEY_CRM_ATTENDANCE_DATE_FORMAT` uses Python strftime syntax and defaults
-    to ISO date. The format and tenant's business timezone still require CRM
-    confirmation before production mutations are enabled.
-    """
+    """Format LoginLogout datetime and TimeSpan fields in the effective policy timezone."""
     policy=policy or {}
     zone_name=os.getenv("SNAPKEY_CRM_ATTENDANCE_TIMEZONE","").strip()
     if not zone_name:
@@ -1653,8 +1666,7 @@ def _crm_attendance_date_time(tenant_id: str,shop_id: str,crm_user_id: str,
         shop_policy=store.attendance_policy(tenant_id,shop_id) or {}
         zone_name=str(shop_policy.get("timezone") or "").strip()
     zone_name=zone_name or "Asia/Kolkata"
-    date_format=os.getenv("SNAPKEY_CRM_ATTENDANCE_DATE_FORMAT","%Y-%m-%d").strip()
-    return format_crm_attendance_date_time(event_time,zone_name,date_format)
+    return format_crm_attendance_date_time(event_time,zone_name)
 
 
 def _action_evidence_manifest(metadata: dict[str, Any] | None, recognition_event_id: str | None = None) -> dict[str, Any]:
@@ -1794,7 +1806,7 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
             "date":crm_date,
             "actualStartTime":crm_time,
         },face_token)
-        if not _crm_mutation_succeeded(attendance_result):
+        if not _crm_login_logout_succeeded(attendance_result):
             logger.error(
                 "CRM_AUTO_ATTENDANCE_REJECTED person_id=%s crm_user_id=%s camera_id=%s",
                 person_id,authenticated_user_id,camera_id,
@@ -1808,6 +1820,7 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         return
     logger.info("CRM_AUTO_ATTENDANCE_SUCCESS person_id=%s crm_user_id=%s camera_id=%s",
         person_id,authenticated_user_id,camera_id)
+    crm_message=_safe_crm_response_message(attendance_result)
     if hasattr(store,"touch_attendance_presence"):
         store.touch_attendance_presence(
             tenant_id=tenant_id,shop_id=shop_id,local_person_id=person_id,
@@ -1823,7 +1836,8 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
             "camera_id":camera_id,"reason_code":"FACE_RECOGNITION",
             "evidence":_action_evidence_manifest(event_metadata,str(envelope.get("event_id") or "")),
             "metadata":{"recognition_event_id":str(envelope.get("event_id") or ""),
-                        "attendance_session_id":_attendance_session_id(person_id,when,event_id)},
+                        "attendance_session_id":_attendance_session_id(person_id,when,event_id),
+                        **({'crm_response_message':crm_message} if crm_message else {})},
         })
     event_id="auto-attendance-"+secrets.token_urlsafe(12)
     store.record_portal_event({"event_id":event_id,"tenant_id":tenant_id,
@@ -2500,7 +2514,9 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
                                           auth_token=face_token)
         else:
             result=crm_client.end_break(authenticated_user_id,auth_token=face_token)
-        if not _crm_mutation_succeeded(result):
+        action_success=(_crm_login_logout_succeeded(result) if action in {'CHECK_IN','CHECK_OUT'}
+                        else _crm_mutation_succeeded(result))
+        if not action_success:
             logger.warning(
                 "CRM_MANUAL_ATTENDANCE_REJECTED action=%s person_id=%s crm_user_id=%s camera_id=%s",
                 action,person_id,authenticated_user_id,request.camera_id,
@@ -2538,6 +2554,7 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
     elif action=="BREAK_END" and hasattr(store,"set_attendance_presence_break"):
         store.set_attendance_presence_break(tenant_id,principal.shop_id,person_id,False)
     payload_metadata=payload.get("metadata") if isinstance(payload.get("metadata"),dict) else {}
+    crm_message=_safe_crm_response_message(result)
     if hasattr(store,"record_attendance_activity"):
         store.record_attendance_activity({
             "id":audit_id,"tenant_id":tenant_id,"shop_id":principal.shop_id,
@@ -2547,7 +2564,8 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
             "evidence":_action_evidence_manifest(payload_metadata,request.recognition_event_id),
             "metadata":{"recognition_event_id":request.recognition_event_id,
                         "attendance_session_id":_attendance_session_id(person_id,now,audit_id),
-                        "confirmed_by_user_id":principal.user_id},
+                        "confirmed_by_user_id":principal.user_id,
+                        **({'crm_response_message':crm_message} if crm_message else {})},
         })
     canonical_type={"CHECK_IN":"ATTENDANCE_ENTRY","CHECK_OUT":"ATTENDANCE_EXIT",
         "BREAK_START":"BREAK_START","BREAK_END":"BREAK_END"}[action]
@@ -2563,6 +2581,7 @@ def attendance_station_action(tenant_id: str, request: AttendanceStationActionRe
         action,tenant_id,person_id,authenticated_user_id,request.camera_id,audit_id,
     )
     return {"ok":True,"audit_event_id":audit_id,"action":action,"person_id":person_id,"crm_user_id":authenticated_user_id,
+        "crm_message":crm_message,
         "recognition_event_id":request.recognition_event_id,"confirmed_at":crm_timestamp,
         "confirmed_by":{"user_id":principal.user_id,"display_name":principal.display_name,"role":principal.role}}
 
@@ -2859,7 +2878,7 @@ def _process_automatic_checkout(presence: dict[str, Any], *, now: datetime, reas
             "date":now.date().isoformat(),
             "actualOffTime":now.strftime("%H:%M:%S"),
         },face_token)
-        if not _crm_mutation_succeeded(result):
+        if not _crm_login_logout_succeeded(result):
             raise RuntimeError("CRM rejected automatic checkout")
         store.complete_presence_checkout(tenant_id,shop_id,person_id,True)
         last_seen=presence["last_seen_at"]

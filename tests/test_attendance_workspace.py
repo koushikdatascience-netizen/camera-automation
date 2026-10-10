@@ -11,7 +11,7 @@ from camera_service.storage import SQLiteStore
 from camera_service.models import IdentitySeen,PersonnelCreate,PersonnelRole
 from camera_service.attendance_engine import AttendanceEngine
 from camera_service.attendance_station import AttendanceStation
-from camera_service.attendance_workspace import WorkspaceQuery,build_workspace,policy_snapshot,export_csv
+from camera_service.attendance_workspace import WorkspaceQuery,build_workspace,policy_snapshot,export_csv,normalize_event
 from camera_service.attendance_workspace_api import local_sources
 
 UTC=timezone.utc
@@ -43,6 +43,31 @@ def test_explicit_manual_timeline_durations_snapshot_and_checkout():
     assert result['summary']['overtime_minutes']==45
     assert row['policy_is_historical'] and 'BREAK_LIMIT_EXCEEDED' in row['compliance']
     assert row['evidence_status']=='Evidence unavailable'
+
+
+def test_local_workspace_keeps_crm_message_after_sync_acknowledgement(station):
+    st,now,person,_event=station
+    action=apply(st,now,'CHECK_IN','crm-message')
+    queued=next(row for row in st.engine.store.queued_events(20)
+                if row['id']==action['event_id'])
+    st.engine.store.mark_event_synced(queued['id'],'Logged in successfully.')
+    people,sessions,events=local_sources(st.engine.store,'shop')
+    row=next(item for item in events if item['id']==queued['id'])
+    normalized=normalize_event(row)
+    assert normalized['crm_message']=='Logged in successfully.'
+
+
+def test_timeline_exposes_safe_crm_success_and_rejection_messages():
+    success=normalize_event({'id':'entry','event_type':'ATTENDANCE_ENTRY',
+        'event_time':'2026-10-09T09:00:00Z','person_id':'alice',
+        'crm_message':'Logged in successfully.',
+        'metadata':{'attendance_session_id':'session','attendance_source':'MANUAL'}})
+    rejected=normalize_event({'id':'rejected','event_type':'ATTENDANCE_ENTRY',
+        'event_time':'2026-10-09T09:00:00Z','person_id':'alice',
+        'crm_error':'actualStartTime: must be a valid TimeSpan.',
+        'metadata':{'attendance_session_id':'session','attendance_source':'MANUAL'}})
+    assert success['crm_message']=='Logged in successfully.'
+    assert rejected['crm_error']=='actualStartTime: must be a valid TimeSpan.'
 
 
 @pytest.mark.parametrize('filters',[{'search':'unmatched'},{'person_id':'other'},{'camera_id':'wrong'},{'shop_id':'wrong'},{'status':'IN'},{'source':'AUTO'},{'activity':'AUTO_LOGIN'}])

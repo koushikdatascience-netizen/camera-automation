@@ -307,7 +307,7 @@ def test_edge_sync_uploads_three_action_snapshots_and_clip_with_missing_status(t
                             "snapshot_paths":[str(path) for path in paths[:3]],
                             "clip_path":str(paths[3]),"evidence_pending":False}}
             return [{"id":"recognition-1","payload_json":json.dumps(event),"attempts":0}]
-        def mark_event_synced(self,_event): pass
+        def mark_event_synced(self,_event,*_args): pass
         def now(self): return datetime.now(timezone.utc).isoformat()
     class Cloud:
         def enabled(self): return True
@@ -338,7 +338,7 @@ def test_edge_sync_marks_missing_action_evidence_explicitly(tmp_path):
             return [{"id":"recognition-2","payload_json":json.dumps({"event_id":"recognition-2",
                 "event_type":"PERSON_RECOGNIZED","metadata":{"snapshot_path":str(photo),
                 "snapshot_paths":[str(photo)],"evidence_pending":False}}),"attempts":0}]
-        def mark_event_synced(self,_event): pass
+        def mark_event_synced(self,_event,*_args): pass
         def now(self): return datetime.now(timezone.utc).isoformat()
     class Cloud:
         def enabled(self): return True

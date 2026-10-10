@@ -1,5 +1,6 @@
 import copy
 import json
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -259,6 +260,41 @@ def test_rejected_crm_request_is_terminal_and_preserves_safe_message(bridge):
     retry_now(bridge)
     assert bridge.ingest(bridge.envelope())['attendance_sync']['status']=='REJECTED'
     assert len(attempts)==1
+
+
+def test_confirmed_login_contract_persists_exact_crm_message(bridge):
+    fixture=json.loads((Path(__file__).parent/'fixtures'/'crm_login_logout_success.json').read_text())
+    bridge.apply('CHECK_IN','in')
+    bridge.crm.login_logout_with_face_token=lambda *_args:fixture['response']
+    activities=[]
+    bridge.portal.record_attendance_activity=lambda item:activities.append(item)
+    result=bridge.ingest(bridge.envelope())['attendance_sync']
+    assert result['status']=='SUCCEEDED'
+    receipt=bridge.portal.attendance_delivery_receipt('tenant','shop',bridge.envelope()['event_id'])
+    assert receipt['crm_message']=='Logged in successfully.'
+    assert activities[0]['metadata']['crm_response_message']=='Logged in successfully.'
+
+
+def test_success_receipt_preserves_message_on_crm_confirmed_recovery(bridge):
+    bridge.apply('CHECK_IN','in')
+    event=bridge.envelope()
+    changed={'fail':True}
+    activities=[]
+    def persist(activity):
+        if changed['fail']:
+            raise RuntimeError('simulated local finalization failure')
+        activities.append(activity)
+    bridge.portal.record_attendance_activity=persist
+    bridge.crm.login_logout_with_face_token=lambda *_args:{
+        'success':True,'message':'Logged in successfully.'}
+    assert bridge.ingest(event)['attendance_sync']['status']=='CRM_CONFIRMED'
+    receipt=bridge.portal.attendance_delivery_receipt('tenant','shop',event['event_id'])
+    assert receipt['crm_message']=='Logged in successfully.'
+    changed['fail']=False
+    bridge.portal.record_attendance_activity=persist
+    retry_now(bridge)
+    assert bridge.ingest(event)['attendance_sync']['status']=='SUCCEEDED'
+    assert activities[0]['metadata']['crm_response_message']=='Logged in successfully.'
 
 
 def test_timeout_requires_reconciliation_and_does_not_replay(bridge):
