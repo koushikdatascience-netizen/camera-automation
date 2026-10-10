@@ -167,6 +167,36 @@ def test_manual_policy_updates_presence_without_crm_check_in(monkeypatch):
     assert touched[0]["checked_in"] is None
 
 
+def test_legacy_recognition_cannot_check_in_when_auto_login_is_disabled(monkeypatch):
+    from types import SimpleNamespace
+    from cloud_portal import api
+
+    monkeypatch.delenv("SNAPKEY_CRM_AUTO_LOGIN_ENABLED", raising=False)
+    monkeypatch.delenv("SNAPKEY_CRM_ATTENDANCE_ENABLED", raising=False)
+    calls=[]
+    monkeypatch.setattr(api,"store",SimpleNamespace(
+        crm_person_mapping=lambda *_args: {"crm_user_id":"crm-user"},
+        touch_attendance_presence=lambda **_kwargs: calls.append("presence"),
+        person_attendance_policy=lambda *_args:{"attendanceMode":"AUTO"},
+    ))
+    monkeypatch.setattr(api,"_portal_camera_lookup",lambda *_args:{"camera_role":"ENTRANCE_EXIT"})
+    monkeypatch.setattr(api,"crm_client",SimpleNamespace(
+        face_attendance_configured=True,
+        face_embeddings=lambda *_args,**_kwargs: calls.append("face-directory"),
+        login_using_face_tenant=lambda *_args: calls.append("face-login"),
+        login_logout_with_face_token=lambda *_args: calls.append("attendance-login"),
+    ))
+
+    api._auto_attend_recognized_person({
+        "event_id":"recognition-auto-disabled","event_type":"PERSON_RECOGNIZED",
+        "tenant_id":"tenant","shop_id":"shop","edge_id":"edge",
+        "camera_id":"camera","event_time":"2026-10-10T04:00:00Z",
+        "payload":{"person_id":"local-person"},
+    })
+
+    assert calls==["presence"]
+
+
 def test_manual_policy_blocks_legacy_automatic_entry_and_exit(monkeypatch):
     from types import SimpleNamespace
     from cloud_portal import api

@@ -1755,6 +1755,11 @@ def _auto_attend_recognized_person(envelope: dict[str, Any]) -> None:
         if person_policy and str(person_policy.get("attendanceMode") or "AUTO").upper()=="MANUAL":
             logger.info("AUTO_ATTENDANCE_SKIPPED event_id=%s person_id=%s reason=manual_mode",event_id,person_id)
             return
+    auto_login_enabled=os.getenv("SNAPKEY_CRM_AUTO_LOGIN_ENABLED",
+        os.getenv("SNAPKEY_CRM_ATTENDANCE_ENABLED","0")).strip()=="1"
+    if not auto_login_enabled:
+        logger.info("AUTO_ATTENDANCE_SKIPPED event_id=%s reason=auto_login_disabled",event_id)
+        return
     # Repeat deliveries of a single edge event are rejected at ingestion. Distinct
     # recognition events are suppressed above only while local presence is checked in.
     try:
