@@ -116,6 +116,61 @@ def test_pg_policy_permissions_scope_and_additive_upgrade(pg_workspace,monkeypat
     finally:api.app.dependency_overrides.pop(api.require_portal_session,None)
 
 
+def test_pg_edge_policy_snapshot_is_versioned_scoped_and_inherited(pg_workspace,monkeypatch):
+    from cloud_portal import api
+    from cloud_portal.api import EdgePrincipal
+    person=seed(pg_workspace)
+    pg_workspace.upsert_attendance_policy('tenant','shop',{
+        'grace_period_minutes':15,'allowed_break_minutes':60,'total_working_minutes':540,
+        'max_logoff_time':'21:30','absence_auto_logout_enabled':False,'timezone':'Asia/Kolkata',
+        'email_recipients':[],'whatsapp_recipients':[],'attendance_mode':'AUTO',
+        'absence_monitoring_enabled':True,'mark_absent_after_minutes':60,
+    })
+    pg_workspace.upsert_person_attendance_policy('tenant','shop','crm-user',{
+        'attendanceMode':'MANUAL','requiredWorkingMinutes':480,
+    })
+    monkeypatch.setattr(api,'store',pg_workspace)
+    monkeypatch.setenv('CAMERA_EYE_CLOUD_POLICY_SYNC_ENABLED','1')
+    api.app.dependency_overrides[api.require_edge_token]=lambda:EdgePrincipal(
+        tenant_id='tenant',shop_id='shop',site_id='shop',edge_id='edge-one')
+    try:
+        client=TestClient(api.app)
+        response=client.get('/edge/v1/config/attendance-policy')
+        assert response.status_code==200
+        body=response.json()
+        assert body['enabled'] is True and body['tenant_id']=='tenant' and body['shop_id']=='shop' and body['edge_id']=='edge-one'
+        assert body['revision']>=3 and body['updated_at']
+        assert body['shop_policy']['total_working_minutes']==540
+        assert body['employees']==[{'local_person_id':person['id'],'crm_user_id':'crm-user',
+            'policy':{**body['shop_policy'],'attendance_mode':'MANUAL','total_working_minutes':480}}]
+        api.app.dependency_overrides[api.require_edge_token]=lambda:EdgePrincipal(
+            tenant_id='other-tenant',shop_id='other-shop',site_id='other-shop',edge_id='edge-two')
+        other=client.get('/edge/v1/config/attendance-policy').json()
+        assert other['tenant_id']=='other-tenant' and other['shop_id']=='other-shop' and other['edge_id']=='edge-two'
+        assert other['employees']==[]
+        assert other['shop_policy']['total_working_minutes']==540
+    finally:api.app.dependency_overrides.pop(api.require_edge_token,None)
+
+
+def test_pg_policy_revision_advances_for_shop_person_mapping_and_deactivation(pg_workspace):
+    person=seed(pg_workspace)
+    first=pg_workspace.attendance_policy_sync_revision('tenant','shop')['revision']
+    pg_workspace.upsert_attendance_policy('tenant','shop',{
+        'grace_period_minutes':15,'allowed_break_minutes':60,'total_working_minutes':540,
+        'max_logoff_time':'21:30','absence_auto_logout_enabled':False,'timezone':'Asia/Kolkata',
+        'email_recipients':[],'whatsapp_recipients':[],
+    })
+    second=pg_workspace.attendance_policy_sync_revision('tenant','shop')['revision']
+    pg_workspace.upsert_person_attendance_policy('tenant','shop','crm-user',{'attendanceMode':'MANUAL'})
+    third=pg_workspace.attendance_policy_sync_revision('tenant','shop')['revision']
+    pg_workspace.upsert_crm_person_mapping({'tenant_id':'tenant','shop_id':'shop','local_person_id':person['id'],
+        'crm_user_id':'crm-user','employee_code':'SYN'})
+    fourth=pg_workspace.attendance_policy_sync_revision('tenant','shop')['revision']
+    pg_workspace.update_cloud_person('tenant','shop',person['id'],{'active':False})
+    fifth=pg_workspace.attendance_policy_sync_revision('tenant','shop')['revision']
+    assert first<second<third<fourth<fifth
+
+
 def test_pg_uncertain_crm_result_stays_reviewable_without_duplicate_calls(pg_workspace,monkeypatch):
     from cloud_portal import api
     import httpx

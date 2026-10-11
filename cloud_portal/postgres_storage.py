@@ -175,6 +175,16 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                 policy_json JSONB NOT NULL, version INTEGER NOT NULL DEFAULT 1,
                 updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY(tenant_id,shop_id,crm_user_id))""",
+            """CREATE TABLE IF NOT EXISTS attendance_policy_sync_revisions(
+                tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
+                revision BIGINT NOT NULL DEFAULT 1, updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY(tenant_id,shop_id))""",
+            """INSERT INTO attendance_policy_sync_revisions(tenant_id,shop_id,revision,updated_at)
+                SELECT scope.tenant_id,scope.shop_id,1,NOW() FROM (
+                    SELECT tenant_id,shop_id FROM attendance_policies
+                    UNION SELECT tenant_id,shop_id FROM person_attendance_policies
+                    UNION SELECT tenant_id,shop_id FROM crm_person_mappings WHERE enabled=TRUE
+                ) AS scope ON CONFLICT(tenant_id,shop_id) DO NOTHING""",
             """CREATE TABLE IF NOT EXISTS attendance_activity(
                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, shop_id TEXT NOT NULL,
                 crm_user_id TEXT NOT NULL, local_person_id TEXT,
@@ -386,7 +396,10 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
         if allowed:
             allowed["updated_at"]=self.now(); params={**allowed,"tenant":tenant_id,"shop":shop_id,"id":person_id}
             sets=",".join(f"{key}=:{key}" for key in allowed)
-            with self._conn() as conn: conn.execute(text(f"UPDATE cloud_personnel SET {sets} WHERE tenant_id=:tenant AND shop_id=:shop AND id=:id"),params)
+            with self._conn() as conn:
+                conn.execute(text(f"UPDATE cloud_personnel SET {sets} WHERE tenant_id=:tenant AND shop_id=:shop AND id=:id"),params)
+                if "active" in allowed:
+                    self._bump_attendance_policy_sync_revision(conn,tenant_id,shop_id,allowed["updated_at"])
         return self.get_cloud_person(tenant_id,shop_id,person_id)
 
     def crm_enrollment_rejected(self,tenant,shop,user,key):
@@ -744,7 +757,26 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                 break_master_id=CASE WHEN :has_break THEN EXCLUDED.break_master_id ELSE crm_person_mappings.break_master_id END,enabled=TRUE,updated_at=EXCLUDED.updated_at"""),
                 {"tenant":mapping["tenant_id"],"shop":mapping["shop_id"],"local":mapping["local_person_id"],
                  "crm":mapping["crm_user_id"],"employee":mapping.get("employee_code"),"break":mapping.get("break_master_id"),"now":now,"has_break":'break_master_id' in mapping})
+            self._bump_attendance_policy_sync_revision(conn,mapping["tenant_id"],mapping["shop_id"],now)
         return self.crm_person_mapping(mapping["tenant_id"],mapping["shop_id"],mapping["local_person_id"])
+
+    @staticmethod
+    def _bump_attendance_policy_sync_revision(conn, tenant_id: str, shop_id: str, now) -> int:
+        row=conn.execute(text("""INSERT INTO attendance_policy_sync_revisions(tenant_id,shop_id,revision,updated_at)
+            VALUES(:tenant,:shop,1,:now)
+            ON CONFLICT(tenant_id,shop_id) DO UPDATE SET
+                revision=attendance_policy_sync_revisions.revision+1,updated_at=EXCLUDED.updated_at
+            RETURNING revision"""),{"tenant":tenant_id,"shop":shop_id,"now":now}).mappings().one()
+        return int(row["revision"])
+
+    def attendance_policy_sync_revision(self, tenant_id: str, shop_id: str) -> dict[str, Any]:
+        with self._conn() as conn:
+            row=conn.execute(text("""SELECT revision,updated_at FROM attendance_policy_sync_revisions
+                WHERE tenant_id=:tenant AND shop_id=:shop"""),{"tenant":tenant_id,"shop":shop_id}).mappings().first()
+        if not row:
+            return {"revision":0,"updated_at":"1970-01-01T00:00:00+00:00"}
+        updated=row["updated_at"].isoformat() if hasattr(row["updated_at"],"isoformat") else str(row["updated_at"])
+        return {"revision":int(row["revision"]),"updated_at":updated}
 
     def crm_person_mapping(self, tenant_id: str, shop_id: str, local_person_id: str) -> dict[str, Any] | None:
         with self._conn() as conn:
@@ -1134,6 +1166,7 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                     "tenant":tenant_id,"shop":shop_id,"user":crm_user_id,
                     "policy":json.dumps(policy),"now":now,
                 }).mappings().one()
+            self._bump_attendance_policy_sync_revision(conn,tenant_id,shop_id,now)
         return {"tenantCode":tenant_id,"shopCode":shop_id,"userId":crm_user_id,
                 **dict(row["policy_json"]),"version":row["version"],"updatedAt":row["updated_at"].isoformat()}
 
@@ -1183,6 +1216,7 @@ class PostgresPortalStore(IntegrationScopeStore, AttendanceDeliveryStore):
                 whatsapp_recipients_json=EXCLUDED.whatsapp_recipients_json,
                 workspace_rules_json=attendance_policies.workspace_rules_json || EXCLUDED.workspace_rules_json,
                 updated_at=EXCLUDED.updated_at"""),params)
+            self._bump_attendance_policy_sync_revision(conn,tenant_id,shop_id,now)
         return self.attendance_policy(tenant_id,shop_id)
 
     def attendance_policy(self, tenant_id: str, shop_id: str) -> dict[str, Any]:

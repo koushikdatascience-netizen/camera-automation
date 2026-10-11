@@ -74,8 +74,25 @@ def local_sources(store,shop):
 def local_policy(store,shop,person_id=''):
     with store._conn() as conn:
         rows=conn.execute('SELECT person_id,policy_json FROM attendance_workspace_policies WHERE store_id=? AND person_id IN (?,\'\')',(shop,person_id)).fetchall()
+        cloud_state=conn.execute('SELECT revision,cloud_updated_at,active FROM cloud_attendance_policy_sync_state WHERE store_id=?',(shop,)).fetchone()
+        cloud_rows=conn.execute('SELECT person_id,policy_json FROM cloud_attendance_policies WHERE store_id=? AND person_id IN (?,\'\')',(shop,person_id)).fetchall() if cloud_state and cloud_state['active'] else []
     result=WorkspacePolicy().model_dump()
     for row in sorted(rows,key=lambda r:bool(r['person_id'])):result.update(_json(row['policy_json']))
+    if cloud_state and cloud_state['active']:
+        # Cloud shop policy is authoritative. Cloud employee snapshots are already
+        # resolved field-by-field; for local-only personnel retain their explicit
+        # local employee override over the cloud shop defaults.
+        cloud_by_person={row['person_id']:_json(row['policy_json']) for row in cloud_rows}
+        result=WorkspacePolicy().model_dump()
+        result.update(cloud_by_person.get('',{}))
+        if person_id and person_id in cloud_by_person:
+            result.update(cloud_by_person[person_id])
+        elif person_id:
+            person=store.get_person(person_id) or {}
+            identity=_json(person.get('crm_sync_json'))
+            local_person=next((_json(row['policy_json']) for row in rows if row['person_id']==person_id),{})
+            if not identity.get('crm_user_id'):
+                result.update(local_person)
     return result
 
 
@@ -133,17 +150,26 @@ def install_local(app,get_store,get_config):
         store=get_store();shop=get_config().store_id
         if person_id and not store.get_person(person_id):raise HTTPException(404,'Employee not found')
         value=local_policy(store,shop,person_id)
+        cloud_state=store.cloud_attendance_policy_sync_state(shop)
+        if cloud_state and not cloud_state['active']:cloud_state=None
         with store._conn() as conn:
             saved=conn.execute('SELECT person_id,policy_json,updated_at FROM attendance_workspace_policies WHERE store_id=? AND person_id IN (?,\'\') ORDER BY person_id',(shop,person_id)).fetchall()
         employee_values=next((_json(row['policy_json']) for row in saved if person_id and row['person_id']==person_id),{})
         shop_values=next((_json(row['policy_json']) for row in saved if row['person_id']==''),{})
-        sources={key:'EMPLOYEE' if key in employee_values else 'SHOP' if key in shop_values else 'SYSTEM' for key in value}
+        sources={key:'CLOUD' if cloud_state else 'EMPLOYEE' if key in employee_values else 'SHOP' if key in shop_values else 'SYSTEM' for key in value}
         updated=max((row['updated_at'] for row in saved),default=None)
-        return {'policy':value,'snapshot':policy_snapshot(value),'sources':sources,'updated_at':updated,'person_id':person_id,'scope':'LOCAL_ONLY','can_edit':True}
+        scope='CLOUD_SYNCED' if cloud_state else 'LOCAL_ONLY'
+        if cloud_state:updated=cloud_state['cloud_updated_at']
+        return {'policy':value,'snapshot':policy_snapshot(value),'sources':sources,'updated_at':updated,
+            'person_id':person_id,'scope':scope,'revision':int(cloud_state['revision']) if cloud_state else None,
+            'can_edit':not bool(cloud_state)}
 
     @app.put('/api/v2/attendance/policy')
     def save_policy(body:WorkspacePolicy,person_id:str=''):
         store=get_store();shop=get_config().store_id
+        cloud_state=store.cloud_attendance_policy_sync_state(shop)
+        if cloud_state and cloud_state['active']:
+            raise HTTPException(409,'Cloud Portal policy is authoritative while synchronization is active; edit it in the Cloud Portal.')
         if person_id and not store.get_person(person_id):raise HTTPException(404,'Employee not found')
         value=body.model_dump();validate_policy(value)
         with store._lock,store._conn() as conn:

@@ -1278,6 +1278,53 @@ def edge_personnel_config(principal: EdgePrincipal = Depends(require_edge_token)
             "faces":[{"face_id":str(f["id"]),"embedding":f["embedding"],"quality":float(f["quality"]),"model_key":f.get("model_key")} for f in faces]})
     return {"tenant_id":principal.tenant_id,"shop_id":principal.shop_id,"items":items}
 
+
+@app.get("/edge/v1/config/attendance-policy")
+def edge_attendance_policy_config(principal: EdgePrincipal = Depends(require_edge_token)):
+    """Return a complete versioned snapshot for this authenticated edge scope only."""
+    if principal.legacy_global or not all((principal.tenant_id,principal.shop_id,principal.edge_id)):
+        raise HTTPException(403,"Scoped edge credential is required for attendance policy")
+    if os.getenv("CAMERA_EYE_CLOUD_POLICY_SYNC_ENABLED","0").strip()!="1":
+        return {"enabled":False}
+    if not all(hasattr(store,name) for name in (
+            "attendance_policy","person_attendance_policy","list_crm_person_mappings",
+            "attendance_policy_sync_revision","get_cloud_person")):
+        raise HTTPException(503,"Versioned attendance policy storage is unavailable")
+
+    from camera_service.attendance_workspace_api import WorkspacePolicy
+    from cloud_portal.attendance_policy_sync import normalize_effective_policy
+
+    tenant=str(principal.tenant_id);shop=str(principal.shop_id)
+    before=store.attendance_policy_sync_revision(tenant,shop)
+    shop_policy=normalize_effective_policy({},store.attendance_policy(tenant,shop) or {})
+    mappings=store.list_crm_person_mappings(tenant,shop)
+    employees=[];local_ids=set();crm_ids=set()
+    for mapping in mappings:
+        local_id=str(mapping.get("local_person_id") or "")
+        crm_id=str(mapping.get("crm_user_id") or "")
+        cloud_person=store.get_cloud_person(tenant,shop,local_id) if hasattr(store,"get_cloud_person") else None
+        if not cloud_person or not cloud_person.get("active",True):
+            continue
+        if not local_id or not crm_id or local_id in local_ids or crm_id in crm_ids:
+            raise HTTPException(503,"Attendance policy identity mappings are ambiguous")
+        local_ids.add(local_id);crm_ids.add(crm_id)
+        override=store.person_attendance_policy(tenant,shop,crm_id) or {}
+        employees.append({"local_person_id":local_id,"crm_user_id":crm_id,
+            "policy":normalize_effective_policy(override,store.attendance_policy(tenant,shop) or {})})
+    after=store.attendance_policy_sync_revision(tenant,shop)
+    if int(after["revision"])!=int(before["revision"]):
+        raise HTTPException(503,"Attendance policy changed during snapshot generation; retry synchronization")
+    try:
+        updated_at=datetime.fromisoformat(str(after["updated_at"]).replace("Z","+00:00")).isoformat() if after.get("updated_at") else None
+        # Enforce a complete contract on the server too; the edge independently repeats this validation.
+        WorkspacePolicy.model_validate(shop_policy)
+        for employee in employees:WorkspacePolicy.model_validate(employee["policy"])
+    except (TypeError,ValueError) as exc:
+        raise HTTPException(503,"Stored attendance policy is invalid") from exc
+    return {"enabled":True,"tenant_id":tenant,"shop_id":shop,"edge_id":str(principal.edge_id),
+        "revision":int(after["revision"]),"updated_at":updated_at,
+        "shop_policy":shop_policy,"employees":employees}
+
 @app.post("/edge/v1/events/{event_id}/evidence")
 async def upload_edge_event_evidence(
     event_id: str,

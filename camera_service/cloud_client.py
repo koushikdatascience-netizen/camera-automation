@@ -125,6 +125,18 @@ class CloudSyncClient:
         response.raise_for_status()
         return response.json() if response.content else {"items":[]}
 
+    def attendance_policy_config(self) -> dict[str, Any]:
+        """Fetch the authenticated edge's complete, versioned attendance policy snapshot."""
+        if not self.enabled():
+            raise RuntimeError("cloud sync is disabled")
+        response=requests.get(
+            self.config.base_url.rstrip("/")+"/edge/v1/config/attendance-policy",
+            headers={"Authorization":f"Bearer {self.config.api_token}"},
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json() if response.content else {}
+
     def enrollment_preview(self, person_id: str) -> bytes:
         from urllib.parse import quote
         if not self.enabled(): raise RuntimeError('cloud sync is disabled')

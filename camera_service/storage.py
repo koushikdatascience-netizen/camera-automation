@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json, sqlite3, threading, uuid
+import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,14 @@ class SQLiteStore:
             CREATE TABLE IF NOT EXISTS object_security_events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, object_class TEXT NOT NULL, confidence REAL NOT NULL, track_id TEXT, detected_at TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, alert_sent INTEGER NOT NULL DEFAULT 0, snapshot_path TEXT, model_version TEXT, metadata_json TEXT);
             CREATE INDEX IF NOT EXISTS idx_object_security_events_time ON object_security_events(detected_at);
             CREATE TABLE IF NOT EXISTS attendance_workspace_policies(store_id TEXT NOT NULL,person_id TEXT NOT NULL DEFAULT '',policy_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(store_id,person_id));
+            CREATE TABLE IF NOT EXISTS cloud_attendance_policy_sync_state(
+                store_id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,edge_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,payload_hash TEXT NOT NULL,cloud_updated_at TEXT NOT NULL,
+                applied_at TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE IF NOT EXISTS cloud_attendance_policies(
+                store_id TEXT NOT NULL,person_id TEXT NOT NULL DEFAULT '',crm_user_id TEXT,
+                policy_json TEXT NOT NULL,revision INTEGER NOT NULL,cloud_updated_at TEXT NOT NULL,
+                PRIMARY KEY(store_id,person_id));
             CREATE INDEX IF NOT EXISTS idx_person_activity_scope ON person_events(store_id,person_id,event_time);
             ''')
             self._ensure_column(c,'face_profiles','image_path','TEXT')
@@ -52,6 +61,7 @@ class SQLiteStore:
             self._ensure_column(c,'attendance_sessions','exit_snapshot','TEXT')
             self._ensure_column(c,'personnel','attendance_mode','TEXT')
             self._ensure_column(c,'personnel','crm_sync_json','TEXT')
+            self._ensure_column(c,'cloud_attendance_policy_sync_state','active','INTEGER NOT NULL DEFAULT 1')
             self._ensure_column(c,'attendance_sessions','entry_confirmed','INTEGER NOT NULL DEFAULT 0')
             for column in ('break_started_at', 'last_break_start', 'last_break_end'):
                 self._ensure_column(c,'attendance_sessions',column,'TEXT')
@@ -283,7 +293,76 @@ class SQLiteStore:
         from camera_service.attendance_workspace_api import local_policy
         from camera_service.attendance_workspace import policy_snapshot
         return policy_snapshot(local_policy(self,store_id,person_id))
+    def cloud_attendance_policy_sync_state(self,store_id):
+        with self._conn() as conn:
+            row=conn.execute('SELECT tenant_id,edge_id,revision,cloud_updated_at,applied_at,active FROM cloud_attendance_policy_sync_state WHERE store_id=?',(store_id,)).fetchone()
+        return dict(row) if row else None
+    def disable_cloud_attendance_policy_sync(self,store_id):
+        with self._lock,self._conn() as conn:
+            conn.execute('UPDATE cloud_attendance_policy_sync_state SET active=0 WHERE store_id=?',(store_id,))
+    def apply_cloud_attendance_policy(self,snapshot,tenant_id,shop_id,edge_id):
+        """Atomically replace the current cloud snapshot; local history/settings stay intact."""
+        from cloud_portal.attendance_policy_sync import validate_complete_policy,validate_policy_timestamp
+        if not isinstance(snapshot,dict) or snapshot.get('enabled') is not True:
+            raise ValueError('Cloud attendance policy snapshot is not enabled')
+        expected={'tenant_id':str(tenant_id),'shop_id':str(shop_id),'edge_id':str(edge_id)}
+        if any(str(snapshot.get(key) or '')!=value for key,value in expected.items()):
+            raise ValueError('Attendance policy scope mismatch')
+        revision=snapshot.get('revision')
+        if isinstance(revision,bool) or not isinstance(revision,int) or revision<0:
+            raise ValueError('Attendance policy revision is invalid')
+        updated_at=validate_policy_timestamp(snapshot.get('updated_at'))
+        shop_policy=validate_complete_policy(snapshot.get('shop_policy'))
+        employees=snapshot.get('employees')
+        if not isinstance(employees,list):raise ValueError('Attendance policy employee list is invalid')
+        normalized=[];local_ids=set();crm_ids=set()
+        for item in employees:
+            if not isinstance(item,dict):raise ValueError('Attendance policy employee entry is invalid')
+            person_id=str(item.get('local_person_id') or '');crm_user_id=str(item.get('crm_user_id') or '')
+            if not person_id or not crm_user_id or person_id in local_ids or crm_user_id in crm_ids:
+                raise ValueError('Attendance policy employee mapping is ambiguous')
+            local_ids.add(person_id);crm_ids.add(crm_user_id)
+            normalized.append((person_id,crm_user_id,validate_complete_policy(item.get('policy'))))
+        canonical=json.dumps(snapshot,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+        payload_hash=hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+        now=self.now()
+        with self._lock,self._conn() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            previous=conn.execute('SELECT tenant_id,edge_id,revision,payload_hash FROM cloud_attendance_policy_sync_state WHERE store_id=?',(shop_id,)).fetchone()
+            if previous:
+                if previous['tenant_id']!=expected['tenant_id'] or previous['edge_id']!=expected['edge_id']:
+                    raise ValueError('Existing cloud attendance policy belongs to another edge scope')
+                if revision<int(previous['revision']):return {'status':'STALE','revision':int(previous['revision'])}
+                if revision==int(previous['revision']):
+                    if payload_hash==previous['payload_hash']:
+                        conn.execute('UPDATE cloud_attendance_policy_sync_state SET active=1,applied_at=? WHERE store_id=?',(now,shop_id))
+                        return {'status':'DUPLICATE','revision':revision}
+                    raise ValueError('Attendance policy payload changed without a newer revision')
+            for person_id,crm_user_id,_policy in normalized:
+                person=conn.execute('SELECT crm_sync_json,managed_source,active FROM personnel WHERE id=?',(person_id,)).fetchone()
+                if not person or not person['active'] or person['managed_source']!='crm':
+                    raise ValueError('Attendance policy employee is not an active cloud-managed person')
+                identity=json.loads(person['crm_sync_json'] or '{}')
+                if (str(identity.get('crm_user_id') or '')!=crm_user_id
+                        or str(identity.get('tenant_id') or '')!=expected['tenant_id']
+                        or str(identity.get('shop_id') or '')!=expected['shop_id']):
+                    raise ValueError('Attendance policy employee CRM mapping or scope mismatch')
+            # Snapshot replacement and revision receipt share one SQLite transaction.
+            conn.execute('DELETE FROM cloud_attendance_policies WHERE store_id=?',(shop_id,))
+            conn.execute('INSERT INTO cloud_attendance_policies(store_id,person_id,crm_user_id,policy_json,revision,cloud_updated_at) VALUES(?,?,?,?,?,?)',
+                (shop_id,'',None,json.dumps(shop_policy,sort_keys=True),revision,updated_at))
+            for person_id,crm_user_id,policy in normalized:
+                conn.execute('INSERT INTO cloud_attendance_policies(store_id,person_id,crm_user_id,policy_json,revision,cloud_updated_at) VALUES(?,?,?,?,?,?)',
+                    (shop_id,person_id,crm_user_id,json.dumps(policy,sort_keys=True),revision,updated_at))
+            conn.execute('INSERT INTO cloud_attendance_policy_sync_state(store_id,tenant_id,edge_id,revision,payload_hash,cloud_updated_at,applied_at,active) VALUES(?,?,?,?,?,?,?,1) '
+                'ON CONFLICT(store_id) DO UPDATE SET tenant_id=excluded.tenant_id,edge_id=excluded.edge_id,revision=excluded.revision,payload_hash=excluded.payload_hash,cloud_updated_at=excluded.cloud_updated_at,applied_at=excluded.applied_at,active=1',
+                (shop_id,expected['tenant_id'],expected['edge_id'],revision,payload_hash,updated_at,now))
+        return {'status':'APPLIED','revision':revision,'employee_count':len(normalized)}
     def effective_attendance_mode(self,person_id,store_id,default='AUTO'):
+        cloud_state=self.cloud_attendance_policy_sync_state(store_id)
+        if cloud_state and cloud_state['active']:
+            from camera_service.attendance_workspace_api import local_policy
+            return local_policy(self,store_id,person_id).get('attendance_mode') or default
         with self._conn() as conn:
             rows=conn.execute("SELECT person_id,policy_json FROM attendance_workspace_policies WHERE store_id=? AND person_id IN (?, '') ORDER BY person_id",(store_id,person_id)).fetchall()
             person=conn.execute('SELECT attendance_mode FROM personnel WHERE id=?',(person_id,)).fetchone()

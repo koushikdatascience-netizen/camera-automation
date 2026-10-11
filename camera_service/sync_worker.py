@@ -204,6 +204,23 @@ class EdgeSyncWorker:
                     personnel_sync["error"]=str(exc)
             else:
                 personnel_sync["skipped"]="interval_not_elapsed"
+            policy_sync={"status":"UNSUPPORTED"}
+            fetch_policy=getattr(self.cloud_client,"attendance_policy_config",None)
+            if fetch_policy:
+                try:
+                    snapshot=fetch_policy()
+                    if not isinstance(snapshot,dict):
+                        raise ValueError("Cloud attendance policy response is invalid")
+                    if snapshot.get("enabled") is False:
+                        disable=getattr(self.store,"disable_cloud_attendance_policy_sync",None)
+                        if disable:disable(self.edge_config.shop_id)
+                        policy_sync={"status":"DISABLED"}
+                    else:
+                        policy_sync=self.store.apply_cloud_attendance_policy(
+                            snapshot,self.edge_config.tenant_id,self.edge_config.shop_id,self.edge_config.edge_id)
+                except Exception as exc:
+                    # A failed read/validation never clears the last accepted SQLite snapshot.
+                    policy_sync={"status":"FAILED","error":str(exc)[:300]}
             for row in self.store.queued_events(getattr(self.sync_config, "batch_size", 50)):
                 try:
                     event = json.loads(row["payload_json"])
@@ -276,7 +293,8 @@ class EdgeSyncWorker:
                     failed += 1
 
             result = SyncRunResult(enabled=True, synced=synced, failed=failed)
-            self._remember(result, {"heartbeat": heartbeat_sync, "camera_sync": camera_sync, "personnel_sync": personnel_sync, "command_sync": command_sync})
+            self._remember(result, {"heartbeat": heartbeat_sync, "camera_sync": camera_sync,
+                "personnel_sync": personnel_sync,"policy_sync":policy_sync,"command_sync": command_sync})
             return result
 
     @staticmethod
