@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+ENV PYTHONPATH=/app
+
+COPY requirements-cloud.txt .
+# insightface builds a small native extension; keep build tools out of the final
+# image layer after installation.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libxcb1 libgl1 libglib2.0-0 \
+    && pip install --no-cache-dir 'Cython>=3.0' \
+    && pip install --no-cache-dir -r requirements-cloud.txt \
+    && apt-get purge -y --auto-remove build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY camera_service ./camera_service
+COPY cloud_portal ./cloud_portal
+COPY tools ./tools
+
+EXPOSE 8000
+
+CMD ["uvicorn", "cloud_portal.api:app", "--host", "0.0.0.0", "--port", "8000"]

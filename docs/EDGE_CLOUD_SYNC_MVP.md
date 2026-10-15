@@ -77,12 +77,38 @@ edge:
 
 cloud_sync:
   enabled: false
-  base_url: https://your-platform.example.com
+  base_url: https://camera.snapkey.ai
   api_token: CHANGE_ME
   timeout_seconds: 10
   batch_size: 50
   interval_seconds: 15
 ```
+
+## One-Click Edge Activation
+
+Production installs should not require editing YAML, creating DB rows by hand, or manually installing a license. The installer opens the local setup page and the operator enters only:
+
+- company code
+- shop code
+- activation code
+
+The local EXE calls:
+
+`POST https://camera.snapkey.ai/edge/v1/activate`
+
+The cloud portal then provisions the scoped edge credential, creates the signed license, and returns the cloud identity to the EXE. The EXE writes the runtime config under `C:\ProgramData\MadhushalaCameraAI\config.yaml`, installs the signed license cache, and runs one sync pass.
+
+Required cloud environment variables:
+
+```powershell
+SNAPKEY_PUBLIC_BASE_URL=https://camera.snapkey.ai
+SNAPKEY_DATABASE_URL=postgresql+psycopg://...
+SNAPKEY_EDGE_ACTIVATION_CODE=use-a-strong-client-onboarding-code
+SNAPKEY_LICENSE_PRIVATE_KEY=server-private-key
+SNAPKEY_LICENSE_PUBLIC_KEY=matching-public-key
+```
+
+The activation code is a launch-ready onboarding gate. For larger production, replace the single environment code with CRM-generated per-shop activation codes that expire after first use.
 
 ## Subscription License Gate
 

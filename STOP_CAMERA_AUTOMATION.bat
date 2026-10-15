@@ -1,14 +1,13 @@
 @echo off
 SETLOCAL
 
-REM SnapKey Vision AI Stop Script
-REM This script stops the SnapKey Vision AI application
+REM Madhushala Camera AI Stop Script
 
-echo Stopping SnapKey Vision AI...
+echo Stopping Madhushala Camera AI...
 
 taskkill /f /im SnapKeyVisionAI.exe >nul 2>&1
 
-echo SnapKey Vision AI stopped.
+echo Madhushala Camera AI stopped.
 pause
 
 ENDLOCAL

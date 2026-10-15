@@ -6,30 +6,32 @@
     <title>SnapKey Vision AI</title>
     <style>
         :root {
-            --ink: #14213d;
-            --muted: #64748b;
-            --line: #e2e8f0;
+            --ink: #202327;
+            --muted: #686d74;
+            --line: #e5e2d9;
             --surface: #ffffff;
-            --soft: #f6f9fc;
-            --brand: #0f6fff;
-            --brand-dark: #0b3d91;
-            --cyan: #00bcd4;
+            --soft: #faf7ee;
+            --cream: #faf7ee;
+            --cream-alt: #fffbef;
+            --brand: #ffcc32;
+            --brand-dark: #161a1d;
+            --brand-soft: #fff3bb;
             --success: #16a34a;
             --warning: #d97706;
             --danger: #dc2626;
-            --shadow: 0 18px 45px rgba(15, 35, 70, 0.08);
+            --shadow: 0 18px 45px rgba(22, 26, 29, 0.08);
         }
 
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: Inter, "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            font-family: "Outfit", "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
         }
 
         body {
             min-height: 100vh;
-            background: linear-gradient(180deg, #f7fbff 0%, #eef5fb 100%);
+            background: var(--cream);
             color: var(--ink);
             line-height: 1.55;
         }
@@ -44,9 +46,9 @@
             position: sticky;
             top: 0;
             z-index: 20;
-            background: rgba(255, 255, 255, 0.92);
-            border-bottom: 1px solid rgba(226, 232, 240, 0.9);
-            box-shadow: 0 8px 30px rgba(15, 35, 70, 0.06);
+            background: rgba(255, 255, 255, 0.94);
+            border-bottom: 1px solid var(--line);
+            box-shadow: 0 8px 30px rgba(22, 26, 29, 0.05);
             backdrop-filter: blur(14px);
         }
 
@@ -71,12 +73,12 @@
             width: 42px;
             height: 42px;
             border-radius: 8px;
-            background: linear-gradient(135deg, var(--brand), var(--cyan));
-            color: white;
+            background: var(--brand);
+            color: var(--brand-dark);
             display: grid;
             place-items: center;
             font-weight: 800;
-            box-shadow: 0 12px 24px rgba(15, 111, 255, 0.22);
+            box-shadow: 0 12px 24px rgba(239, 187, 31, 0.22);
         }
 
         h1 {
@@ -99,7 +101,7 @@
         }
 
         nav a {
-            color: #334155;
+            color: var(--ink);
             text-decoration: none;
             padding: 9px 12px;
             border-radius: 8px;
@@ -110,16 +112,16 @@
         }
 
         nav a:hover, nav a.active {
-            background: #eaf3ff;
+            background: var(--brand-soft);
             color: var(--brand-dark);
-            box-shadow: inset 0 0 0 1px rgba(15, 111, 255, 0.10);
+            box-shadow: inset 0 0 0 1px rgba(239, 187, 31, 0.35);
         }
 
         .main-content {
             display: none;
             padding: 24px;
             background-color: var(--surface);
-            border: 1px solid rgba(226, 232, 240, 0.92);
+            border: 1px solid var(--line);
             border-radius: 8px;
             box-shadow: var(--shadow);
             margin-top: 22px;
@@ -175,14 +177,14 @@
         }
 
         .btn-primary {
-            background: linear-gradient(135deg, var(--brand), #0aa9d6);
-            color: white;
-            box-shadow: 0 10px 20px rgba(15, 111, 255, 0.18);
+            background: var(--brand);
+            color: var(--brand-dark);
+            box-shadow: 0 10px 20px rgba(239, 187, 31, 0.20);
         }
 
         .btn-secondary {
-            background-color: #f8fafc;
-            color: #334155;
+            background-color: var(--cream-alt);
+            color: var(--ink);
             border-color: var(--line);
         }
 
@@ -205,24 +207,24 @@
             margin-bottom: 6px;
             font-size: 13px;
             font-weight: 700;
-            color: #334155;
+            color: var(--ink);
         }
 
         .form-control {
             width: 100%;
             min-height: 40px;
             padding: 10px 12px;
-            border: 1px solid #cbd5e1;
+            border: 1px solid var(--line);
             border-radius: 8px;
             background: white;
-            color: #0f172a;
+            color: var(--ink);
             font-size: 14px;
             transition: border-color 0.2s, box-shadow 0.2s;
         }
 
         .form-control:focus {
-            border-color: var(--brand);
-            box-shadow: 0 0 0 4px rgba(15, 111, 255, 0.10);
+            border-color: #efbb1f;
+            box-shadow: 0 0 0 4px rgba(255, 204, 50, 0.22);
             outline: none;
         }
 
@@ -332,7 +334,7 @@
         }
 
         tr:hover {
-            background-color: #f8fbff;
+            background-color: var(--cream-alt);
         }
 
         .person-photo, .person-photo-placeholder {
@@ -349,9 +351,9 @@
         }
 
         .person-photo-placeholder {
-            border: 1px dashed #94a3b8;
-            color: #64748b;
-            background-color: #f8fafc;
+            border: 1px dashed var(--line);
+            color: var(--muted);
+            background-color: var(--cream-alt);
             display: flex;
             align-items: center;
             justify-content: center;
@@ -427,7 +429,7 @@
         }
 
         .status-item {
-            background: linear-gradient(180deg, #ffffff, #f8fbff);
+            background: linear-gradient(180deg, #ffffff, var(--cream-alt));
             border: 1px solid var(--line);
             padding: 16px;
             border-radius: 8px;
@@ -459,6 +461,29 @@
             color: var(--danger) !important;
         }
 
+        .activation-panel {
+            margin-top: 22px;
+            padding: 18px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--cream-alt);
+        }
+
+        .activation-panel h3 {
+            margin-top: 0;
+        }
+
+        .activation-panel .btn {
+            width: 100%;
+        }
+
+        .activation-message {
+            margin-top: 12px;
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--muted);
+        }
+
         .alert-banner {
             display: none;
             margin-bottom: 20px;
@@ -472,7 +497,7 @@
         }
 
         #camera-form, #person-form-panel {
-            background: #f8fbff;
+            background: var(--cream-alt);
             border: 1px solid var(--line);
             border-radius: 8px;
             padding: 18px;
@@ -577,6 +602,19 @@
                     <h3>Machine Code</h3>
                     <p id="machine-code">Loading...</p>
                 </div>
+            </div>
+
+            <div class="activation-panel">
+                <h3>Cloud Activation</h3>
+                <form id="activation-form">
+                    <div class="form-group">
+                        <label for="activation-code">One-Time Activation Code</label>
+                        <input type="text" id="activation-code" class="form-control" autocomplete="one-time-code" placeholder="CE-XXXX-XXXX-XXXX" required>
+                        <small>Generate this code from Camera Eye Cloud → System Status → Setup New Device. Company and shop are assigned automatically.</small>
+                    </div>
+                    <button type="submit" class="btn btn-primary" id="activation-submit">Activate This PC</button>
+                    <div id="activation-message" class="activation-message"></div>
+                </form>
             </div>
         </div>
 
@@ -1089,6 +1127,44 @@
             });
         });
 
+        const activationForm = document.getElementById('activation-form');
+        if (activationForm) {
+            activationForm.addEventListener('submit', async (event) => {
+                event.preventDefault();
+                const submitButton = document.getElementById('activation-submit');
+                const message = document.getElementById('activation-message');
+                submitButton.disabled = true;
+                submitButton.textContent = 'Activating...';
+                message.textContent = 'Connecting this device to SnapKey Cloud.';
+                message.className = 'activation-message status-warning';
+                try {
+                    const response = await fetch(`${API_BASE}/activate`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            company_code: '',
+                            shop_code: '',
+                            activation_code: document.getElementById('activation-code').value.trim()
+                        })
+                    });
+                    const body = await response.json();
+                    if (!response.ok) {
+                        throw new Error(typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail || body));
+                    }
+                    message.textContent = `Activated: ${body.edge.edge_id}. Cloud sync is ready.`;
+                    message.className = 'activation-message status-ok';
+                    document.getElementById('activation-code').value = '';
+                    await loadSystemStatus();
+                } catch (error) {
+                    message.textContent = `Activation failed: ${error.message}`;
+                    message.className = 'activation-message status-error';
+                } finally {
+                    submitButton.disabled = false;
+                    submitButton.textContent = 'Activate This PC';
+                }
+            });
+        }
+
         // Load section data
         function loadSectionData(sectionId) {
             switch(sectionId) {
@@ -1420,7 +1496,7 @@
             const cameraData = {
                 camera_id: document.getElementById('camera-id').value.trim(),
                 name: document.getElementById('camera-name').value.trim(),
-                source_type: 'rtsp',
+                source_type: /^\d+$/.test(document.getElementById('rtsp-url').value.trim()) ? 'webcam' : 'rtsp',
                 rtsp_url: document.getElementById('rtsp-url').value.trim(),
                 enabled: true,
                 camera_role: document.getElementById('camera-role').value,
@@ -1477,8 +1553,12 @@
                     document.getElementById('camera-setup-form').reset();
                     loadCameras();
                 } else {
-                    const error = await response.json();
-                    alert('Error saving camera: ' + (error.detail || 'Unknown error'));
+                    const error = await response.json().catch(() => ({}));
+                    const detail = error.detail ?? error.message ?? 'Unknown error';
+                    const readableDetail = typeof detail === 'string'
+                        ? detail
+                        : (detail.message || JSON.stringify(detail, null, 2));
+                    alert('Error saving camera: ' + readableDetail);
                 }
             } catch (error) {
                 console.error('Error saving camera:', error);

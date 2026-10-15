@@ -11,7 +11,7 @@ Set-Location $ProjectRoot
 $BuildScript = Join-Path $ProjectRoot "packaging\windows\build_windows.ps1"
 $InstallerScript = Join-Path $ProjectRoot "packaging\windows\CameraAutomationInstaller.iss"
 $ExpectedAppExe = Join-Path $ProjectRoot "dist\SnapKeyVisionAI\SnapKeyVisionAI.exe"
-$ExpectedInstaller = Join-Path $ProjectRoot "dist\installer\SnapKeyVisionAISetup.exe"
+$ExpectedInstaller = Join-Path $ProjectRoot "dist\installer\MadhushalaCameraAISetup.exe"
 
 Write-Host "Building application package..."
 & $BuildScript -CleanBuild $CleanBuild
